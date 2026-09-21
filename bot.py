@@ -43,6 +43,9 @@ async def handle_message(
 
     if not message or not user or not chat:
         return
+            if message.text and message.text.strip().lower() == "*id":
+        await message.reply_text(f"🆔 Sizning Telegram ID: {user.id}")
+        return
     if message.text == "/start":
         await message.reply_text(
             "👋 Veritas botga xush kelibsiz!\n\n"
