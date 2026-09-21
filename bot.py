@@ -120,7 +120,7 @@ async def handle_message(
         return
 
     # "men" — shaxsiy statistika
-    if  if command == "*men":
+        if command == "*men":
         cursor.execute(
             """
             SELECT messages
