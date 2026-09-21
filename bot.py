@@ -1,16 +1,13 @@
 import os
 import sqlite3
+
 from telegram import Update
-from telegram.ext import (
-    Application,
-    ContextTypes,
-    MessageHandler,
-    filters,
-)
+from telegram.ext import Application, ContextTypes, MessageHandler, filters
+
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 OWNER_ID = 5859289233
-# Ma'lumotlar bazasi
+
 db = sqlite3.connect("veritas.db", check_same_thread=False)
 cursor = db.cursor()
 
@@ -24,13 +21,22 @@ CREATE TABLE IF NOT EXISTS activity (
     PRIMARY KEY (chat_id, user_id)
 )
 """)
-db.commit()
+
 cursor.execute("""
 CREATE TABLE IF NOT EXISTS allowed_users (
     user_id INTEGER PRIMARY KEY
 )
 """)
+
 db.commit()
+
+
+def get_name(user):
+    if user.username:
+        return f"@{user.username}"
+    return user.full_name
+
+
 def is_allowed(user_id):
     if user_id == OWNER_ID:
         return True
@@ -40,10 +46,6 @@ def is_allowed(user_id):
         (user_id,)
     )
     return cursor.fetchone() is not None
-def get_name(user):
-    if user.username:
-        return f"@{user.username}"
-    return user.full_name
 
 
 async def handle_message(
@@ -56,33 +58,72 @@ async def handle_message(
 
     if not message or not user or not chat:
         return
+
     text = (message.text or "").strip()
     command = text.lower()
 
-    if command.startswith("*") and not is_allowed(user.id):
-        return
-    if message.text and message.text.strip().lower() == "*id":
-        await message.reply_text(f"🆔 Sizning Telegram ID: {user.id}")
-        return
-    if message.text == "/start":
+    # /start
+    if command == "/start":
         await message.reply_text(
             "👋 Veritas botga xush kelibsiz!\n\n"
             "📊 Guruh faolligini kuzatish tizimi ishga tushgan."
         )
         return
-    # Faqat guruh va superguruhlar
+
+    # *id
+    if command == "*id":
+        await message.reply_text(
+            f"🆔 Sizning Telegram ID: {user.id}"
+        )
+        return
+
+    # * bilan boshlanadigan maxsus buyruqlar
+    # faqat egasi yoki ruxsat berilgan odamlar uchun
+    if command.startswith("*") and not is_allowed(user.id):
+        return
+
+    # *ruxsat
+    if command == "*ruxsat":
+        if user.id != OWNER_ID:
+            return
+
+        if not message.reply_to_message:
+            await message.reply_text(
+                "⚠️ Ruxsat bermoqchi bo‘lgan odamning "
+                "xabariga reply qilib *ruxsat yozing."
+            )
+            return
+
+        target = message.reply_to_message.from_user
+
+        if not target:
+            await message.reply_text(
+                "⚠️ Foydalanuvchini aniqlab bo‘lmadi."
+            )
+            return
+
+        cursor.execute(
+            "INSERT OR IGNORE INTO allowed_users (user_id) VALUES (?)",
+            (target.id,)
+        )
+        db.commit()
+
+        await message.reply_text(
+            f"✅ {get_name(target)} ga buyruqlardan "
+            "foydalanish huquqi berildi."
+        )
+        return
+
+    # Quyidagi funksiyalar faqat guruhda ishlaydi
     if chat.type not in ("group", "supergroup"):
         return
 
-    # Botlarning xabarlarini hisoblamaymiz
     if user.is_bot:
         return
 
-
-    # "aktiv", "aktiv 10", "aktiv 20" va hokazo
+    # *aktiv yoki *aktiv 10
     if command == "*aktiv" or command.startswith("*aktiv "):
         parts = command.split()
-
         limit = 50
 
         if len(parts) == 2 and parts[1].isdigit():
@@ -104,12 +145,11 @@ async def handle_message(
 
         if not rows:
             await message.reply_text(
-                "📊 Hali faollik ma'lumotlari yo‘q."
+                "📊 Hali faollik ma’lumotlari yo‘q."
             )
             return
 
-        result = f"🏆 TOP {len(rows)} FAOL A'ZO\n\n"
-
+        result = f"🏆 TOP {len(rows)} FAOL A’ZO\n\n"
         medals = ["🥇", "🥈", "🥉"]
 
         for i, (name, count) in enumerate(rows, start=1):
@@ -119,8 +159,8 @@ async def handle_message(
         await message.reply_text(result)
         return
 
-    # "men" — shaxsiy statistika
-        if command == "*men":
+    # *men
+    if command == "*men":
         cursor.execute(
             """
             SELECT messages
@@ -151,36 +191,13 @@ async def handle_message(
             f"🏆 Reytingdagi o‘rningiz: {rank}"
         )
         return
-        # Foydalanuvchiga buyruq berish huquqini berish
-    if command == "*ruxsat":
-        if user.id != OWNER_ID:
-            return
 
-        if not message.reply_to_message:
-            await message.reply_text(
-                "⚠️ Ruxsat bermoqchi bo‘lgan odamning xabariga Reply qilib *ruxsat yozing."
-            )
-            return
-
-        target = message.reply_to_message.from_user
-
-        cursor.execute(
-            "INSERT OR IGNORE INTO allowed_users (user_id) VALUES (?)",
-            (target.id,)
-        )
-        db.commit()
-
-        await message.reply_text(
-            f"✅ {get_name(target)} ga buyruqlardan foydalanish ruxsati berildi."
-        )
-        return
     # Oddiy xabarni faollikka qo‘shish
     cursor.execute(
         """
         INSERT INTO activity
-        (chat_id, user_id, name, username, messages)
+            (chat_id, user_id, name, username, messages)
         VALUES (?, ?, ?, ?, 1)
-
         ON CONFLICT(chat_id, user_id)
         DO UPDATE SET
             name = excluded.name,
@@ -191,7 +208,7 @@ async def handle_message(
             chat.id,
             user.id,
             get_name(user),
-            user.username
+            user.username or ""
         )
     )
 
@@ -205,7 +222,10 @@ def main():
     app = Application.builder().token(BOT_TOKEN).build()
 
     app.add_handler(
-        MessageHandler(filters.ALL, handle_message)
+        MessageHandler(
+            filters.ALL,
+            handle_message
+        )
     )
 
     print("Veritas ishga tushdi.")
