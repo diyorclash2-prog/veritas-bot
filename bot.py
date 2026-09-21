@@ -9,7 +9,7 @@ from telegram.ext import (
 )
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
-
+OWNER_ID = 5859289233
 # Ma'lumotlar bazasi
 db = sqlite3.connect("veritas.db", check_same_thread=False)
 cursor = db.cursor()
@@ -25,8 +25,21 @@ CREATE TABLE IF NOT EXISTS activity (
 )
 """)
 db.commit()
+cursor.execute("""
+CREATE TABLE IF NOT EXISTS allowed_users (
+    user_id INTEGER PRIMARY KEY
+)
+""")
+db.commit()
+def is_allowed(user_id):
+    if user_id == OWNER_ID:
+        return True
 
-
+    cursor.execute(
+        "SELECT user_id FROM allowed_users WHERE user_id = ?",
+        (user_id,)
+    )
+    return cursor.fetchone() is not None
 def get_name(user):
     if user.username:
         return f"@{user.username}"
@@ -42,6 +55,11 @@ async def handle_message(
     chat = update.effective_chat
 
     if not message or not user or not chat:
+        return
+    text = (message.text or "").strip()
+    command = text.lower()
+
+    if command.startswith("*") and not is_allowed(user.id):
         return
             if message.text and message.text.strip().lower() == "*id":
         await message.reply_text(f"🆔 Sizning Telegram ID: {user.id}")
@@ -60,11 +78,9 @@ async def handle_message(
     if user.is_bot:
         return
 
-    text = (message.text or "").strip()
-    command = text.lower()
 
     # "aktiv", "aktiv 10", "aktiv 20" va hokazo
-    if command == "aktiv" or command.startswith("aktiv "):
+    if command == "*aktiv" or command.startswith("*aktiv "):
         parts = command.split()
 
         limit = 50
@@ -104,7 +120,7 @@ async def handle_message(
         return
 
     # "men" — shaxsiy statistika
-    if command == "men":
+    if  if command == "*men":
         cursor.execute(
             """
             SELECT messages
@@ -135,7 +151,29 @@ async def handle_message(
             f"🏆 Reytingdagi o‘rningiz: {rank}"
         )
         return
+        # Foydalanuvchiga buyruq berish huquqini berish
+    if command == "*ruxsat":
+        if user.id != OWNER_ID:
+            return
 
+        if not message.reply_to_message:
+            await message.reply_text(
+                "⚠️ Ruxsat bermoqchi bo‘lgan odamning xabariga Reply qilib *ruxsat yozing."
+            )
+            return
+
+        target = message.reply_to_message.from_user
+
+        cursor.execute(
+            "INSERT OR IGNORE INTO allowed_users (user_id) VALUES (?)",
+            (target.id,)
+        )
+        db.commit()
+
+        await message.reply_text(
+            f"✅ {get_name(target)} ga buyruqlardan foydalanish ruxsati berildi."
+        )
+        return
     # Oddiy xabarni faollikka qo‘shish
     cursor.execute(
         """
