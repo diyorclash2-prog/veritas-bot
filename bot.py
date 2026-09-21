@@ -1,11 +1,14 @@
 import os
 import sqlite3
 
-from telegram import Update
+from telegram import Update, 
+InlineKeyboardButton, 
+InlineKeyboardMarkup
 from telegram.ext import (
     Application,
     ContextTypes,
     MessageHandler,
+    CallbackQueryHandler,
     filters,
 )
 
@@ -513,7 +516,20 @@ async def handle_message(
 # =========================
 # BOTNI ISHGA TUSHIRISH
 # =========================
+async def welcome_new_member(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    message = update.effective_message
 
+    if not message or not message.new_chat_members:
+        return
+
+    for member in message.new_chat_members:
+        if member.is_bot:
+            continue
+
+        await message.reply_text(
+            f"👋 Xush kelibsiz, {member.full_name}!\n\n"
+            "My Book guruhiga xush kelibsiz."
+        )
 def main():
 
     if not BOT_TOKEN:
@@ -527,7 +543,12 @@ def main():
         .token(BOT_TOKEN)
         .build()
     )
-
+app.add_handler(
+    MessageHandler(
+        filters.StatusUpdate.NEW_CHAT_MEMBERS,
+        welcome_new_member
+    )
+)
     app.add_handler(
         MessageHandler(
             filters.ALL,
