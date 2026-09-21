@@ -43,7 +43,12 @@ async def handle_message(
 
     if not message or not user or not chat:
         return
-
+    if message.text == "/start":
+        await message.reply_text(
+            "👋 Veritas botga xush kelibsiz!\n\n"
+            "📊 Guruh faolligini kuzatish tizimi ishga tushgan."
+        )
+        return
     # Faqat guruh va superguruhlar
     if chat.type not in ("group", "supergroup"):
         return
