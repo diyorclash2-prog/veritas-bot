@@ -545,12 +545,12 @@ def main():
         .token(BOT_TOKEN)
         .build()
     )
-app.add_handler(
-    MessageHandler(
-        filters.StatusUpdate.NEW_CHAT_MEMBERS,
-        welcome_new_member
-    )
-)
+    app.add_handler(
+        MessageHandler(
+            filters.StatusUpdate.NEW_CHAT_MEMBERS,
+            welcome_new_member
+        )
+            )
     app.add_handler(
         MessageHandler(
             filters.ALL,
