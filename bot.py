@@ -1,9 +1,11 @@
 import os
 import sqlite3
 
-from telegram import Update, 
+from telegram import (
+Update, 
 InlineKeyboardButton, 
-InlineKeyboardMarkup
+InlineKeyboardMarkup,
+)
 from telegram.ext import (
     Application,
     ContextTypes,
