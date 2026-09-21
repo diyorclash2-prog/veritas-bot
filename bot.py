@@ -61,7 +61,7 @@ async def handle_message(
 
     if command.startswith("*") and not is_allowed(user.id):
         return
-            if message.text and message.text.strip().lower() == "*id":
+    if message.text and message.text.strip().lower() == "*id":
         await message.reply_text(f"🆔 Sizning Telegram ID: {user.id}")
         return
     if message.text == "/start":
