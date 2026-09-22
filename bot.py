@@ -2,17 +2,18 @@ import os
 import re
 import sqlite3
 
-from telegram import Update, ChatPermissions
+from telegram import Update, ChatPermissions, LabeledPrice
 from telegram.ext import (
     Application,
     ContextTypes,
     MessageHandler,
+    PreCheckoutQueryHandler,
     filters,
 )
 
-# ==================================================
-# ASOSIY SOZLAMALAR
-# ==================================================
+# =========================================================
+# VERITAS BOT
+# =========================================================
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 
@@ -20,9 +21,9 @@ BOT_TOKEN = os.getenv("BOT_TOKEN")
 OWNER_ID = 5859289233
 
 
-# ==================================================
+# =========================================================
 # DATABASE
-# ==================================================
+# =========================================================
 
 db = sqlite3.connect(
     "veritas.db",
@@ -32,7 +33,10 @@ db = sqlite3.connect(
 cursor = db.cursor()
 
 
-# Faollik
+# ---------------------------------------------------------
+# FAOLLIK
+# ---------------------------------------------------------
+
 cursor.execute("""
 CREATE TABLE IF NOT EXISTS activity (
     chat_id INTEGER,
@@ -45,7 +49,10 @@ CREATE TABLE IF NOT EXISTS activity (
 """)
 
 
-# Filterlar
+# ---------------------------------------------------------
+# FILTERLAR
+# ---------------------------------------------------------
+
 cursor.execute("""
 CREATE TABLE IF NOT EXISTS chat_filters (
     chat_id INTEGER,
@@ -59,7 +66,7 @@ CREATE TABLE IF NOT EXISTS chat_filters (
 """)
 
 
-# Eski database bilan moslik
+# Eski bazaga yangi ustunlarni qo‘shish
 for column, definition in [
     ("media_type", "TEXT DEFAULT 'text'"),
     ("file_id", "TEXT DEFAULT ''"),
@@ -67,16 +74,17 @@ for column, definition in [
 ]:
     try:
         cursor.execute(
-            f"""
-            ALTER TABLE chat_filters
-            ADD COLUMN {column} {definition}
-            """
+            f"ALTER TABLE chat_filters "
+            f"ADD COLUMN {column} {definition}"
         )
     except sqlite3.OperationalError:
         pass
 
 
-# Warnlar
+# ---------------------------------------------------------
+# OGOHLANTIRISHLAR
+# ---------------------------------------------------------
+
 cursor.execute("""
 CREATE TABLE IF NOT EXISTS warnings (
     chat_id INTEGER,
@@ -87,7 +95,10 @@ CREATE TABLE IF NOT EXISTS warnings (
 """)
 
 
-# Blacklist
+# ---------------------------------------------------------
+# QORA RO‘YXAT
+# ---------------------------------------------------------
+
 cursor.execute("""
 CREATE TABLE IF NOT EXISTS blacklist (
     chat_id INTEGER,
@@ -97,7 +108,10 @@ CREATE TABLE IF NOT EXISTS blacklist (
 """)
 
 
-# Guruh sozlamalari
+# ---------------------------------------------------------
+# GURUH SOZLAMALARI
+# ---------------------------------------------------------
+
 cursor.execute("""
 CREATE TABLE IF NOT EXISTS settings (
     chat_id INTEGER PRIMARY KEY,
@@ -109,7 +123,10 @@ CREATE TABLE IF NOT EXISTS settings (
 """)
 
 
-# Notes
+# ---------------------------------------------------------
+# ESLATMALAR / NOTES
+# ---------------------------------------------------------
+
 cursor.execute("""
 CREATE TABLE IF NOT EXISTS notes (
     chat_id INTEGER,
@@ -120,7 +137,10 @@ CREATE TABLE IF NOT EXISTS notes (
 """)
 
 
-# Veritas ichki adminlari
+# ---------------------------------------------------------
+# VERITAS ICHKI ADMINLARI
+# ---------------------------------------------------------
+
 cursor.execute("""
 CREATE TABLE IF NOT EXISTS allowed_users (
     user_id INTEGER PRIMARY KEY
@@ -131,15 +151,21 @@ CREATE TABLE IF NOT EXISTS allowed_users (
 db.commit()
 
 
-# ==================================================
+# =========================================================
 # YORDAMCHI FUNKSIYALAR
-# ==================================================
+# =========================================================
 
 def get_name(user):
+    if not user:
+        return "Noma’lum"
+
+    if user.full_name:
+        return user.full_name
+
     if user.username:
         return f"@{user.username}"
 
-    return user.full_name
+    return str(user.id)
 
 
 def ensure_settings(chat_id):
@@ -150,15 +176,18 @@ def ensure_settings(chat_id):
         """,
         (chat_id,)
     )
-
     db.commit()
 
 
 def reply_target(message):
-    if not message.reply_to_message:
-        return None
+    if (
+        message
+        and message.reply_to_message
+        and message.reply_to_message.from_user
+    ):
+        return message.reply_to_message.from_user
 
-    return message.reply_to_message.from_user
+    return None
 
 
 def contains_link(text):
@@ -166,7 +195,10 @@ def contains_link(text):
         return False
 
     pattern = (
-        r"(https?://|www\.|t\.me/|telegram\.me/)"
+        r"(https?://\S+|"
+        r"www\.\S+|"
+        r"t\.me/\S+|"
+        r"telegram\.me/\S+)"
     )
 
     return bool(
@@ -196,9 +228,6 @@ async def is_telegram_admin(
     user_id,
     context
 ):
-    if user_id == OWNER_ID:
-        return True
-
     try:
         member = await context.bot.get_chat_member(
             chat.id,
@@ -208,7 +237,7 @@ async def is_telegram_admin(
         return member.status in (
             "administrator",
             "creator",
-            "owner"
+            "owner",
         )
 
     except Exception:
@@ -235,12 +264,11 @@ async def is_admin(
 
 async def admin_required(
     message,
-    chat,
     user,
     context
 ):
     if await is_admin(
-        chat,
+        message.chat,
         user.id,
         context
     ):
@@ -255,185 +283,32 @@ async def admin_required(
 
 async def telegram_admin_required(
     message,
-    chat,
     user,
     context
 ):
+    if user.id == OWNER_ID:
+        return True
+
     if await is_telegram_admin(
-        chat,
+        message.chat,
         user.id,
         context
     ):
         return True
 
     await message.reply_text(
-        "⛔ Bu buyruq uchun Telegram "
-        "guruh admini bo‘lish kerak."
+        "⛔ Bu buyruq uchun Telegram admin "
+        "huquqi kerak."
     )
 
     return False
 
 
-# ==================================================
-# HELP
-# ==================================================
-
-HELP_TEXT = """
-🛡 VERITAS BUYRUQLARI
-
-👤 UMUMIY
-*help — barcha buyruqlar
-*id — Telegram ID
-*men — shaxsiy statistika
-*aktiv — faol a’zolar
-*aktiv 10 — TOP 10
-*rules — guruh qoidalari
-*warns — warnlarni ko‘rish
-
-🛡 MODERATSIYA
-*warn — warn berish
-*unwarn — bitta warn olish
-*clearwarns — warnlarni tozalash
-*mute — mute
-*unmute — unmute
-*kick — guruhdan chiqarish
-*ban — ban
-*unban — reply orqali unban
-*unban ID — ID orqali unban
-*del — xabarni o‘chirish
-
-👮 GURUH ADMINI
-*admin — reply orqali admin berish
-*unadmin — adminlikdan olish
-
-🔐 VERITAS ADMINI
-*ruxsat — Veritas ruxsati berish
-*ruxsatsiz — Veritas ruxsatini olish
-
-🎁 GIFT
-*give 25
-*give 50
-*give 100
-Gift buyruqlarini faqat bot egasi ishlata oladi.
-
-🔗 HIMOYA
-*links on
-*links off
-*blacklist so‘z
-*unblacklist so‘z
-*blacklists
-
-💬 FILTER
-*filter kalit javob
-*filter kalit — mediaga reply
-*filters
-*stop kalit
-*stopall
-
-📝 NOTES
-*save nom matn
-*get nom
-*notes
-*clear nom
-
-⚙️ SOZLAMALAR
-*welcome on
-*welcome off
-*goodbye on
-*goodbye off
-*setrules matn
-*admins
-""".strip()
-
-
-# ==================================================
-# WELCOME
-# ==================================================
-
-async def welcome_new_member(
-    update: Update,
-    context: ContextTypes.DEFAULT_TYPE
-):
-    message = update.effective_message
-    chat = update.effective_chat
-
-    if not message or not chat:
-        return
-
-    ensure_settings(chat.id)
-
-    cursor.execute(
-        """
-        SELECT welcome
-        FROM settings
-        WHERE chat_id = ?
-        """,
-        (chat.id,)
-    )
-
-    row = cursor.fetchone()
-
-    if not row or row[0] == 0:
-        return
-
-    for member in message.new_chat_members:
-
-        if member.is_bot:
-            continue
-
-        await message.reply_text(
-            f"👋 Xush kelibsiz, "
-            f"{member.full_name}!\n\n"
-            f"📚 {chat.title} guruhiga "
-            "xush kelibsiz."
-        )
-
-
-# ==================================================
-# GOODBYE
-# ==================================================
-
-async def goodbye_member(
-    update: Update,
-    context: ContextTypes.DEFAULT_TYPE
-):
-    message = update.effective_message
-    chat = update.effective_chat
-
-    if not message or not chat:
-        return
-
-    member = message.left_chat_member
-
-    if not member or member.is_bot:
-        return
-
-    ensure_settings(chat.id)
-
-    cursor.execute(
-        """
-        SELECT goodbye
-        FROM settings
-        WHERE chat_id = ?
-        """,
-        (chat.id,)
-    )
-
-    row = cursor.fetchone()
-
-    if row and row[0]:
-        await message.reply_text(
-            f"👋 {member.full_name} "
-            "guruhni tark etdi."
-        )
-
-
-# ==================================================
-# MEDIA FILTER YORDAMCHISI
-# ==================================================
+# =========================================================
+# MEDIA ANIQLASH
+# =========================================================
 
 def media_from_message(message):
-
     if message.sticker:
         return (
             "sticker",
@@ -483,64 +358,339 @@ def media_from_message(message):
             message.caption or ""
         )
 
-    return None, None, None
+    return (
+        "text",
+        "",
+        ""
+    )
 
 
 async def send_saved_filter(
     message,
+    context,
     media_type,
     file_id,
     response,
     caption
 ):
-
-    if media_type == "text":
-        await message.reply_text(
-            response
-        )
-
-    elif media_type == "sticker":
-        await message.reply_sticker(
-            file_id
+    if media_type == "sticker":
+        await context.bot.send_sticker(
+            chat_id=message.chat.id,
+            sticker=file_id
         )
 
     elif media_type == "photo":
-        await message.reply_photo(
+        await context.bot.send_photo(
+            chat_id=message.chat.id,
             photo=file_id,
-            caption=caption or None
+            caption=caption or response or None
         )
 
     elif media_type == "video":
-        await message.reply_video(
+        await context.bot.send_video(
+            chat_id=message.chat.id,
             video=file_id,
-            caption=caption or None
+            caption=caption or response or None
         )
 
     elif media_type == "animation":
-        await message.reply_animation(
+        await context.bot.send_animation(
+            chat_id=message.chat.id,
             animation=file_id,
-            caption=caption or None
+            caption=caption or response or None
         )
 
     elif media_type == "audio":
-        await message.reply_audio(
+        await context.bot.send_audio(
+            chat_id=message.chat.id,
             audio=file_id,
-            caption=caption or None
+            caption=caption or response or None
         )
 
     elif media_type == "voice":
-        await message.reply_voice(
+        await context.bot.send_voice(
+            chat_id=message.chat.id,
             voice=file_id
         )
 
     elif media_type == "document":
-        await message.reply_document(
+        await context.bot.send_document(
+            chat_id=message.chat.id,
             document=file_id,
-            caption=caption or None
-)
-        # ==================================================
-# GIFT YORDAMCHILARI
-# ==================================================
+            caption=caption or response or None
+        )
+
+    else:
+        await message.reply_text(
+            response
+        )
+
+
+# =========================================================
+# HELP
+# =========================================================
+
+HELP_TEXT = """
+🤖 VERITAS BOT
+
+⭐ ASOSIY
+*help
+*id
+*men
+*aktiv
+*aktiv 10
+*rules
+*warns
+
+🛡 MODERATSIYA
+*warn
+*unwarn
+*clearwarns
+*mute
+*unmute
+*kick
+*ban
+*unban
+*del
+
+🔗 HIMOYA
+*links on
+*links off
+*blacklist so‘z
+*unblacklist so‘z
+*blacklists
+
+🎛 FILTER
+*filter kalit javob
+*filters
+*stop kalit
+*stopall
+
+📝 NOTES
+*save nom matn
+*get nom
+*notes
+*clear nom
+
+⚙️ SOZLAMALAR
+*welcome on
+*welcome off
+*goodbye on
+*goodbye off
+*setrules matn
+*admins
+
+👑 ADMIN
+*ruxsat
+*ruxsatsiz
+*admin
+*unadmin
+
+🎁 VERITAS GIFT
+*give 25
+*give 50
+*give 100
+
+⭐ BOT BALANSI
+*topup 100
+*topup 500
+*topup 1000
+"""
+# =========================================================
+# WELCOME / GOODBYE
+# =========================================================
+
+async def welcome_new_member(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE
+):
+    message = update.effective_message
+    chat = update.effective_chat
+
+    if not message or not chat:
+        return
+
+    ensure_settings(chat.id)
+
+    cursor.execute(
+        """
+        SELECT welcome
+        FROM settings
+        WHERE chat_id = ?
+        """,
+        (chat.id,)
+    )
+
+    row = cursor.fetchone()
+
+    if not row or not row[0]:
+        return
+
+    for member in message.new_chat_members:
+        if member.id == context.bot.id:
+            continue
+
+        await message.reply_text(
+            f"👋 Xush kelibsiz, {get_name(member)}!"
+        )
+
+
+async def goodbye_member(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE
+):
+    message = update.effective_message
+    chat = update.effective_chat
+
+    if not message or not chat:
+        return
+
+    member = message.left_chat_member
+
+    if not member:
+        return
+
+    ensure_settings(chat.id)
+
+    cursor.execute(
+        """
+        SELECT goodbye
+        FROM settings
+        WHERE chat_id = ?
+        """,
+        (chat.id,)
+    )
+
+    row = cursor.fetchone()
+
+    if not row or not row[0]:
+        return
+
+    await message.reply_text(
+        f"👋 {get_name(member)} guruhni tark etdi."
+    )
+
+
+# =========================================================
+# TELEGRAM STARS — TOPUP
+# =========================================================
+
+async def topup_stars(
+    message,
+    user,
+    context,
+    amount
+):
+    if user.id != OWNER_ID:
+        await message.reply_text(
+            "⛔ Bu buyruq faqat Veritas egasi uchun."
+        )
+        return
+
+    if amount < 1:
+        await message.reply_text(
+            "⚠️ Stars miqdori noto‘g‘ri."
+        )
+        return
+
+    try:
+        await context.bot.send_invoice(
+            chat_id=user.id,
+            title="Veritas Stars balansi",
+            description=(
+                f"VeritasBot balansiga "
+                f"{amount} ⭐ Stars"
+            ),
+            payload=f"veritas_topup_{amount}",
+            currency="XTR",
+            prices=[
+                LabeledPrice(
+                    label="Veritas Stars",
+                    amount=amount
+                )
+            ],
+            provider_token=""
+        )
+
+        # Guruhdan buyruq berilsa invoice shaxsiy chatga boradi.
+        if message.chat.id != user.id:
+            await message.reply_text(
+                "⭐ To‘lov oynasi bot bilan "
+                "shaxsiy chatga yuborildi."
+            )
+
+    except Exception as error:
+        print(
+            "TOPUP ERROR:",
+            repr(error)
+        )
+
+        await message.reply_text(
+            "❌ Stars to‘lovini ochib bo‘lmadi.\n"
+            "Avval botga shaxsiy chatda /start bosing "
+            "va qayta urinib ko‘ring."
+        )
+
+
+# =========================================================
+# PRE-CHECKOUT
+# =========================================================
+
+async def precheckout_callback(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE
+):
+    query = update.pre_checkout_query
+
+    if not query:
+        return
+
+    if not query.invoice_payload.startswith(
+        "veritas_topup_"
+    ):
+        await query.answer(
+            ok=False,
+            error_message="Noto‘g‘ri Veritas to‘lovi."
+        )
+        return
+
+    await query.answer(ok=True)
+
+
+# =========================================================
+# MUVAFFAQIYATLI STARS TO‘LOVI
+# =========================================================
+
+async def successful_payment(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE
+):
+    message = update.effective_message
+
+    if not message:
+        return
+
+    payment = message.successful_payment
+
+    if not payment:
+        return
+
+    if not payment.invoice_payload.startswith(
+        "veritas_topup_"
+    ):
+        return
+
+    amount = payment.total_amount
+
+    await message.reply_text(
+        "✅ Veritas Stars to‘lovi qabul qilindi!\n"
+        f"⭐ {amount} Stars bot balansiga tushdi."
+    )
+
+
+# =========================================================
+# TELEGRAM GIFT
+# =========================================================
 
 async def give_gift(
     message,
@@ -548,32 +698,30 @@ async def give_gift(
     context,
     amount
 ):
-    # Faqat bot egasi
     if user.id != OWNER_ID:
         await message.reply_text(
-            "⛔ Bu buyruq faqat bot egasi uchun."
+            "⛔ Bu buyruq faqat Veritas egasi uchun."
         )
         return
 
-    # Foydalanuvchi xabariga reply shart
     target = reply_target(message)
 
     if not target:
         await message.reply_text(
-            f"🎁 {amount} Starslik Gift berish uchun "
-            "foydalanuvchining xabariga reply qilib:\n\n"
-            f"*give {amount}"
+            "🎁 Gift bermoqchi bo‘lgan odamning "
+            "xabariga reply qiling.\n\n"
+            "Masalan:\n"
+            "*give 25"
         )
         return
 
     if target.is_bot:
         await message.reply_text(
-            "⛔ Botga Gift berilmaydi."
+            "⚠️ Botga Gift berib bo‘lmaydi."
         )
         return
 
     try:
-        # Telegramdagi hozir mavjud Giftlarni olamiz
         gifts = await context.bot.get_available_gifts()
 
         selected_gift = None
@@ -590,25 +738,21 @@ async def give_gift(
             )
             return
 
-        # Giftni reply qilingan foydalanuvchiga yuboramiz
         await context.bot.send_gift(
             user_id=target.id,
             gift_id=selected_gift.id,
-            text=(
-                "🎁 Veritas tomonidan sovg‘a!"
-            )
+            text="🎁 Veritas tomonidan sovg‘a!"
         )
 
         await message.reply_text(
             f"🎁 {get_name(target)} ga "
-            f"{amount} Starslik Gift yuborildi."
+            f"{amount} Starslik Gift yuborildi!"
         )
 
     except AttributeError:
         await message.reply_text(
-            "⚠️ Serverdagi python-telegram-bot "
-            "versiyasi Gift funksiyasini "
-            "qo‘llamayapti."
+            "❌ Bot kutubxonasi Telegram Gifts "
+            "funksiyasini qo‘llamayapti."
         )
 
     except Exception as error:
@@ -617,16 +761,26 @@ async def give_gift(
             repr(error)
         )
 
-        await message.reply_text(
-            "⚠️ Gift yuborilmadi.\n"
-            "Bot balansini va Telegramdagi "
-            "mavjud Giftlarni tekshiring."
-        )
+        error_text = str(error).lower()
 
-
-# ==================================================
+        if (
+            "balance_too_low" in error_text
+            or "balance too low" in error_text
+        ):
+            await message.reply_text(
+                "⭐ VeritasBot Stars balansida "
+                "mablag‘ yetarli emas.\n"
+                "Avval *topup miqdor orqali "
+                "balansni to‘ldiring."
+            )
+        else:
+            await message.reply_text(
+                "❌ Gift yuborilmadi. "
+                "Telegram Gift mavjudligi yoki "
+                "bot balansini tekshiring."
+                # =========================================================
 # ASOSIY MESSAGE HANDLER
-# ==================================================
+# =========================================================
 
 async def handle_message(
     update: Update,
@@ -639,132 +793,173 @@ async def handle_message(
     if not message or not user or not chat:
         return
 
-    if user.is_bot:
-        return
-
     text = (
         message.text
         or message.caption
         or ""
     ).strip()
 
-    command = text.lower()
+    lower = text.lower()
 
-
-    # ==================================================
+    # =====================================================
     # PRIVATE CHAT
-    # ==================================================
+    # =====================================================
 
     if chat.type == "private":
-
-        if command in (
+        if lower in (
             "/start",
             "/help",
             "*start",
-            "*help"
+            "*help",
         ):
             await message.reply_text(
                 HELP_TEXT
             )
             return
 
-        if command == "*id":
+        if lower == "*id":
             await message.reply_text(
-                f"🆔 Telegram ID: {user.id}"
+                f"🆔 Sizning ID: {user.id}"
+            )
+            return
+
+        # TOPUP private chatda ham ishlaydi
+        if lower.startswith("*topup"):
+            parts = text.split()
+
+            if len(parts) != 2:
+                await message.reply_text(
+                    "⭐ Foydalanish:\n"
+                    "*topup 100"
+                )
+                return
+
+            try:
+                amount = int(parts[1])
+            except ValueError:
+                await message.reply_text(
+                    "⚠️ Stars miqdorini raqam bilan yozing.\n"
+                    "Masalan: *topup 100"
+                )
+                return
+
+            await topup_stars(
+                message,
+                user,
+                context,
+                amount
             )
             return
 
         await message.reply_text(
-            "🛡 VERITAS\n\n"
-            "Barcha buyruqlarni ko‘rish uchun:\n"
-            "*help"
+            "🤖 VeritasBot\n"
+            "Buyruqlar uchun *help yozing."
         )
-
         return
 
+    # =====================================================
+    # FAQAT GURUH / SUPERGROUP
+    # =====================================================
 
-    # Faqat guruh va superguruh
     if chat.type not in (
         "group",
-        "supergroup"
+        "supergroup",
     ):
         return
 
     ensure_settings(chat.id)
 
-
-    # ==================================================
+    # =====================================================
     # HELP
-    # ==================================================
+    # =====================================================
 
-    if command in (
+    if lower in (
         "*help",
-        "*start"
+        "*start",
     ):
         await message.reply_text(
             HELP_TEXT
         )
         return
 
-
-    # ==================================================
+    # =====================================================
     # ID
-    # ==================================================
+    # =====================================================
 
-    if command == "*id":
-
-        target = reply_target(
-            message
-        )
+    if lower == "*id":
+        target = reply_target(message)
 
         if target:
             await message.reply_text(
                 f"👤 {get_name(target)}\n"
                 f"🆔 ID: {target.id}"
             )
-
         else:
             await message.reply_text(
-                f"👤 {get_name(user)}\n"
-                f"🆔 ID: {user.id}"
+                f"🆔 Sizning ID: {user.id}\n"
+                f"💬 Chat ID: {chat.id}"
             )
 
         return
 
+    # =====================================================
+    # TOPUP
+    # =====================================================
 
-    # ==================================================
-    # GIVE GIFT
-    # ==================================================
+    if lower.startswith("*topup"):
+        parts = text.split()
 
-    if command.startswith("*give"):
+        if len(parts) != 2:
+            await message.reply_text(
+                "⭐ Foydalanish:\n"
+                "*topup 100"
+            )
+            return
 
-        parts = command.split()
+        try:
+            amount = int(parts[1])
+        except ValueError:
+            await message.reply_text(
+                "⚠️ Stars miqdorini raqam bilan yozing."
+            )
+            return
+
+        await topup_stars(
+            message,
+            user,
+            context,
+            amount
+        )
+        return
+
+    # =====================================================
+    # GIFT
+    # =====================================================
+
+    if lower.startswith("*give"):
+        parts = text.split()
 
         if len(parts) != 2:
             await message.reply_text(
                 "🎁 Foydalanish:\n"
                 "*give 25\n"
                 "*give 50\n"
-                "*give 100\n\n"
-                "Foydalanuvchi xabariga reply qiling."
+                "*give 100"
             )
             return
 
         try:
-            amount = int(
-                parts[1]
-            )
-
+            amount = int(parts[1])
         except ValueError:
             await message.reply_text(
-                "⚠️ Gift qiymatini raqam bilan yozing."
+                "⚠️ Gift miqdorini raqam bilan yozing."
             )
             return
 
         if amount not in (
             25,
             50,
-            100
+            100,
         ):
             await message.reply_text(
                 "⚠️ Hozir ruxsat etilgan Giftlar:\n"
@@ -780,37 +975,30 @@ async def handle_message(
             context,
             amount
         )
-
         return
 
+    # =====================================================
+    # VERITAS ICHKI ADMIN BERISH
+    # =====================================================
 
-    # ==================================================
-    # VERITAS RUXSAT BERISH
-    # ==================================================
-
-    if command == "*ruxsat":
-
+    if lower == "*ruxsat":
         if user.id != OWNER_ID:
             await message.reply_text(
-                "⛔ Faqat bot egasi ruxsat bera oladi."
+                "⛔ Bu buyruq faqat Veritas egasi uchun."
             )
             return
 
-        target = reply_target(
-            message
-        )
+        target = reply_target(message)
 
         if not target:
             await message.reply_text(
-                "⚠️ Foydalanuvchi xabariga "
-                "reply qilib *ruxsat yozing."
+                "⚠️ Foydalanuvchi xabariga reply qiling."
             )
             return
 
         cursor.execute(
             """
-            INSERT OR IGNORE INTO allowed_users
-            (user_id)
+            INSERT OR IGNORE INTO allowed_users (user_id)
             VALUES (?)
             """,
             (target.id,)
@@ -822,31 +1010,24 @@ async def handle_message(
             f"✅ {get_name(target)} ga "
             "Veritas admin ruxsati berildi."
         )
-
         return
 
+    # =====================================================
+    # VERITAS ICHKI ADMINNI O‘CHIRISH
+    # =====================================================
 
-    # ==================================================
-    # VERITAS RUXSATINI OLISH
-    # ==================================================
-
-    if command == "*ruxsatsiz":
-
+    if lower == "*ruxsatsiz":
         if user.id != OWNER_ID:
             await message.reply_text(
-                "⛔ Faqat bot egasi ruxsatni "
-                "olib tashlay oladi."
+                "⛔ Bu buyruq faqat Veritas egasi uchun."
             )
             return
 
-        target = reply_target(
-            message
-        )
+        target = reply_target(message)
 
         if not target:
             await message.reply_text(
-                "⚠️ Foydalanuvchi xabariga "
-                "reply qilib *ruxsatsiz yozing."
+                "⚠️ Foydalanuvchi xabariga reply qiling."
             )
             return
 
@@ -861,71 +1042,86 @@ async def handle_message(
         db.commit()
 
         await message.reply_text(
-            f"🔒 {get_name(target)} dan "
-            "Veritas admin ruxsati olindi."
+            f"🚫 {get_name(target)} ning "
+            "Veritas admin ruxsati olib tashlandi."
         )
-
         return
 
+    # =====================================================
+    # ADMINLAR
+    # =====================================================
 
-    # ==================================================
-    # TELEGRAM ADMINLAR RO'YXATI
-    # ==================================================
-
-    if command == "*admins":
-
+    if lower == "*admins":
         try:
-            admins = (
-                await context.bot
-                .get_chat_administrators(
+            telegram_admins = (
+                await context.bot.get_chat_administrators(
                     chat.id
                 )
             )
 
-            result = (
-                "👮 GURUH ADMINLARI\n\n"
-            )
+            lines = [
+                "👑 TELEGRAM ADMINLARI\n"
+            ]
 
-            for admin in admins:
-                result += (
-                    f"• {get_name(admin.user)}\n"
+            for admin in telegram_admins:
+                lines.append(
+                    f"• {get_name(admin.user)}"
                 )
 
-            await message.reply_text(
-                result
+            cursor.execute(
+                """
+                SELECT user_id
+                FROM allowed_users
+                ORDER BY user_id
+                """
             )
 
-        except Exception:
+            internal = cursor.fetchall()
+
+            if internal:
+                lines.append(
+                    "\n🛡 VERITAS RUXSATLARI"
+                )
+
+                for row in internal:
+                    lines.append(
+                        f"• ID: {row[0]}"
+                    )
+
             await message.reply_text(
-                "⚠️ Adminlar ro‘yxatini "
-                "olishda xato."
+                "\n".join(lines)
+            )
+
+        except Exception as error:
+            print(
+                "ADMINS ERROR:",
+                repr(error)
+            )
+
+            await message.reply_text(
+                "❌ Adminlar ro‘yxatini olib bo‘lmadi."
             )
 
         return
 
-
-    # ==================================================
+    # =====================================================
     # TELEGRAM ADMIN BERISH
-    # ==================================================
+    # =====================================================
 
-    if command == "*admin":
-
+    if lower == "*admin":
         if not await telegram_admin_required(
             message,
-            chat,
             user,
             context
         ):
             return
 
-        target = reply_target(
-            message
-        )
+        target = reply_target(message)
 
         if not target:
             await message.reply_text(
-                "⚠️ Foydalanuvchi xabariga "
-                "reply qilib *admin yozing."
+                "⚠️ Admin qilinadigan odamning "
+                "xabariga reply qiling."
             )
             return
 
@@ -938,15 +1134,11 @@ async def handle_message(
                 can_manage_video_chats=True,
                 can_restrict_members=True,
                 can_invite_users=True,
-                can_pin_messages=True,
-                can_manage_topics=True,
-                can_promote_members=False,
-                can_change_info=False
+                can_pin_messages=True
             )
 
             await message.reply_text(
-                f"👮 {get_name(target)} "
-                "guruh admini qilindi."
+                f"👑 {get_name(target)} admin qilindi."
             )
 
         except Exception as error:
@@ -956,43 +1148,30 @@ async def handle_message(
             )
 
             await message.reply_text(
-                "⚠️ Admin berilmadi.\n"
-                "VeritasBot'ga yangi admin "
-                "qo‘shish huquqi berilganini tekshiring."
+                "❌ Admin qilib bo‘lmadi. "
+                "Botning admin huquqlarini tekshiring."
             )
 
         return
 
+    # =====================================================
+    # TELEGRAM ADMINNI OLISH
+    # =====================================================
 
-    # ==================================================
-    # TELEGRAM ADMINLIKNI OLISH
-    # ==================================================
-
-    if command == "*unadmin":
-
+    if lower == "*unadmin":
         if not await telegram_admin_required(
             message,
-            chat,
             user,
             context
         ):
             return
 
-        target = reply_target(
-            message
-        )
+        target = reply_target(message)
 
         if not target:
             await message.reply_text(
-                "⚠️ Admin xabariga reply qilib "
-                "*unadmin yozing."
-            )
-            return
-
-        if target.id == OWNER_ID:
-            await message.reply_text(
-                "⛔ Bot egasining adminligini "
-                "olib bo‘lmaydi."
+                "⚠️ Adminligi olinadigan odamning "
+                "xabariga reply qiling."
             )
             return
 
@@ -1006,13 +1185,12 @@ async def handle_message(
                 can_restrict_members=False,
                 can_invite_users=False,
                 can_pin_messages=False,
-                can_manage_topics=False,
                 can_promote_members=False,
                 can_change_info=False
             )
 
             await message.reply_text(
-                f"👤 {get_name(target)} "
+                f"✅ {get_name(target)} "
                 "adminlikdan olindi."
             )
 
@@ -1023,46 +1201,35 @@ async def handle_message(
             )
 
             await message.reply_text(
-                "⚠️ Adminlikni olishda xato.\n"
-                "Bot huquqlarini tekshiring."
+                "❌ Adminlikni olib bo‘lmadi."
             )
 
         return
 
-
-    # ==================================================
+    # =====================================================
     # WARN
-    # ==================================================
+    # =====================================================
 
-    if command == "*warn":
-
+    if lower == "*warn":
         if not await admin_required(
             message,
-            chat,
             user,
             context
         ):
             return
 
-        target = reply_target(
-            message
-        )
+        target = reply_target(message)
 
         if not target:
             await message.reply_text(
-                "⚠️ Xabarga reply qilib "
-                "*warn yozing."
+                "⚠️ Ogohlantiriladigan odamning "
+                "xabariga reply qiling."
             )
             return
 
-        if await is_telegram_admin(
-            chat,
-            target.id,
-            context
-        ):
+        if target.id == OWNER_ID:
             await message.reply_text(
-                "⛔ Telegram adminiga warn "
-                "berib bo‘lmaydi."
+                "⛔ Veritas egasiga warn berib bo‘lmaydi."
             )
             return
 
@@ -1074,14 +1241,12 @@ async def handle_message(
                 warns
             )
             VALUES (?, ?, 1)
-
             ON CONFLICT(chat_id, user_id)
-            DO UPDATE SET
-                warns = warns + 1
+            DO UPDATE SET warns = warns + 1
             """,
             (
                 chat.id,
-                target.id
+                target.id,
             )
         )
 
@@ -1092,70 +1257,72 @@ async def handle_message(
             SELECT warns
             FROM warnings
             WHERE chat_id = ?
-            AND user_id = ?
+              AND user_id = ?
             """,
             (
                 chat.id,
-                target.id
+                target.id,
             )
         )
 
-        warns = cursor.fetchone()[0]
-
-        await message.reply_text(
-            f"⚠️ {get_name(target)}\n"
-            f"Warn: {warns}/3"
-        )
+        row = cursor.fetchone()
+        warns = row[0] if row else 0
 
         if warns >= 3:
-
             try:
                 await context.bot.ban_chat_member(
-                    chat.id,
-                    target.id
+                    chat_id=chat.id,
+                    user_id=target.id
                 )
 
                 cursor.execute(
                     """
                     DELETE FROM warnings
                     WHERE chat_id = ?
-                    AND user_id = ?
+                      AND user_id = ?
                     """,
                     (
                         chat.id,
-                        target.id
+                        target.id,
                     )
                 )
 
                 db.commit()
 
                 await message.reply_text(
-                    f"🔨 {get_name(target)} "
-                    "3 ta warn sabab ban qilindi.\n"
-                    "♻️ Warnlari 0 ga qaytarildi."
+                    f"⛔ {get_name(target)} "
+                    "3/3 warn oldi va ban qilindi."
                 )
 
             except Exception as error:
                 print(
-                    "WARN BAN ERROR:",
+                    "AUTO BAN ERROR:",
                     repr(error)
                 )
 
                 await message.reply_text(
-                    "⚠️ 3 ta warn bo‘ldi, "
-                    "lekin bot ban qila olmadi.\n"
-                    "Bot admin huquqlarini tekshiring."
+                    f"⚠️ {get_name(target)}: "
+                    f"{warns}/3 warn.\n"
+                    "Ban qilishda xato yuz berdi."
                 )
 
+            return
+
+        await message.reply_text(
+            f"⚠️ {get_name(target)}: "
+            f"{warns}/3 warn."
+        )
         return
-            # ==================================================
+
+    # =====================================================
     # UNWARN
-    # ==================================================
+    # =====================================================
 
-    if command == "*unwarn":
-
+    if lower == "*unwarn":
         if not await admin_required(
-            message, chat, user, context
+            message,
+            user,
+            context
         ):
             return
 
@@ -1163,7 +1330,7 @@ async def handle_message(
 
         if not target:
             await message.reply_text(
-                "⚠️ Xabarga reply qilib *unwarn yozing."
+                "⚠️ Foydalanuvchi xabariga reply qiling."
             )
             return
 
@@ -1172,23 +1339,36 @@ async def handle_message(
             SELECT warns
             FROM warnings
             WHERE chat_id = ?
-            AND user_id = ?
+              AND user_id = ?
             """,
-            (chat.id, target.id)
+            (
+                chat.id,
+                target.id,
+            )
         )
 
         row = cursor.fetchone()
         warns = row[0] if row else 0
-        warns = max(0, warns - 1)
+
+        if warns <= 0:
+            await message.reply_text(
+                "ℹ️ Bu foydalanuvchida warn yo‘q."
+            )
+            return
+
+        warns -= 1
 
         if warns == 0:
             cursor.execute(
                 """
                 DELETE FROM warnings
                 WHERE chat_id = ?
-                AND user_id = ?
+                  AND user_id = ?
                 """,
-                (chat.id, target.id)
+                (
+                    chat.id,
+                    target.id,
+                )
             )
         else:
             cursor.execute(
@@ -1196,30 +1376,29 @@ async def handle_message(
                 UPDATE warnings
                 SET warns = ?
                 WHERE chat_id = ?
-                AND user_id = ?
+                  AND user_id = ?
                 """,
-                (warns, chat.id, target.id)
+                (
+                    warns,
+                    chat.id,
+                    target.id,
+                )
             )
 
         db.commit()
 
         await message.reply_text(
-            f"✅ {get_name(target)}\n"
-            f"Warn: {warns}/3"
+            f"✅ {get_name(target)}: "
+            f"{warns}/3 warn."
         )
-
         return
-
-
-    # ==================================================
+    )
+        # =====================================================
     # CLEAR WARNS
-    # ==================================================
+    # =====================================================
 
-    if command == "*clearwarns":
-
-        if not await admin_required(
-            message, chat, user, context
-        ):
+    if lower == "*clearwarns":
+        if not await admin_required(message, user, context):
             return
 
         target = reply_target(message)
@@ -1234,38 +1413,30 @@ async def handle_message(
             """
             DELETE FROM warnings
             WHERE chat_id = ?
-            AND user_id = ?
+              AND user_id = ?
             """,
             (chat.id, target.id)
         )
-
         db.commit()
 
         await message.reply_text(
-            f"♻️ {get_name(target)} "
-            "warnlari tozalandi."
+            f"✅ {get_name(target)} ning barcha warnlari tozalandi."
         )
-
         return
 
-
-    # ==================================================
+    # =====================================================
     # WARNS
-    # ==================================================
+    # =====================================================
 
-    if command == "*warns":
-
-        target = (
-            reply_target(message)
-            or user
-        )
+    if lower == "*warns":
+        target = reply_target(message) or user
 
         cursor.execute(
             """
             SELECT warns
             FROM warnings
             WHERE chat_id = ?
-            AND user_id = ?
+              AND user_id = ?
             """,
             (chat.id, target.id)
         )
@@ -1274,37 +1445,29 @@ async def handle_message(
         warns = row[0] if row else 0
 
         await message.reply_text(
-            f"⚠️ {get_name(target)}\n"
-            f"Warn: {warns}/3"
+            f"⚠️ {get_name(target)}: {warns}/3 warn."
         )
-
         return
 
-
-    # ==================================================
+    # =====================================================
     # MUTE
-    # ==================================================
+    # =====================================================
 
-    if command == "*mute":
-
-        if not await admin_required(
-            message, chat, user, context
-        ):
+    if lower == "*mute":
+        if not await admin_required(message, user, context):
             return
 
         target = reply_target(message)
 
         if not target:
             await message.reply_text(
-                "⚠️ Xabarga reply qilib *mute yozing."
+                "⚠️ Mute qilinadigan odamning xabariga reply qiling."
             )
             return
 
-        if await is_telegram_admin(
-            chat, target.id, context
-        ):
+        if target.id == OWNER_ID:
             await message.reply_text(
-                "⛔ Telegram adminini mute qilib bo‘lmaydi."
+                "⛔ Veritas egasini mute qilib bo‘lmaydi."
             )
             return
 
@@ -1322,36 +1485,28 @@ async def handle_message(
             )
 
         except Exception as error:
-            print(
-                "MUTE ERROR:",
-                repr(error)
-            )
+            print("MUTE ERROR:", repr(error))
 
             await message.reply_text(
-                "⚠️ Mute qilinmadi. "
-                "Botga a’zolarni cheklash "
-                "huquqini bering."
+                "❌ Mute qilib bo‘lmadi. "
+                "Botning admin huquqlarini tekshiring."
             )
 
         return
 
-
-    # ==================================================
+    # =====================================================
     # UNMUTE
-    # ==================================================
+    # =====================================================
 
-    if command == "*unmute":
-
-        if not await admin_required(
-            message, chat, user, context
-        ):
+    if lower == "*unmute":
+        if not await admin_required(message, user, context):
             return
 
         target = reply_target(message)
 
         if not target:
             await message.reply_text(
-                "⚠️ Xabarga reply qilib *unmute yozing."
+                "⚠️ Unmute qilinadigan odamning xabariga reply qiling."
             )
             return
 
@@ -1379,42 +1534,33 @@ async def handle_message(
             )
 
         except Exception as error:
-            print(
-                "UNMUTE ERROR:",
-                repr(error)
-            )
+            print("UNMUTE ERROR:", repr(error))
 
             await message.reply_text(
-                "⚠️ Unmute qilishda xato."
+                "❌ Unmute qilib bo‘lmadi."
             )
 
         return
 
-
-    # ==================================================
+    # =====================================================
     # KICK
-    # ==================================================
+    # =====================================================
 
-    if command == "*kick":
-
-        if not await admin_required(
-            message, chat, user, context
-        ):
+    if lower == "*kick":
+        if not await admin_required(message, user, context):
             return
 
         target = reply_target(message)
 
         if not target:
             await message.reply_text(
-                "⚠️ Xabarga reply qilib *kick yozing."
+                "⚠️ Kick qilinadigan odamning xabariga reply qiling."
             )
             return
 
-        if await is_telegram_admin(
-            chat, target.id, context
-        ):
+        if target.id == OWNER_ID:
             await message.reply_text(
-                "⛔ Telegram adminini kick qilib bo‘lmaydi."
+                "⛔ Veritas egasini kick qilib bo‘lmaydi."
             )
             return
 
@@ -1426,52 +1572,42 @@ async def handle_message(
 
             await context.bot.unban_chat_member(
                 chat_id=chat.id,
-                user_id=target.id
+                user_id=target.id,
+                only_if_banned=True
             )
 
             await message.reply_text(
-                f"👢 {get_name(target)} "
-                "guruhdan chiqarildi."
+                f"👢 {get_name(target)} guruhdan chiqarildi."
             )
 
         except Exception as error:
-            print(
-                "KICK ERROR:",
-                repr(error)
-            )
+            print("KICK ERROR:", repr(error))
 
             await message.reply_text(
-                "⚠️ Kick qilinmadi. "
-                "Botning admin huquqlarini tekshiring."
+                "❌ Foydalanuvchini chiqarib bo‘lmadi."
             )
 
         return
 
-
-    # ==================================================
+    # =====================================================
     # BAN
-    # ==================================================
+    # =====================================================
 
-    if command == "*ban":
-
-        if not await admin_required(
-            message, chat, user, context
-        ):
+    if lower == "*ban":
+        if not await admin_required(message, user, context):
             return
 
         target = reply_target(message)
 
         if not target:
             await message.reply_text(
-                "⚠️ Xabarga reply qilib *ban yozing."
+                "⚠️ Ban qilinadigan odamning xabariga reply qiling."
             )
             return
 
-        if await is_telegram_admin(
-            chat, target.id, context
-        ):
+        if target.id == OWNER_ID:
             await message.reply_text(
-                "⛔ Telegram adminini ban qilib bo‘lmaydi."
+                "⛔ Veritas egasini ban qilib bo‘lmaydi."
             )
             return
 
@@ -1482,63 +1618,48 @@ async def handle_message(
             )
 
             await message.reply_text(
-                f"🔨 {get_name(target)} ban qilindi."
+                f"⛔ {get_name(target)} ban qilindi."
             )
 
         except Exception as error:
-            print(
-                "BAN ERROR:",
-                repr(error)
-            )
+            print("BAN ERROR:", repr(error))
 
             await message.reply_text(
-                "⚠️ Ban qilinmadi. "
-                "Botning admin huquqlarini tekshiring."
+                "❌ Ban qilib bo‘lmadi."
             )
 
         return
 
-
-    # ==================================================
+    # =====================================================
     # UNBAN
-    # ==================================================
+    # Reply yoki ID orqali
+    # =====================================================
 
-    if (
-        command == "*unban"
-        or command.startswith("*unban ")
-    ):
-
-        if not await admin_required(
-            message, chat, user, context
-        ):
+    if lower.startswith("*unban"):
+        if not await admin_required(message, user, context):
             return
 
         target = reply_target(message)
-
-        target_id = (
-            target.id
-            if target
-            else None
-        )
+        target_id = target.id if target else None
 
         if target_id is None:
+            parts = text.split()
 
-            parts = command.split()
+            if len(parts) != 2:
+                await message.reply_text(
+                    "⚠️ Ban qilingan odamga reply qiling "
+                    "yoki ID yozing:\n"
+                    "*unban 123456789"
+                )
+                return
 
-            if len(parts) == 2:
-                try:
-                    target_id = int(parts[1])
-                except ValueError:
-                    target_id = None
-
-        if target_id is None:
-            await message.reply_text(
-                "⚠️ Foydalanuvchining eski "
-                "xabariga reply qilib *unban yozing.\n\n"
-                "Yoki:\n"
-                "*unban ID"
-            )
-            return
+            try:
+                target_id = int(parts[1])
+            except ValueError:
+                await message.reply_text(
+                    "⚠️ ID raqam bo‘lishi kerak."
+                )
+                return
 
         try:
             await context.bot.unban_chat_member(
@@ -1551,90 +1672,76 @@ async def handle_message(
                 """
                 DELETE FROM warnings
                 WHERE chat_id = ?
-                AND user_id = ?
+                  AND user_id = ?
                 """,
                 (chat.id, target_id)
             )
-
             db.commit()
 
+            if target:
+                name = get_name(target)
+            else:
+                name = str(target_id)
+
             await message.reply_text(
-                "✅ Foydalanuvchi bandan chiqarildi.\n"
-                "♻️ Warnlari ham tozalandi."
+                f"✅ {name} ban holatidan chiqarildi."
             )
 
         except Exception as error:
-            print(
-                "UNBAN ERROR:",
-                repr(error)
-            )
+            print("UNBAN ERROR:", repr(error))
 
             await message.reply_text(
-                "⚠️ Unban qilinmadi. "
-                "ID va bot huquqlarini tekshiring."
+                "❌ Unban qilib bo‘lmadi."
             )
 
         return
 
+    # =====================================================
+    # DELETE
+    # =====================================================
 
-    # ==================================================
-    # DELETE MESSAGE
-    # ==================================================
-
-    if command == "*del":
-
-        if not await admin_required(
-            message, chat, user, context
-        ):
+    if lower == "*del":
+        if not await admin_required(message, user, context):
             return
 
         if not message.reply_to_message:
             await message.reply_text(
-                "⚠️ O‘chiriladigan xabarga "
-                "reply qilib *del yozing."
+                "⚠️ O‘chiriladigan xabarga reply qilib *del yozing."
             )
             return
 
         try:
-            await message.reply_to_message.delete()
+            await context.bot.delete_message(
+                chat_id=chat.id,
+                message_id=message.reply_to_message.message_id
+            )
 
             try:
-                await message.delete()
+                await context.bot.delete_message(
+                    chat_id=chat.id,
+                    message_id=message.message_id
+                )
             except Exception:
                 pass
 
         except Exception as error:
-            print(
-                "DELETE ERROR:",
-                repr(error)
-            )
+            print("DELETE ERROR:", repr(error))
 
             await message.reply_text(
-                "⚠️ Xabar o‘chirilmadi. "
-                "Botga xabarlarni o‘chirish "
-                "huquqini bering."
+                "❌ Xabarni o‘chirib bo‘lmadi."
             )
 
         return
-            # ==================================================
-    # LINK HIMOYASI
-    # ==================================================
 
-    if command in (
-        "*links on",
-        "*links off"
-    ):
+    # =====================================================
+    # LINKS ON / OFF
+    # =====================================================
 
-        if not await admin_required(
-            message, chat, user, context
-        ):
+    if lower in ("*links on", "*links off"):
+        if not await admin_required(message, user, context):
             return
 
-        value = (
-            1
-            if command == "*links on"
-            else 0
-        )
+        enabled = 1 if lower == "*links on" else 0
 
         cursor.execute(
             """
@@ -1642,42 +1749,34 @@ async def handle_message(
             SET link_block = ?
             WHERE chat_id = ?
             """,
-            (value, chat.id)
+            (enabled, chat.id)
         )
-
         db.commit()
 
-        await message.reply_text(
-            "🔗 Link himoyasi "
-            + (
-                "yoqildi."
-                if value
-                else "o‘chirildi."
+        if enabled:
+            await message.reply_text(
+                "🔗 Link himoyasi yoqildi."
             )
-        )
+        else:
+            await message.reply_text(
+                "🔗 Link himoyasi o‘chirildi."
+            )
 
         return
 
+    # =====================================================
+    # BLACKLIST
+    # =====================================================
 
-    # ==================================================
-    # BLACKLISTGA QO'SHISH
-    # ==================================================
-
-    if command.startswith("*blacklist "):
-
-        if not await admin_required(
-            message, chat, user, context
-        ):
+    if lower.startswith("*blacklist "):
+        if not await admin_required(message, user, context):
             return
 
-        word = text[
-            len("*blacklist "):
-        ].strip().lower()
+        word = text[len("*blacklist "):].strip().lower()
 
         if not word:
             await message.reply_text(
-                "⚠️ Masalan:\n"
-                "*blacklist yomonsoz"
+                "⚠️ So‘z kiriting."
             )
             return
 
@@ -1691,55 +1790,43 @@ async def handle_message(
             """,
             (chat.id, word)
         )
-
         db.commit()
 
         await message.reply_text(
-            f"🚫 Blacklistga qo‘shildi: {word}"
+            f"🚫 Qora ro‘yxatga qo‘shildi: {word}"
         )
-
         return
 
+    # =====================================================
+    # UNBLACKLIST
+    # =====================================================
 
-    # ==================================================
-    # BLACKLISTDAN OLISH
-    # ==================================================
-
-    if command.startswith("*unblacklist "):
-
-        if not await admin_required(
-            message, chat, user, context
-        ):
+    if lower.startswith("*unblacklist "):
+        if not await admin_required(message, user, context):
             return
 
-        word = text[
-            len("*unblacklist "):
-        ].strip().lower()
+        word = text[len("*unblacklist "):].strip().lower()
 
         cursor.execute(
             """
             DELETE FROM blacklist
             WHERE chat_id = ?
-            AND word = ?
+              AND word = ?
             """,
             (chat.id, word)
         )
-
         db.commit()
 
         await message.reply_text(
-            f"✅ Blacklistdan olindi: {word}"
+            f"✅ Qora ro‘yxatdan olib tashlandi: {word}"
         )
-
         return
 
+    # =====================================================
+    # BLACKLISTS
+    # =====================================================
 
-    # ==================================================
-    # BLACKLIST RO'YXATI
-    # ==================================================
-
-    if command == "*blacklists":
-
+    if lower == "*blacklists":
         cursor.execute(
             """
             SELECT word
@@ -1754,135 +1841,94 @@ async def handle_message(
 
         if not rows:
             await message.reply_text(
-                "📭 Blacklist bo‘sh."
+                "📋 Qora ro‘yxat bo‘sh."
             )
             return
 
-        result = "🚫 BLACKLIST\n\n"
+        words = "\n".join(
+            f"• {row[0]}"
+            for row in rows
+        )
 
-        for number, row in enumerate(
-            rows,
-            start=1
-        ):
-            result += (
-                f"{number}. {row[0]}\n"
-            )
-
-        await message.reply_text(result)
+        await message.reply_text(
+            "🚫 QORA RO‘YXAT\n\n" + words
+        )
         return
+            # =====================================================
+    # FILTER QO‘SHISH
+    # =====================================================
 
-
-    # ==================================================
-    # FILTER QO'SHISH
-    # ==================================================
-
-    if command.startswith("*filter "):
-
-        if not await admin_required(
-            message, chat, user, context
-        ):
+    if lower.startswith("*filter "):
+        if not await admin_required(message, user, context):
             return
 
-        rest = text[
-            len("*filter "):
-        ].strip()
+        content = text[len("*filter "):].strip()
 
-        if not rest:
+        if not content:
             await message.reply_text(
-                "⚠️ Matn filter:\n"
-                "*filter salom Assalomu alaykum\n\n"
-                "🎞 Media filter:\n"
-                "Rasm, video, sticker yoki boshqa "
-                "mediaga reply qilib:\n"
-                "*filter salom"
+                "⚠️ Foydalanish:\n"
+                "*filter salom Assalomu alaykum"
             )
             return
 
-        parts = rest.split(
-            maxsplit=1
-        )
+        # Reply qilingan media bo‘lsa media filter
+        if message.reply_to_message:
+            media_type, file_id, caption = media_from_message(
+                message.reply_to_message
+            )
 
-        keyword = (
-            parts[0]
-            .strip()
-            .lower()
-        )
+            if media_type != "text":
+                keyword = content.lower()
 
-        # ==============================================
-        # MATN FILTER
-        # ==============================================
+                cursor.execute(
+                    """
+                    INSERT INTO chat_filters (
+                        chat_id,
+                        keyword,
+                        response,
+                        media_type,
+                        file_id,
+                        caption
+                    )
+                    VALUES (?, ?, ?, ?, ?, ?)
+                    ON CONFLICT(chat_id, keyword)
+                    DO UPDATE SET
+                        response = excluded.response,
+                        media_type = excluded.media_type,
+                        file_id = excluded.file_id,
+                        caption = excluded.caption
+                    """,
+                    (
+                        chat.id,
+                        keyword,
+                        "",
+                        media_type,
+                        file_id,
+                        caption
+                    )
+                )
 
-        if len(parts) == 2:
+                db.commit()
 
-            response = parts[1].strip()
-
-            if not response:
                 await message.reply_text(
-                    "⚠️ Filter javobini yozing."
+                    f"✅ Media filter saqlandi: {keyword}"
                 )
                 return
 
-            cursor.execute(
-                """
-                INSERT INTO chat_filters (
-                    chat_id,
-                    keyword,
-                    response,
-                    media_type,
-                    file_id,
-                    caption
-                )
-                VALUES (?, ?, ?, 'text', '', '')
+        # Oddiy matn filter
+        parts = content.split(maxsplit=1)
 
-                ON CONFLICT(chat_id, keyword)
-                DO UPDATE SET
-                    response = excluded.response,
-                    media_type = 'text',
-                    file_id = '',
-                    caption = ''
-                """,
-                (
-                    chat.id,
-                    keyword,
-                    response
-                )
-            )
-
-            db.commit()
-
+        if len(parts) != 2:
             await message.reply_text(
-                f"✅ Matn filter saqlandi:\n"
-                f"🔑 {keyword}"
-            )
-
-            return
-
-
-        # ==============================================
-        # MEDIA FILTER
-        # ==============================================
-
-        replied = message.reply_to_message
-
-        if not replied:
-            await message.reply_text(
-                "⚠️ Media filter uchun rasm, video, "
-                "sticker, GIF, audio, voice yoki "
-                "faylga reply qiling.\n\n"
-                f"Keyin:\n*filter {keyword}"
+                "⚠️ Matn filter uchun:\n"
+                "*filter kalit javob\n\n"
+                "Media uchun esa media xabariga reply qilib:\n"
+                "*filter kalit"
             )
             return
 
-        media_type, file_id, caption = (
-            media_from_message(replied)
-        )
-
-        if not media_type or not file_id:
-            await message.reply_text(
-                "⚠️ Reply qilingan xabarda "
-                "saqlanadigan media topilmadi."
-            )
-            return
+        keyword = parts[0].lower()
+        response = parts[1]
 
         cursor.execute(
             """
@@ -1894,46 +1940,36 @@ async def handle_message(
                 file_id,
                 caption
             )
-            VALUES (?, ?, '', ?, ?, ?)
-
+            VALUES (?, ?, ?, 'text', '', '')
             ON CONFLICT(chat_id, keyword)
             DO UPDATE SET
-                response = '',
-                media_type = excluded.media_type,
-                file_id = excluded.file_id,
-                caption = excluded.caption
+                response = excluded.response,
+                media_type = 'text',
+                file_id = '',
+                caption = ''
             """,
             (
                 chat.id,
                 keyword,
-                media_type,
-                file_id,
-                caption or ""
+                response
             )
         )
 
         db.commit()
 
         await message.reply_text(
-            f"✅ Media filter saqlandi:\n"
-            f"🔑 {keyword}\n"
-            f"🎞 Turi: {media_type}"
+            f"✅ Filter saqlandi: {keyword}"
         )
-
         return
 
+    # =====================================================
+    # FILTERLAR RO‘YXATI
+    # =====================================================
 
-    # ==================================================
-    # FILTERLAR RO'YXATI
-    # ==================================================
-
-    if command == "*filters":
-
+    if lower == "*filters":
         cursor.execute(
             """
-            SELECT
-                keyword,
-                media_type
+            SELECT keyword, media_type
             FROM chat_filters
             WHERE chat_id = ?
             ORDER BY keyword
@@ -1945,94 +1981,57 @@ async def handle_message(
 
         if not rows:
             await message.reply_text(
-                "📭 Hozircha filterlar yo‘q."
+                "📋 Filterlar yo‘q."
             )
             return
 
-        result = "💬 FILTERLAR\n\n"
+        lines = ["🎛 FILTERLAR\n"]
 
-        for number, row in enumerate(
-            rows,
-            start=1
-        ):
-            keyword = row[0]
-            media_type = row[1] or "text"
-
+        for keyword, media_type in rows:
             if media_type == "text":
-                icon = "📝"
-            elif media_type == "sticker":
-                icon = "🎭"
-            elif media_type == "photo":
-                icon = "🖼"
-            elif media_type == "video":
-                icon = "🎬"
-            elif media_type == "animation":
-                icon = "🎞"
-            elif media_type == "audio":
-                icon = "🎵"
-            elif media_type == "voice":
-                icon = "🎤"
-            elif media_type == "document":
-                icon = "📎"
+                lines.append(f"• {keyword}")
             else:
-                icon = "📌"
+                lines.append(
+                    f"• {keyword} [{media_type}]"
+                )
 
-            result += (
-                f"{number}. {icon} {keyword}\n"
-            )
-
-        await message.reply_text(result)
+        await message.reply_text(
+            "\n".join(lines)
+        )
         return
 
+    # =====================================================
+    # BITTA FILTERNI O‘CHIRISH
+    # =====================================================
 
-    # ==================================================
-    # BITTA FILTERNI O'CHIRISH
-    # ==================================================
-
-    if command.startswith("*stop "):
-
-        if not await admin_required(
-            message, chat, user, context
-        ):
+    if lower.startswith("*stop "):
+        if not await admin_required(message, user, context):
             return
 
-        keyword = text[
-            len("*stop "):
-        ].strip().lower()
+        keyword = text[len("*stop "):].strip().lower()
 
         cursor.execute(
             """
             DELETE FROM chat_filters
             WHERE chat_id = ?
-            AND keyword = ?
+              AND keyword = ?
             """,
             (chat.id, keyword)
         )
 
-        deleted = cursor.rowcount
         db.commit()
 
-        if deleted:
-            await message.reply_text(
-                f"🗑 Filter o‘chirildi: {keyword}"
-            )
-        else:
-            await message.reply_text(
-                f"⚠️ Filter topilmadi: {keyword}"
-            )
-
+        await message.reply_text(
+            f"🗑 Filter o‘chirildi: {keyword}"
+        )
         return
 
+    # =====================================================
+    # BARCHA FILTERLARNI O‘CHIRISH
+    # =====================================================
 
-    # ==================================================
-    # BARCHA FILTERLARNI O'CHIRISH
-    # ==================================================
-
-    if command == "*stopall":
-
-        if not await admin_required(
-            message, chat, user, context
-        ):
+    if lower == "*stopall":
+        if not await admin_required(message, user, context):
             return
 
         cursor.execute(
@@ -2043,32 +2042,27 @@ async def handle_message(
             (chat.id,)
         )
 
-        deleted = cursor.rowcount
         db.commit()
 
         await message.reply_text(
-            f"🗑 {deleted} ta filter o‘chirildi."
+            "🗑 Barcha filterlar o‘chirildi."
         )
-
         return
-            # ==================================================
-    # RULES O'RNATISH
-    # ==================================================
 
-    if command.startswith("*setrules "):
+    # =====================================================
+    # RULES O‘RNATISH
+    # =====================================================
 
-        if not await admin_required(
-            message, chat, user, context
-        ):
+    if lower.startswith("*setrules"):
+        if not await admin_required(message, user, context):
             return
 
-        rules = text[
-            len("*setrules "):
-        ].strip()
+        rules = text[len("*setrules"):].strip()
 
         if not rules:
             await message.reply_text(
-                "⚠️ Qoidalarni yozing."
+                "⚠️ Foydalanish:\n"
+                "*setrules Guruh qoidalari..."
             )
             return
 
@@ -2086,16 +2080,13 @@ async def handle_message(
         await message.reply_text(
             "✅ Guruh qoidalari saqlandi."
         )
-
         return
 
+    # =====================================================
+    # RULES
+    # =====================================================
 
-    # ==================================================
-    # RULES KO'RISH
-    # ==================================================
-
-    if command == "*rules":
-
+    if lower == "*rules":
         cursor.execute(
             """
             SELECT rules
@@ -2106,51 +2097,39 @@ async def handle_message(
         )
 
         row = cursor.fetchone()
+        rules = row[0] if row else ""
 
-        rules = (
-            row[0]
-            if row
-            else ""
-        )
-
-        if rules:
+        if not rules:
             await message.reply_text(
-                "📜 GURUH QOIDALARI\n\n"
-                f"{rules}"
+                "📜 Guruh qoidalari hali yozilmagan."
             )
         else:
             await message.reply_text(
-                "📭 Hozircha guruh "
-                "qoidalari yozilmagan."
+                "📜 GURUH QOIDALARI\n\n" + rules
             )
 
         return
 
-
-    # ==================================================
+    # =====================================================
     # NOTE SAQLASH
-    # ==================================================
+    # =====================================================
 
-    if command.startswith("*save "):
-
-        if not await admin_required(
-            message, chat, user, context
-        ):
+    if lower.startswith("*save "):
+        if not await admin_required(message, user, context):
             return
 
-        parts = text.split(
-            maxsplit=2
-        )
+        content = text[len("*save "):].strip()
+        parts = content.split(maxsplit=1)
 
-        if len(parts) < 3:
+        if len(parts) != 2:
             await message.reply_text(
-                "⚠️ Masalan:\n"
-                "*save aloqa Biz bilan bog‘lanish..."
+                "⚠️ Foydalanish:\n"
+                "*save nom matn"
             )
             return
 
-        name = parts[1].lower()
-        content = parts[2]
+        name = parts[0].lower()
+        note_text = parts[1]
 
         cursor.execute(
             """
@@ -2160,7 +2139,6 @@ async def handle_message(
                 content
             )
             VALUES (?, ?, ?)
-
             ON CONFLICT(chat_id, name)
             DO UPDATE SET
                 content = excluded.content
@@ -2168,7 +2146,7 @@ async def handle_message(
             (
                 chat.id,
                 name,
-                content
+                note_text
             )
         )
 
@@ -2177,26 +2155,21 @@ async def handle_message(
         await message.reply_text(
             f"📝 Note saqlandi: {name}"
         )
-
         return
 
-
-    # ==================================================
+    # =====================================================
     # NOTE OLISH
-    # ==================================================
+    # =====================================================
 
-    if command.startswith("*get "):
-
-        name = text[
-            len("*get "):
-        ].strip().lower()
+    if lower.startswith("*get "):
+        name = text[len("*get "):].strip().lower()
 
         cursor.execute(
             """
             SELECT content
             FROM notes
             WHERE chat_id = ?
-            AND name = ?
+              AND name = ?
             """,
             (
                 chat.id,
@@ -2206,24 +2179,22 @@ async def handle_message(
 
         row = cursor.fetchone()
 
-        if row:
+        if not row:
             await message.reply_text(
-                row[0]
+                "❌ Bunday note topilmadi."
             )
-        else:
-            await message.reply_text(
-                f"⚠️ Note topilmadi: {name}"
-            )
+            return
 
+        await message.reply_text(
+            row[0]
+        )
         return
 
+    # =====================================================
+    # NOTES RO‘YXATI
+    # =====================================================
 
-    # ==================================================
-    # NOTES RO'YXATI
-    # ==================================================
-
-    if command == "*notes":
-
+    if lower == "*notes":
         cursor.execute(
             """
             SELECT name
@@ -2238,44 +2209,35 @@ async def handle_message(
 
         if not rows:
             await message.reply_text(
-                "📭 Note'lar yo‘q."
+                "📝 Notes bo‘sh."
             )
             return
 
-        result = "📝 NOTES\n\n"
+        notes_text = "\n".join(
+            f"• {row[0]}"
+            for row in rows
+        )
 
-        for number, row in enumerate(
-            rows,
-            start=1
-        ):
-            result += (
-                f"{number}. {row[0]}\n"
-            )
-
-        await message.reply_text(result)
+        await message.reply_text(
+            "📝 NOTES\n\n" + notes_text
+        )
         return
 
+    # =====================================================
+    # NOTE O‘CHIRISH
+    # =====================================================
 
-    # ==================================================
-    # NOTE O'CHIRISH
-    # ==================================================
-
-    if command.startswith("*clear "):
-
-        if not await admin_required(
-            message, chat, user, context
-        ):
+    if lower.startswith("*clear "):
+        if not await admin_required(message, user, context):
             return
 
-        name = text[
-            len("*clear "):
-        ].strip().lower()
+        name = text[len("*clear "):].strip().lower()
 
         cursor.execute(
             """
             DELETE FROM notes
             WHERE chat_id = ?
-            AND name = ?
+              AND name = ?
             """,
             (
                 chat.id,
@@ -2283,303 +2245,289 @@ async def handle_message(
             )
         )
 
-        deleted = cursor.rowcount
         db.commit()
 
-        if deleted:
-            await message.reply_text(
-                f"🗑 Note o‘chirildi: {name}"
-            )
-        else:
-            await message.reply_text(
-                f"⚠️ Note topilmadi: {name}"
-            )
-
+        await message.reply_text(
+            f"🗑 Note o‘chirildi: {name}"
+        )
         return
 
+    # =====================================================
+    # WELCOME ON / OFF
+    # =====================================================
 
-    # ==================================================
-    # WELCOME / GOODBYE
-    # ==================================================
-
-    if command in (
+    if lower in (
         "*welcome on",
         "*welcome off",
-        "*goodbye on",
-        "*goodbye off"
     ):
-
-        if not await admin_required(
-            message, chat, user, context
-        ):
+        if not await admin_required(message, user, context):
             return
 
-        parts = command.split()
-
-        setting = parts[0][1:]
-
-        value = (
+        enabled = (
             1
-            if parts[1] == "on"
+            if lower == "*welcome on"
             else 0
         )
 
         cursor.execute(
-            f"""
+            """
             UPDATE settings
-            SET {setting} = ?
+            SET welcome = ?
             WHERE chat_id = ?
             """,
             (
-                value,
+                enabled,
                 chat.id
             )
         )
 
         db.commit()
 
-        status = (
-            "ON"
-            if value
-            else "OFF"
-        )
-
-        await message.reply_text(
-            f"⚙️ {setting}: {status}"
-        )
+        if enabled:
+            await message.reply_text(
+                "👋 Welcome yoqildi."
+            )
+        else:
+            await message.reply_text(
+                "👋 Welcome o‘chirildi."
+            )
 
         return
 
+    # =====================================================
+    # GOODBYE ON / OFF
+    # =====================================================
 
-    # ==================================================
-    # AKTIV
-    # ==================================================
-
-    if (
-        command == "*aktiv"
-        or command.startswith("*aktiv ")
+    if lower in (
+        "*goodbye on",
+        "*goodbye off",
     ):
+        if not await admin_required(message, user, context):
+            return
 
-        parts = command.split()
-        limit = 50
-
-        if (
-            len(parts) == 2
-            and parts[1].isdigit()
-        ):
-            limit = max(
-                1,
-                min(
-                    int(parts[1]),
-                    50
-                )
-            )
+        enabled = (
+            1
+            if lower == "*goodbye on"
+            else 0
+        )
 
         cursor.execute(
             """
-            SELECT
-                name,
-                messages
+            UPDATE settings
+            SET goodbye = ?
+            WHERE chat_id = ?
+            """,
+            (
+                enabled,
+                chat.id
+            )
+        )
+
+        db.commit()
+
+        if enabled:
+            await message.reply_text(
+                "👋 Goodbye yoqildi."
+            )
+        else:
+            await message.reply_text(
+                "👋 Goodbye o‘chirildi."
+            )
+
+        return
+            # =====================================================
+    # AKTIV
+    # =====================================================
+
+    if lower.startswith("*aktiv"):
+        parts = text.split()
+
+        limit = 10
+
+        if len(parts) == 2:
+            try:
+                limit = int(parts[1])
+            except ValueError:
+                await message.reply_text(
+                    "⚠️ Masalan: *aktiv 10"
+                )
+                return
+
+        limit = max(1, min(limit, 50))
+
+        cursor.execute(
+            """
+            SELECT name, username, messages
             FROM activity
             WHERE chat_id = ?
             ORDER BY messages DESC
             LIMIT ?
             """,
-            (
-                chat.id,
-                limit
-            )
+            (chat.id, limit)
         )
 
         rows = cursor.fetchall()
 
         if not rows:
             await message.reply_text(
-                "📊 Hali faollik statistikasi yo‘q."
+                "📊 Hozircha faollik ma’lumoti yo‘q."
             )
             return
 
-        result = (
-            f"🏆 TOP {len(rows)} FAOL A’ZO\n\n"
-        )
+        lines = ["🏆 ENG FAOL A’ZOLAR\n"]
 
-        medals = [
-            "🥇",
-            "🥈",
-            "🥉"
-        ]
+        for index, row in enumerate(rows, 1):
+            name, username, messages = row
 
-        for number, (
-            name,
-            count
-        ) in enumerate(
-            rows,
-            start=1
-        ):
-
-            if number <= 3:
-                icon = medals[number - 1]
+            if username:
+                display = f"@{username}"
             else:
-                icon = f"{number}."
+                display = name
 
-            result += (
-                f"{icon} {name} — "
-                f"{count} ta xabar\n"
+            lines.append(
+                f"{index}. {display} — {messages}"
             )
 
         await message.reply_text(
-            result
+            "\n".join(lines)
         )
-
         return
 
-
-    # ==================================================
+    # =====================================================
     # MEN
-    # ==================================================
+    # =====================================================
 
-    if command == "*men":
-
+    if lower == "*men":
         cursor.execute(
             """
             SELECT messages
             FROM activity
             WHERE chat_id = ?
-            AND user_id = ?
+              AND user_id = ?
             """,
-            (
-                chat.id,
-                user.id
-            )
+            (chat.id, user.id)
         )
 
         row = cursor.fetchone()
-
-        count = (
-            row[0]
-            if row
-            else 0
-        )
+        messages = row[0] if row else 0
 
         cursor.execute(
             """
-            SELECT COUNT(*) + 1
+            SELECT COUNT(*)
             FROM activity
             WHERE chat_id = ?
-            AND messages > ?
+              AND messages > ?
             """,
-            (
-                chat.id,
-                count
-            )
+            (chat.id, messages)
         )
 
-        rank = cursor.fetchone()[0]
+        rank_row = cursor.fetchone()
+        rank = (rank_row[0] if rank_row else 0) + 1
 
         await message.reply_text(
-            f"👤 {get_name(user)}\n\n"
-            f"💬 Xabarlar: {count}\n"
-            f"🏆 Reyting: {rank}"
+            f"👤 {get_name(user)}\n"
+            f"💬 Xabarlar: {messages}\n"
+            f"🏆 O‘rin: {rank}"
         )
-
         return
 
-
-    # ==================================================
-    # NOTANISH * BUYRUQLARNI HISOBLAMAYMIZ
-    # ==================================================
+    # =====================================================
+    # NOMALUM * BUYRUQ
+    # =====================================================
 
     if text.startswith("*"):
         return
 
+    # =====================================================
+    # LINK HIMOYASI
+    # =====================================================
 
-    # ==================================================
-    # LINKNI AVTOMATIK TEKSHIRISH
-    # ==================================================
-
-    cursor.execute(
-        """
-        SELECT link_block
-        FROM settings
-        WHERE chat_id = ?
-        """,
-        (chat.id,)
-    )
-
-    row = cursor.fetchone()
-
-    link_block = (
-        row[0]
-        if row
-        else 0
-    )
-
-    if (
-        link_block
-        and contains_link(text)
-        and not await is_admin(
-            chat,
-            user.id,
-            context
-        )
+    if not await is_admin(
+        chat,
+        user.id,
+        context
     ):
-        try:
-            await message.delete()
-        except Exception as error:
-            print(
-                "LINK DELETE ERROR:",
-                repr(error)
-            )
+        cursor.execute(
+            """
+            SELECT link_block
+            FROM settings
+            WHERE chat_id = ?
+            """,
+            (chat.id,)
+        )
 
-        return
+        row = cursor.fetchone()
+        link_block = row[0] if row else 0
 
-
-    # ==================================================
-    # BLACKLISTNI AVTOMATIK TEKSHIRISH
-    # ==================================================
-
-    cursor.execute(
-        """
-        SELECT word
-        FROM blacklist
-        WHERE chat_id = ?
-        """,
-        (chat.id,)
-    )
-
-    blacklist_rows = cursor.fetchall()
-
-    lower_text = text.lower()
-
-    for row in blacklist_rows:
-
-        bad_word = row[0]
-
-        if (
-            bad_word in lower_text
-            and not await is_admin(
-                chat,
-                user.id,
-                context
-            )
-        ):
+        if link_block and contains_link(text):
             try:
                 await message.delete()
+
+                await context.bot.send_message(
+                    chat_id=chat.id,
+                    text=(
+                        f"🔗 {get_name(user)}, "
+                        "guruhda link yuborish taqiqlangan."
+                    )
+                )
+
             except Exception as error:
                 print(
-                    "BLACKLIST DELETE ERROR:",
+                    "LINK DELETE ERROR:",
                     repr(error)
                 )
 
             return
 
+    # =====================================================
+    # BLACKLIST HIMOYASI
+    # =====================================================
 
-    # ==================================================
-    # FILTERNI AVTOMATIK ISHLATISH
-    # ==================================================
+    if text and not await is_admin(
+        chat,
+        user.id,
+        context
+    ):
+        cursor.execute(
+            """
+            SELECT word
+            FROM blacklist
+            WHERE chat_id = ?
+            """,
+            (chat.id,)
+        )
+
+        words = cursor.fetchall()
+        text_lower = text.lower()
+
+        for row in words:
+            word = row[0].lower()
+
+            if word and word in text_lower:
+                try:
+                    await message.delete()
+
+                    await context.bot.send_message(
+                        chat_id=chat.id,
+                        text=(
+                            f"🚫 {get_name(user)}, "
+                            "taqiqlangan so‘z ishlatildi."
+                        )
+                    )
+
+                except Exception as error:
+                    print(
+                        "BLACKLIST DELETE ERROR:",
+                        repr(error)
+                    )
+
+                return
+
+    # =====================================================
+    # AVTOMATIK FILTER JAVOBI
+    # =====================================================
 
     if text:
-
         cursor.execute(
             """
             SELECT
@@ -2589,26 +2537,23 @@ async def handle_message(
                 caption
             FROM chat_filters
             WHERE chat_id = ?
-            AND keyword = ?
+              AND keyword = ?
             """,
             (
                 chat.id,
-                command
+                text.lower()
             )
         )
 
         row = cursor.fetchone()
 
         if row:
-
-            response = row[0] or ""
-            media_type = row[1] or "text"
-            file_id = row[2] or ""
-            caption = row[3] or ""
+            response, media_type, file_id, caption = row
 
             try:
                 await send_saved_filter(
                     message,
+                    context,
                     media_type,
                     file_id,
                     response,
@@ -2621,12 +2566,15 @@ async def handle_message(
                     repr(error)
                 )
 
+            return
 
-    # ==================================================
+    # =====================================================
     # FAOLLIKNI HISOBLASH
-    # ==================================================
+    # =====================================================
 
     if text:
+        name = get_name(user)
+        username = user.username or ""
 
         cursor.execute(
             """
@@ -2648,18 +2596,19 @@ async def handle_message(
             (
                 chat.id,
                 user.id,
-                get_name(user),
-                user.username or ""
+                name,
+                username
             )
         )
 
         db.commit()
-        # ==================================================
-# BOTNI ISHGA TUSHIRISH
-# ==================================================
+
+
+# =========================================================
+# MAIN
+# =========================================================
 
 def main():
-
     if not BOT_TOKEN:
         raise RuntimeError(
             "BOT_TOKEN topilmadi! "
@@ -2667,13 +2616,12 @@ def main():
         )
 
     app = (
-        Application
-        .builder()
+        Application.builder()
         .token(BOT_TOKEN)
         .build()
     )
 
-    # Yangi a'zo
+    # Welcome
     app.add_handler(
         MessageHandler(
             filters.StatusUpdate.NEW_CHAT_MEMBERS,
@@ -2682,11 +2630,28 @@ def main():
         group=0
     )
 
-    # Guruhdan chiqqan a'zo
+    # Goodbye
     app.add_handler(
         MessageHandler(
             filters.StatusUpdate.LEFT_CHAT_MEMBER,
             goodbye_member
+        ),
+        group=0
+    )
+
+    # Telegram Stars pre-checkout
+    app.add_handler(
+        PreCheckoutQueryHandler(
+            precheckout_callback
+        ),
+        group=0
+    )
+
+    # Muvaffaqiyatli Stars to‘lovi
+    app.add_handler(
+        MessageHandler(
+            filters.SUCCESSFUL_PAYMENT,
+            successful_payment
         ),
         group=0
     )
@@ -2701,17 +2666,13 @@ def main():
     )
 
     print(
-        "Veritas Gift v4 ishga tushdi."
+        "Veritas Gift + Stars v5 ishga tushdi."
     )
 
     app.run_polling(
         allowed_updates=Update.ALL_TYPES
     )
 
-
-# ==================================================
-# START
-# ==================================================
 
 if __name__ == "__main__":
     main()
