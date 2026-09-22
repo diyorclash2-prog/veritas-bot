@@ -778,6 +778,7 @@ async def give_gift(
                 "❌ Gift yuborilmadi. "
                 "Telegram Gift mavjudligi yoki "
                 "bot balansini tekshiring."
+            )
                 # =========================================================
 # ASOSIY MESSAGE HANDLER
 # =========================================================
