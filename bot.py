@@ -20045,6 +20045,1325 @@ def main():
 # =========================================================
 # START
 # =========================================================
+# =========================================================
+# VERITAS BOT V7
+# PART 15 — FINAL COMPATIBILITY & SAFETY FIXES
+# =========================================================
+
+
+# =========================================================
+# FINAL DATABASE MIGRATIONS
+# =========================================================
+
+def init_final_compatibility():
+    conn = db_connect()
+
+    try:
+
+        # -------------------------------------------------
+        # WARNS
+        # -------------------------------------------------
+
+        add_column_if_missing(
+            conn,
+            "warns",
+            "moderator_id",
+            "INTEGER"
+        )
+
+        add_column_if_missing(
+            conn,
+            "warns",
+            "reason",
+            "TEXT"
+        )
+
+        add_column_if_missing(
+            conn,
+            "warns",
+            "active",
+            "INTEGER NOT NULL DEFAULT 1"
+        )
+
+        add_column_if_missing(
+            conn,
+            "warns",
+            "created_at",
+            "TEXT"
+        )
+
+        # -------------------------------------------------
+        # BLACKLIST
+        # -------------------------------------------------
+
+        add_column_if_missing(
+            conn,
+            "blacklist",
+            "created_by",
+            "INTEGER"
+        )
+
+        add_column_if_missing(
+            conn,
+            "blacklist",
+            "created_at",
+            "TEXT"
+        )
+
+        # -------------------------------------------------
+        # NOTES
+        # -------------------------------------------------
+
+        add_column_if_missing(
+            conn,
+            "notes",
+            "name",
+            "TEXT"
+        )
+
+        add_column_if_missing(
+            conn,
+            "notes",
+            "content",
+            "TEXT"
+        )
+
+        add_column_if_missing(
+            conn,
+            "notes",
+            "created_by",
+            "INTEGER"
+        )
+
+        add_column_if_missing(
+            conn,
+            "notes",
+            "created_at",
+            "TEXT"
+        )
+
+        add_column_if_missing(
+            conn,
+            "notes",
+            "updated_at",
+            "TEXT"
+        )
+
+        # -------------------------------------------------
+        # CUSTOM FILTERS
+        # -------------------------------------------------
+
+        add_column_if_missing(
+            conn,
+            "custom_filters",
+            "trigger_text",
+            "TEXT"
+        )
+
+        add_column_if_missing(
+            conn,
+            "custom_filters",
+            "response_text",
+            "TEXT"
+        )
+
+        add_column_if_missing(
+            conn,
+            "custom_filters",
+            "created_by",
+            "INTEGER"
+        )
+
+        add_column_if_missing(
+            conn,
+            "custom_filters",
+            "created_at",
+            "TEXT"
+        )
+
+        # -------------------------------------------------
+        # GROUP RULES
+        # -------------------------------------------------
+
+        add_column_if_missing(
+            conn,
+            "group_rules",
+            "rules_text",
+            "TEXT"
+        )
+
+        add_column_if_missing(
+            conn,
+            "group_rules",
+            "updated_by",
+            "INTEGER"
+        )
+
+        add_column_if_missing(
+            conn,
+            "group_rules",
+            "updated_at",
+            "TEXT"
+        )
+
+        # -------------------------------------------------
+        # REPORTS
+        # -------------------------------------------------
+
+        add_column_if_missing(
+            conn,
+            "reports",
+            "reporter_id",
+            "INTEGER"
+        )
+
+        add_column_if_missing(
+            conn,
+            "reports",
+            "reported_user_id",
+            "INTEGER"
+        )
+
+        add_column_if_missing(
+            conn,
+            "reports",
+            "message_id",
+            "INTEGER"
+        )
+
+        add_column_if_missing(
+            conn,
+            "reports",
+            "reason",
+            "TEXT"
+        )
+
+        add_column_if_missing(
+            conn,
+            "reports",
+            "status",
+            "TEXT DEFAULT 'OPEN'"
+        )
+
+        add_column_if_missing(
+            conn,
+            "reports",
+            "created_at",
+            "TEXT"
+        )
+
+        # -------------------------------------------------
+        # LIBRARY
+        # -------------------------------------------------
+
+        add_column_if_missing(
+            conn,
+            "library_books",
+            "active",
+            "INTEGER NOT NULL DEFAULT 1"
+        )
+
+        add_column_if_missing(
+            conn,
+            "library_books",
+            "description",
+            "TEXT"
+        )
+
+        add_column_if_missing(
+            conn,
+            "library_books",
+            "file_id",
+            "TEXT"
+        )
+
+        add_column_if_missing(
+            conn,
+            "library_books",
+            "file_type",
+            "TEXT"
+        )
+
+        # -------------------------------------------------
+        # PREMIUM GIFTS
+        # -------------------------------------------------
+
+        add_column_if_missing(
+            conn,
+            "premium_gifts",
+            "text",
+            "TEXT"
+        )
+
+        add_column_if_missing(
+            conn,
+            "premium_gifts",
+            "requested_by",
+            "INTEGER"
+        )
+
+        add_column_if_missing(
+            conn,
+            "premium_gifts",
+            "error_message",
+            "TEXT"
+        )
+
+        add_column_if_missing(
+            conn,
+            "premium_gifts",
+            "completed_at",
+            "TEXT"
+        )
+
+        # -------------------------------------------------
+        # TELEGRAM GIFTS
+        # -------------------------------------------------
+
+        add_column_if_missing(
+            conn,
+            "telegram_gifts",
+            "text",
+            "TEXT"
+        )
+
+        add_column_if_missing(
+            conn,
+            "telegram_gifts",
+            "requested_by",
+            "INTEGER"
+        )
+
+        add_column_if_missing(
+            conn,
+            "telegram_gifts",
+            "error_message",
+            "TEXT"
+        )
+
+        add_column_if_missing(
+            conn,
+            "telegram_gifts",
+            "completed_at",
+            "TEXT"
+        )
+
+        # -------------------------------------------------
+        # MODERATORS
+        # -------------------------------------------------
+
+        add_column_if_missing(
+            conn,
+            "group_moderators",
+            "added_by",
+            "INTEGER"
+        )
+
+        add_column_if_missing(
+            conn,
+            "group_moderators",
+            "created_at",
+            "TEXT"
+        )
+
+        # -------------------------------------------------
+        # PROMO CHANNELS
+        # -------------------------------------------------
+
+        add_column_if_missing(
+            conn,
+            "promo_channels",
+            "title",
+            "TEXT"
+        )
+
+        add_column_if_missing(
+            conn,
+            "promo_channels",
+            "username",
+            "TEXT"
+        )
+
+        add_column_if_missing(
+            conn,
+            "promo_channels",
+            "created_by",
+            "INTEGER"
+        )
+
+        add_column_if_missing(
+            conn,
+            "promo_channels",
+            "created_at",
+            "TEXT"
+        )
+
+        # -------------------------------------------------
+        # TRANSACTIONS
+        # -------------------------------------------------
+
+        add_column_if_missing(
+            conn,
+            "transactions",
+            "chat_id",
+            "INTEGER"
+        )
+
+        add_column_if_missing(
+            conn,
+            "transactions",
+            "created_by",
+            "INTEGER"
+        )
+
+        # -------------------------------------------------
+        # SAFE UNIQUE INDEXES
+        # -------------------------------------------------
+
+        try:
+            conn.execute(
+                """
+                CREATE UNIQUE INDEX IF NOT EXISTS
+                idx_notes_chat_name
+                ON notes(chat_id, name)
+                """
+            )
+        except sqlite3.Error:
+            logger.exception(
+                "Notes unique index yaratilmadi."
+            )
+
+        try:
+            conn.execute(
+                """
+                CREATE UNIQUE INDEX IF NOT EXISTS
+                idx_filters_chat_trigger
+                ON custom_filters(
+                    chat_id,
+                    trigger_text
+                )
+                """
+            )
+        except sqlite3.Error:
+            logger.exception(
+                "Filter unique index yaratilmadi."
+            )
+
+        try:
+            conn.execute(
+                """
+                CREATE UNIQUE INDEX IF NOT EXISTS
+                idx_promo_channel_id
+                ON promo_channels(channel_id)
+                """
+            )
+        except sqlite3.Error:
+            logger.exception(
+                "Promo unique index yaratilmadi."
+            )
+
+        conn.commit()
+
+    finally:
+        conn.close()
+
+
+# =========================================================
+# SAFE GROUP OWNER SYNC
+# =========================================================
+#
+# Oldingi /start foydalanuvchini avtomatik owner
+# qilib qo'yishi mumkin edi.
+#
+# Endi haqiqiy Telegram creator aniqlanadi.
+# =========================================================
+
+async def sync_real_group_owner(
+    context: ContextTypes.DEFAULT_TYPE,
+    chat_id: int
+):
+    try:
+        admins = (
+            await context.bot.get_chat_administrators(
+                chat_id
+            )
+        )
+
+        creator = None
+
+        for admin in admins:
+            if admin.status == "creator":
+                creator = admin.user
+                break
+
+        if not creator:
+            return None
+
+        ensure_user(
+            creator
+        )
+
+        db_execute(
+            """
+            UPDATE groups
+            SET
+                owner_id = ?,
+                updated_at = ?
+            WHERE chat_id = ?
+            """,
+            (
+                creator.id,
+                iso_now(),
+                chat_id
+            )
+        )
+
+        return creator.id
+
+    except TelegramError:
+        return None
+
+
+# =========================================================
+# HARDENED GROUP MANAGEMENT CHECK
+# =========================================================
+
+async def can_manage_group(
+    context: ContextTypes.DEFAULT_TYPE,
+    chat_id: int,
+    user_id: int
+):
+    if is_super_owner_id(
+        user_id
+    ):
+        return True
+
+    # Telegram admin / creator birinchi.
+    if await telegram_admin_check(
+        context,
+        chat_id,
+        user_id
+    ):
+        return True
+
+    # Haqiqiy creatorni bazaga sync qilamiz.
+    real_owner_id = (
+        await sync_real_group_owner(
+            context,
+            chat_id
+        )
+    )
+
+    if (
+        real_owner_id
+        and real_owner_id == user_id
+    ):
+        return True
+
+    # Veritas internal moderator.
+    row = db_execute(
+        """
+        SELECT 1
+        FROM group_moderators
+        WHERE chat_id = ?
+          AND user_id = ?
+        LIMIT 1
+        """,
+        (
+            chat_id,
+            user_id
+        ),
+        fetchone=True
+    )
+
+    return bool(row)
+
+
+# =========================================================
+# HARDENED PROTECTION EXEMPT
+# =========================================================
+
+async def protection_exempt(
+    context: ContextTypes.DEFAULT_TYPE,
+    chat_id: int,
+    user_id: int
+):
+    if is_super_owner_id(
+        user_id
+    ):
+        return True
+
+    if user_is_approved(
+        chat_id,
+        user_id
+    ):
+        return True
+
+    if await telegram_admin_check(
+        context,
+        chat_id,
+        user_id
+    ):
+        return True
+
+    # Veritas moderatorlar ham automoddan ozod.
+    moderator = db_execute(
+        """
+        SELECT 1
+        FROM group_moderators
+        WHERE chat_id = ?
+          AND user_id = ?
+        LIMIT 1
+        """,
+        (
+            chat_id,
+            user_id
+        ),
+        fetchone=True
+    )
+
+    return bool(
+        moderator
+    )
+
+
+# =========================================================
+# FIX: GROUP PROTECTION RETURN VALUE
+# =========================================================
+
+async def process_group_protection(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE
+):
+    chat = update.effective_chat
+    user = update.effective_user
+    message = update.effective_message
+
+    if (
+        not chat
+        or not user
+        or not message
+    ):
+        return False
+
+    if chat.type not in (
+        ChatType.GROUP,
+        ChatType.SUPERGROUP,
+    ):
+        return False
+
+    if user.is_bot:
+        return False
+
+    ensure_user(
+        user
+    )
+
+    ensure_group(
+        chat
+    )
+
+    # Media lock
+    if await process_media_lock(
+        update,
+        context
+    ):
+        return True
+
+    # Blacklist
+    if await process_blacklist(
+        update,
+        context
+    ):
+        return True
+
+    # Anti-link
+    if await process_anti_link(
+        update,
+        context
+    ):
+        return True
+
+    # Anti-flood
+    if await process_anti_flood(
+        update,
+        context
+    ):
+        return True
+
+    return False
+
+
+# =========================================================
+# FIX: GROUP CONTENT RETURN
+# =========================================================
+
+async def process_group_content(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE
+):
+    chat = update.effective_chat
+    user = update.effective_user
+    message = update.effective_message
+
+    if (
+        not chat
+        or not user
+        or not message
+    ):
+        return False
+
+    if chat.type not in (
+        ChatType.GROUP,
+        ChatType.SUPERGROUP,
+    ):
+        return False
+
+    blocked = await process_group_protection(
+        update,
+        context
+    )
+
+    if blocked:
+        return True
+
+    note_handled = await process_note_trigger(
+        update,
+        context
+    )
+
+    if note_handled:
+        return True
+
+    filter_handled = await process_custom_filters(
+        update,
+        context
+    )
+
+    if filter_handled:
+        return True
+
+    return False
+
+
+# =========================================================
+# FIX: USER START IN GROUP
+# =========================================================
+#
+# /start yozgan odamni owner deb saqlamaymiz.
+# =========================================================
+
+async def start_command(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE
+):
+    user = update.effective_user
+    chat = update.effective_chat
+    message = update.effective_message
+
+    if (
+        not user
+        or not chat
+        or not message
+    ):
+        return
+
+    ensure_user(
+        user
+    )
+
+    if chat.type in (
+        ChatType.GROUP,
+        ChatType.SUPERGROUP,
+    ):
+        ensure_group(
+            chat
+        )
+
+        await sync_real_group_owner(
+            context,
+            chat.id
+        )
+
+        ensure_group_demo(
+            chat.id,
+            granted_by=None
+        )
+
+        username = (
+            BOT_USERNAME
+            or "VeritasBot"
+        )
+
+        keyboard = InlineKeyboardMarkup(
+            [
+                [
+                    InlineKeyboardButton(
+                        "👤 Shaxsiy kabinet",
+                        url=(
+                            f"https://t.me/"
+                            f"{username}?start=cabinet"
+                        )
+                    )
+                ]
+            ]
+        )
+
+        await message.reply_text(
+            (
+                "🤖 VeritasBot V7\n\n"
+                "Shaxsiy kabinetni ochish "
+                "uchun tugmani bosing."
+            ),
+            reply_markup=keyboard
+        )
+
+        return
+
+    await show_user_home(
+        update,
+        context
+    )
+
+
+# =========================================================
+# FIX: GROUP PANEL
+# =========================================================
+
+async def show_group_panel(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+    chat_id: int
+):
+    user = update.effective_user
+
+    if not user:
+        return
+
+    if not await can_manage_group(
+        context,
+        chat_id,
+        user.id
+    ):
+        if update.callback_query:
+            await update.callback_query.answer(
+                "⛔ Ruxsat yo'q.",
+                show_alert=True
+            )
+        elif update.effective_message:
+            await update.effective_message.reply_text(
+                "⛔ Ruxsat yo'q."
+            )
+        return
+
+    group = get_group_record(
+        chat_id
+    )
+
+    if not group:
+        return
+
+    sub_label = subscription_label(
+        chat_id
+    )
+
+    text = (
+        "🏢 VERITAS GURUH PANELI\n\n"
+        f"🏷 {group['title']}\n"
+        f"🆔 {chat_id}\n"
+        f"💎 {sub_label}"
+    )
+
+    keyboard = InlineKeyboardMarkup(
+        [
+            [
+                InlineKeyboardButton(
+                    "🛡 Moderatsiya",
+                    callback_data=(
+                        f"group:moderation:"
+                        f"{chat_id}"
+                    )
+                ),
+                InlineKeyboardButton(
+                    "⚠️ Warnlar",
+                    callback_data=(
+                        f"group:warns:"
+                        f"{chat_id}"
+                    )
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    "👮 Moderatorlar",
+                    callback_data=(
+                        f"group:mods:"
+                        f"{chat_id}"
+                    )
+                ),
+                InlineKeyboardButton(
+                    "⚙️ Sozlamalar",
+                    callback_data=(
+                        f"group:settings:"
+                        f"{chat_id}"
+                    )
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    "✏️ Welcome / Goodbye",
+                    callback_data=(
+                        f"group:texts:"
+                        f"{chat_id}"
+                    )
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    "📊 Faollik",
+                    callback_data=(
+                        f"group:activity:"
+                        f"{chat_id}"
+                    )
+                ),
+                InlineKeyboardButton(
+                    "💎 V7 obuna",
+                    callback_data=(
+                        f"group:subscription:"
+                        f"{chat_id}"
+                    )
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    "⬅️ Guruhlarim",
+                    callback_data="user:groups"
+                )
+            ]
+        ]
+    )
+
+    if update.callback_query:
+        query = update.callback_query
+
+        try:
+            await query.answer()
+        except TelegramError:
+            pass
+
+        try:
+            await query.edit_message_text(
+                text,
+                reply_markup=keyboard
+            )
+        except BadRequest:
+            pass
+
+    elif update.effective_message:
+        await update.effective_message.reply_text(
+            text,
+            reply_markup=keyboard
+        )
+
+
+# =========================================================
+# FIX: GROUP MODERATORS PANEL
+# =========================================================
+
+async def show_group_moderators(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+    chat_id: int
+):
+    query = update.callback_query
+    user = update.effective_user
+
+    if not query or not user:
+        return
+
+    if not await can_manage_group(
+        context,
+        chat_id,
+        user.id
+    ):
+        await query.answer(
+            "⛔ Ruxsat yo'q.",
+            show_alert=True
+        )
+        return
+
+    rows = db_execute(
+        """
+        SELECT
+            gm.user_id,
+            gm.created_at,
+            u.first_name,
+            u.username
+        FROM group_moderators gm
+
+        LEFT JOIN users u
+            ON u.user_id = gm.user_id
+
+        WHERE gm.chat_id = ?
+
+        ORDER BY gm.created_at DESC
+        """,
+        (chat_id,),
+        fetchall=True
+    )
+
+    lines = [
+        "👮 VERITAS MODERATORLAR",
+        ""
+    ]
+
+    if not rows:
+        lines.append(
+            "Moderatorlar yo'q."
+        )
+    else:
+        for row in rows:
+            name = (
+                row["first_name"]
+                or (
+                    f"@{row['username']}"
+                    if row["username"]
+                    else str(row["user_id"])
+                )
+            )
+
+            lines.append(
+                f"• {name} — {row['user_id']}"
+            )
+
+    keyboard = InlineKeyboardMarkup(
+        [
+            [
+                InlineKeyboardButton(
+                    "➕ Moderator",
+                    callback_data=(
+                        f"group:addmod:{chat_id}"
+                    )
+                ),
+                InlineKeyboardButton(
+                    "➖ Moderator",
+                    callback_data=(
+                        f"group:delmod:{chat_id}"
+                    )
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    "⬅️ Guruh",
+                    callback_data=(
+                        f"group:open:{chat_id}"
+                    )
+                )
+            ]
+        ]
+    )
+
+    await query.answer()
+
+    await query.edit_message_text(
+        "\n".join(lines),
+        reply_markup=keyboard
+    )
+
+
+# =========================================================
+# FIX: GROUP CALLBACK ROUTER
+# =========================================================
+
+async def group_callback(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE
+):
+    query = update.callback_query
+
+    if not query:
+        return
+
+    data = query.data or ""
+
+    if data.startswith(
+        "group:open:"
+    ):
+        try:
+            chat_id = int(
+                data.rsplit(
+                    ":",
+                    1
+                )[1]
+            )
+        except ValueError:
+            return
+
+        await show_group_panel(
+            update,
+            context,
+            chat_id
+        )
+        return
+
+    if data.startswith(
+        "group:moderation:"
+    ):
+        try:
+            chat_id = int(
+                data.rsplit(
+                    ":",
+                    1
+                )[1]
+            )
+        except ValueError:
+            return
+
+        await show_moderation_panel(
+            update,
+            context,
+            chat_id
+        )
+        return
+
+    if data.startswith(
+        "group:action:"
+    ):
+        parts = data.split(
+            ":"
+        )
+
+        if len(parts) != 4:
+            return
+
+        action = parts[2]
+
+        try:
+            chat_id = int(
+                parts[3]
+            )
+        except ValueError:
+            return
+
+        await start_moderation_action(
+            update,
+            context,
+            chat_id,
+            action
+        )
+        return
+
+    if data.startswith(
+        "group:mods:"
+    ):
+        try:
+            chat_id = int(
+                data.rsplit(
+                    ":",
+                    1
+                )[1]
+            )
+        except ValueError:
+            return
+
+        await show_group_moderators(
+            update,
+            context,
+            chat_id
+        )
+        return
+
+    if data.startswith(
+        "group:warns:"
+    ):
+        try:
+            chat_id = int(
+                data.rsplit(
+                    ":",
+                    1
+                )[1]
+            )
+        except ValueError:
+            return
+
+        user = update.effective_user
+
+        if not await can_manage_group(
+            context,
+            chat_id,
+            user.id
+        ):
+            await query.answer(
+                "⛔ Ruxsat yo'q.",
+                show_alert=True
+            )
+            return
+
+        rows = db_execute(
+            """
+            SELECT
+                user_id,
+                COUNT(*) AS count
+            FROM warns
+            WHERE chat_id = ?
+              AND active = 1
+            GROUP BY user_id
+            ORDER BY count DESC
+            LIMIT 30
+            """,
+            (chat_id,),
+            fetchall=True
+        )
+
+        lines = [
+            "⚠️ FAOL WARNLAR",
+            ""
+        ]
+
+        if not rows:
+            lines.append(
+                "Faol warnlar yo'q."
+            )
+        else:
+            for row in rows:
+                lines.append(
+                    (
+                        f"👤 {row['user_id']} "
+                        f"— {row['count']}/"
+                        f"{MAX_WARNS}"
+                    )
+                )
+
+        await query.answer()
+
+        await query.edit_message_text(
+            "\n".join(lines),
+            reply_markup=InlineKeyboardMarkup(
+                [
+                    [
+                        InlineKeyboardButton(
+                            "⬅️ Guruh",
+                            callback_data=(
+                                f"group:open:"
+                                f"{chat_id}"
+                            )
+                        )
+                    ]
+                ]
+            )
+        )
+
+        return
+
+
+# =========================================================
+# FIX: NOTE/FILTER TRIGGERS RETURN BOOL
+# =========================================================
+
+async def process_note_trigger(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE
+):
+    message = update.effective_message
+    chat = update.effective_chat
+
+    if not message or not chat:
+        return False
+
+    text = (
+        message.text
+        or ""
+    ).strip()
+
+    if not text.startswith("#"):
+        return False
+
+    name = normalize_note_name(
+        text[1:].split()[0]
+        if len(text) > 1
+        else ""
+    )
+
+    if not name:
+        return False
+
+    note = get_note(
+        chat.id,
+        name
+    )
+
+    if not note:
+        return False
+
+    await message.reply_text(
+        note["content"]
+    )
+
+    return True
+
+
+async def process_custom_filters(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE
+):
+    message = update.effective_message
+    chat = update.effective_chat
+
+    if not message or not chat:
+        return False
+
+    text = (
+        message.text
+        or message.caption
+        or ""
+    )
+
+    if not text:
+        return False
+
+    rows = db_execute(
+        """
+        SELECT
+            trigger_text,
+            response_text
+        FROM custom_filters
+        WHERE chat_id = ?
+        ORDER BY id ASC
+        """,
+        (chat.id,),
+        fetchall=True
+    )
+
+    lowered = text.casefold()
+
+    for row in rows:
+        trigger = (
+            row["trigger_text"]
+            or ""
+        ).casefold()
+
+        if (
+            trigger
+            and trigger in lowered
+        ):
+            await message.reply_text(
+                row["response_text"]
+            )
+            return True
+
+    return False
+
+
+# =========================================================
+# FINAL DATABASE INIT
+# =========================================================
+
+init_final_compatibility()
+
+
+# =========================================================
+# FINAL START
+# =========================================================
 
 if __name__ == "__main__":
     main()
+
