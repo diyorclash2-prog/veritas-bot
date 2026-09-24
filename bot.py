@@ -165,7 +165,8 @@ async def cmd_help(update,ctx):
     text="""🪶 VERITAS v7
 
 ASOSIY
-*help  *id  *men  *aktiv  *aktiv 10  *rules  *admins
+*help  *id  *men  *aktiv  *aktiv 10  *top 10  *rules  *admins
+*unvon matn  *unvonoff
 
 MODERATSIYA (reply)
 *warn  *unwarn  *warns  *clearwarns
@@ -264,6 +265,92 @@ async def show_me(update,ctx):
     else:
         txt=f"👤 {u.full_name}\n🆔 {u.id}\n🎖 {title_for(u.id)}\n⭐ Kredit: {wallet(u.id)}"
     await update.effective_message.reply_text(txt)
+
+
+async def title_command(update,ctx,cmd,args):
+    chat=update.effective_chat; msg=update.effective_message; actor=update.effective_user
+    if chat.type not in ("group","supergroup"):
+        return await msg.reply_text("⛔ Unvon faqat guruhda boshqariladi.")
+    ensure_group(chat); ensure_user(actor)
+    if not await can_manage(ctx.bot,chat.id,actor.id):
+        return await msg.reply_text("⛔ Sizda unvon boshqarish huquqi yo‘q.")
+    target=replied(update)
+    if not target or not target.from_user:
+        return await msg.reply_text("↩️ Foydalanuvchi xabariga reply qiling.")
+    tu=target.from_user
+    if tu.id in SUPER_OWNERS:
+        return await msg.reply_text("👑 Super Ega unvonini o‘zgartirib bo‘lmaydi.")
+    execute("""INSERT OR IGNORE INTO members(chat_id,user_id,xp,messages,daily,weekly,title)
+               VALUES(?,?,0,0,0,0,'')""",(chat.id,tu.id))
+    if cmd=="unvon":
+        title=" ".join(args).strip()
+        if not title: return await msg.reply_text("Misol: *unvon Kitobxon")
+        if len(title)>40: return await msg.reply_text("❗ Unvon 40 belgidan uzun bo‘lmasin.")
+        if title.casefold().replace("👑","").strip().replace(" ","")=="superega":
+            return await msg.reply_text("⛔ «Super Ega» unvoni himoyalangan.")
+        execute("UPDATE members SET title=? WHERE chat_id=? AND user_id=?",(title,chat.id,tu.id))
+        audit(actor.id,chat.id,"title_set",f"{tu.id}: {title}")
+        return await msg.reply_text(f"🎖 {tu.full_name} uchun unvon: «{title}»")
+    execute("UPDATE members SET title='' WHERE chat_id=? AND user_id=?",(chat.id,tu.id))
+    audit(actor.id,chat.id,"title_removed",str(tu.id))
+    await msg.reply_text(f"✅ {tu.full_name}ning unvoni olib tashlandi.")
+
+def display_name_row(r):
+    name=(r["first_name"] or "").strip() or "Nomsiz"
+    username=(" @"+r["username"]) if (r["username"] or "").strip() else ""
+    return name+username
+
+async def top10_menu(update,ctx):
+    if update.effective_user.id not in SUPER_OWNERS:
+        return await update.effective_message.reply_text("⛔ TOP mukofot paneli faqat Super Ega uchun.")
+    kb=InlineKeyboardMarkup([[
+        InlineKeyboardButton("🎁 Giftli",callback_data=f"topgift:{update.effective_chat.id}"),
+        InlineKeyboardButton("🏆 Giftsiz",callback_data=f"topplain:{update.effective_chat.id}")
+    ]])
+    await update.effective_message.reply_text(
+        "🏆 TOP-10 yakunlash usulini tanlang:\n\n"
+        "🎁 Giftli — TOP-3 ga 50 ⭐ lik haqiqiy Telegram Gift.\n"
+        "🏆 Giftsiz — faqat TOP-10 natijasi.",
+        reply_markup=kb
+    )
+
+async def top10_result(bot,chat_id,with_gifts=False,actor_id=None):
+    rows=all_("""SELECT m.user_id,m.messages,m.xp,m.title,u.first_name,u.username
+                 FROM members m LEFT JOIN users u ON u.user_id=m.user_id
+                 WHERE m.chat_id=? ORDER BY m.messages DESC LIMIT 10""",(chat_id,))
+    if not rows:
+        await bot.send_message(chat_id,"🏆 TOP-10 uchun ma’lumot yo‘q.")
+        return
+    lines=["🏆 TOP-10"]
+    for i,r in enumerate(rows):
+        lines.append(f"{i+1}. {display_name_row(r)} — {r['messages']} xabar")
+    await bot.send_message(chat_id,"\n".join(lines))
+    if not with_gifts: return
+    try:
+        available=await bot.get_available_gifts()
+        gift=next((g for g in available.gifts
+                   if int(getattr(g,"star_count",0))==50
+                   and (getattr(g,"remaining_count",1) or 0)!=0),None)
+    except Exception as e:
+        await bot.send_message(chat_id,f"❌ Giftlar olinmadi: {e}"); return
+    if not gift:
+        await bot.send_message(chat_id,"❌ Hozir 50 ⭐ lik Telegram Gift mavjud emas."); return
+    # Gift is paid from the Super Owner's prepaid Veritas credit.
+    cost=50*min(3,len(rows))
+    if actor_id is None or wallet(actor_id)<cost:
+        await bot.send_message(chat_id,f"❌ Super Ega kreditida kamida {cost} ⭐ kerak."); return
+    sent=[]
+    for r in rows[:3]:
+        uid=int(r["user_id"])
+        if not wallet_change(actor_id,-50,"top10_gift_pending",uid,meta={"gift_id":str(gift.id)}):
+            break
+        try:
+            await bot.send_gift(user_id=uid,gift_id=gift.id,text="🏆 Veritas TOP-3 mukofoti")
+            sent.append(display_name_row(r))
+        except Exception:
+            wallet_change(actor_id,50,"top10_gift_rollback",uid)
+    await bot.send_message(chat_id,
+        "🎁 TOP-3 Gift natijasi:\n"+("\n".join("✅ "+x for x in sent) if sent else "Gift yuborilmadi."))
 
 async def group_action(update,ctx,cmd,arg):
     chat=update.effective_chat; u=update.effective_user; msg=update.effective_message
@@ -375,8 +462,12 @@ async def info_command(update,ctx,cmd,args):
         r=one("SELECT text FROM notes WHERE chat_id=? AND name=?",(chat.id,args[0].lower())); return await msg.reply_text(r["text"] if r else "Topilmadi.")
     if cmd=="aktiv":
         n=min(50,max(1,int(args[0]) if args and args[0].isdigit() else 10))
-        rows=all_("SELECT user_id,messages,title,xp FROM members WHERE chat_id=? ORDER BY messages DESC LIMIT ?",(chat.id,n))
-        return await msg.reply_text("🏆 Faollik\n"+("\n".join(f"{i+1}. {r['user_id']} — {r['messages']} | Lv.{level(r['xp'])} {title_for(r['user_id'],r['title'])}" for i,r in enumerate(rows)) or "Ma’lumot yo‘q"))
+        rows=all_("""SELECT m.user_id,m.messages,m.title,m.xp,u.first_name,u.username
+                     FROM members m LEFT JOIN users u ON u.user_id=m.user_id
+                     WHERE m.chat_id=? ORDER BY m.messages DESC LIMIT ?""",(chat.id,n))
+        return await msg.reply_text("🏆 Faollik\n"+("\n".join(
+            f"{i+1}. {display_name_row(r)} — {r['messages']} | Lv.{level(r['xp'])} {title_for(r['user_id'],r['title'])}"
+            for i,r in enumerate(rows)) or "Ma’lumot yo‘q"))
 
 async def report_cmd(update,ctx):
     if not replied(update): return await update.effective_message.reply_text("↩️ Shikoyat qilinadigan xabarga reply qiling.")
@@ -438,6 +529,10 @@ async def star_text_router(update,ctx):
     if cmd=="help": return await cmd_help(update,ctx)
     if cmd=="id": return await cmd_id(update,ctx)
     if cmd=="men": return await show_me(update,ctx)
+    if cmd in {"unvon","unvonoff"}:
+        return await title_command(update,ctx,cmd,args)
+    if cmd=="top" and args and args[0]=="10":
+        return await top10_menu(update,ctx)
     if cmd=="topup":
         a=int(args[0]) if args and args[0].isdigit() else 0
         return await topup(update,ctx,a)
@@ -541,6 +636,13 @@ async def left_member(update,ctx):
 
 async def callback(update,ctx):
     q=update.callback_query; await q.answer(); d=q.data; u=q.from_user; ensure_user(u)
+    if d.startswith("topgift:") or d.startswith("topplain:"):
+        if u.id not in SUPER_OWNERS:
+            return await q.answer("Faqat Super Ega.",show_alert=True)
+        chat_id=int(d.split(":",1)[1])
+        with_gifts=d.startswith("topgift:")
+        await q.edit_message_text("⏳ TOP-10 hisoblanmoqda..." if not with_gifts else "⏳ TOP-10 va TOP-3 Giftlar tayyorlanmoqda...")
+        return await top10_result(ctx.bot,chat_id,with_gifts,u.id)
     if d=="me":
         r=one("SELECT wallet FROM users WHERE user_id=?",(u.id,))
         return await q.edit_message_text(f"👤 {u.full_name}\n🆔 {u.id}\n🎖 {title_for(u.id)}\n⭐ Kredit: {r['wallet'] if r else 0}")
