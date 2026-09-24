@@ -395,7 +395,7 @@ async def gift_send(update,ctx,args):
         gl=list(gifts.gifts)
     except Exception as e: return await update.effective_message.reply_text(f"❌ Gift ro‘yxati olinmadi: {e}")
     price=int(args[0]) if args and args[0].isdigit() else None
-    candidates=[g for g in gl if (price is None or getattr(g,"star_count",None)==price) and (getattr(g,"remaining_count",1) or 0)!=0]
+    candidates=[g for g in gl if (price is None or getattr(g,"star_count",None)==price) and (getattr(g,"remaining_count",None) is None or getattr(g,"remaining_count",0)>0)]
     if not candidates:
         prices=sorted({getattr(g,"star_count",0) for g in gl if getattr(g,"star_count",0)})
         return await update.effective_message.reply_text("🎁 Mavjud narxlar: "+", ".join(map(str,prices[:30])))
@@ -586,7 +586,7 @@ async def giveaway_job(ctx):
             price=int(g["prize"])
             try:
                 gifts=await ctx.bot.get_available_gifts()
-                cand=next((x for x in gifts.gifts if int(x.star_count)==price and (getattr(x,"remaining_count",1) or 0)!=0),None)
+                cand=next((x for x in gifts.gifts if int(x.star_count)==price and (getattr(x,"remaining_count",None) is None or getattr(x,"remaining_count",0)>0)),None)
                 if not cand or wallet(g["creator_id"])<price: continue
                 if not wallet_change(g["creator_id"],-price,"giveaway_gift_pending",uid): continue
                 try:
