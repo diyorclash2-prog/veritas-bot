@@ -1,45 +1,30 @@
 # VERITAS BOT v7 — single-file build
-# Python 3.11+ | python-telegram-bot[job-queue]>=22.5,<23 | Telethon>=1.45,<2
+# Python 3.11+ | python-telegram-bot[job-queue]>=22.5,<23
 #
 # ENV:
 # BOT_TOKEN=...
 # SUPER_OWNER_IDS=5859289233,7056675943
 # DB_PATH=veritas_v7.sqlite3
-# TG_API_ID=...
-# TG_API_HASH=...
-# TG_SESSION=...
 #
-# Notes:
-# - "wallet" below is prepaid bot credit backed by Telegram Stars received by this bot.
-# - Telegram Gift/Premium purchases spend the bot's real Stars balance and debit the sender's prepaid credit.
-# - No fake "Veritas Ball" exists.
-# - Greeting auto-replies intentionally do not exist.
+# NOTE:
+# *stars now opens Telegram's official Stars Gift section.
+# Recipient/amount are displayed by Veritas, but must be selected/confirmed in Telegram.
 
 import os, re, sqlite3, time, random, logging, json
 from datetime import datetime, timezone, timedelta
-from typing import Optional
-
-try:
-    from telethon import TelegramClient, functions as tl_functions, types as tl_types
-    from telethon.sessions import StringSession
-except ImportError:
-    TelegramClient = tl_functions = tl_types = StringSession = None
 
 from telegram import (
     Update, InlineKeyboardButton, InlineKeyboardMarkup, ChatPermissions,
     LabeledPrice
 )
 from telegram.constants import ChatMemberStatus
-from telegram.error import TelegramError, BadRequest, Forbidden
+from telegram.error import TelegramError
 from telegram.ext import (
     Application, ContextTypes, CommandHandler, MessageHandler, CallbackQueryHandler,
     PreCheckoutQueryHandler, filters
 )
 
 TOKEN = os.getenv("BOT_TOKEN", "").strip()
-TG_API_ID = int(os.getenv("TG_API_ID", "0") or 0)
-TG_API_HASH = os.getenv("TG_API_HASH", "").strip()
-TG_SESSION = os.getenv("TG_SESSION", "").strip()
 DB_PATH = os.getenv("DB_PATH", "veritas_v7.sqlite3")
 SUPER_OWNERS = {int(x) for x in os.getenv("SUPER_OWNER_IDS","").split(",") if x.strip().isdigit()}
 VERSION = "7.0"
@@ -124,7 +109,7 @@ def audit(actor,chat,action,detail=""):
     execute("INSERT INTO audit(actor_id,chat_id,action,detail,created_at) VALUES(?,?,?,?,?)",
             (actor,chat,action,detail,now()))
 
-def wallet(uid): 
+def wallet(uid):
     r=one("SELECT wallet FROM users WHERE user_id=?",(uid,)); return int(r["wallet"]) if r else 0
 def wallet_change(uid,delta,kind,target=None,ref=None,meta=None):
     with db() as c:
@@ -177,47 +162,35 @@ def user_total_stats(uid):
     r=one("SELECT COALESCE(SUM(xp),0) xp,COALESCE(SUM(messages),0) messages FROM members WHERE user_id=?",(uid,))
     return (int(r["xp"]),int(r["messages"])) if r else (0,0)
 
-async def stars_payment_link(target_user, stars):
-    """Prepare Telegram's official Stars-for-friend payment form via the owner's MTProto session."""
-    if not (TelegramClient and TG_API_ID and TG_API_HASH and TG_SESSION):
-        raise RuntimeError("Stars MTProto sozlamalari to‘liq emas.")
-    client=TelegramClient(StringSession(TG_SESSION),TG_API_ID,TG_API_HASH)
-    await client.connect()
-    try:
-        if not await client.is_user_authorized():
-            raise RuntimeError("TG_SESSION avtorizatsiyadan chiqib qolgan.")
-        lookup=("@"+target_user.username) if getattr(target_user,"username",None) else target_user.id
-        entity=await client.get_input_entity(lookup)
-        opts=await client(tl_functions.payments.GetStarsGiftOptionsRequest(user_id=entity))
-        opt=next((x for x in opts if int(x.stars)==int(stars)),None)
-        if not opt:
-            av=", ".join(str(int(x.stars)) for x in opts)
-            raise ValueError(f"{stars} ⭐ paketi mavjud emas. Mavjud: {av}")
-        purpose=tl_types.InputStorePaymentStarsGift(user_id=entity,stars=opt.stars,currency=opt.currency,amount=opt.amount)
-        invoice=tl_types.InputInvoiceStars(purpose=purpose)
-        form=await client(tl_functions.payments.GetPaymentFormRequest(invoice=invoice))
-        return getattr(form,"url",None), opt.currency, int(opt.amount), int(opt.stars)
-    finally:
-        await client.disconnect()
-
-async def stars_cmd(update,ctx,args):
-    if update.effective_user.id not in SUPER_OWNERS:
-        return await update.effective_message.reply_text("⛔ *stars faqat Super Ega uchun.")
-    t=replied(update)
+async def stars_cmd(update, ctx, args):
+    uid = update.effective_user.id
+    msg = update.effective_message
+    if uid not in SUPER_OWNERS:
+        return await msg.reply_text("⛔ *stars faqat Super Ega uchun.")
+    t = replied(update)
     if not t or not t.from_user:
-        return await update.effective_message.reply_text("↩️ Stars oluvchining xabariga reply qiling: *stars 100")
-    if not args or not args[0].isdigit() or int(args[0])<=0:
-        return await update.effective_message.reply_text("Misol: *stars 100")
-    stars=int(args[0])
-    m=await update.effective_message.reply_text("⏳ Telegram rasmiy Stars xarid oynasi tayyorlanmoqda...")
-    try:
-        url,currency,amount,stars=await stars_payment_link(t.from_user,stars)
-        if not url:
-            return await m.edit_text("⚠️ Telegram payment form yaratildi, lekin ushbu xarid uchun web-to‘lov URL qaytmadi. Xaridni Telegram rasmiy klientida tasdiqlash talab qilinadi.")
-        kb=InlineKeyboardMarkup([[InlineKeyboardButton(f"💳 {stars} ⭐ sotib berish",url=url)]])
-        await m.edit_text(f"⭐ Oluvchi: {t.from_user.full_name}\n⭐ Miqdor: {stars}\n💳 Narx: {amount/100:.2f} {currency}\n\nQuyidagi tugma Telegramning rasmiy to‘lov sahifasini ochadi. To‘lovni o‘zingiz tasdiqlaysiz.",reply_markup=kb)
-    except Exception as e:
-        await m.edit_text(f"❌ Stars xarid oynasi ochilmadi.\n{e}")
+        return await msg.reply_text("↩️ Stars oluvchining xabariga reply qiling.\nMisol: *stars 100")
+    if not args or not args[0].isdigit():
+        return await msg.reply_text("Misol: *stars 100")
+    stars = int(args[0])
+    if stars <= 0:
+        return await msg.reply_text("❌ Stars miqdori 0 dan katta bo‘lishi kerak.")
+    target = t.from_user
+    username = f"@{target.username}" if target.username else "username mavjud emas"
+    kb = InlineKeyboardMarkup([[
+        InlineKeyboardButton("⭐ Telegram orqali Stars sovg‘a qilish", url="tg://settings/stars/gift")
+    ]])
+    await msg.reply_text(
+        f"⭐ Stars sovg‘asi\n\n"
+        f"👤 Oluvchi: {target.full_name}\n"
+        f"🔗 Username: {username}\n"
+        f"🆔 ID: {target.id}\n"
+        f"⭐ Miqdor: {stars}\n\n"
+        f"Quyidagi tugmani bosing.\n"
+        f"Telegramning rasmiy Stars Gift oynasi ochiladi.\n"
+        f"U yerdan oluvchini tanlab, {stars} ⭐ paketini tanlang va to‘lovni tasdiqlang.",
+        reply_markup=kb
+    )
 
 async def start(update,ctx):
     ensure_user(update.effective_user)
@@ -238,7 +211,7 @@ async def cmd_help(update,ctx):
 ASOSIY
 *help  *id  *men  *aktiv  *aktiv 10  *top 10  *rules  *admins
 *unvon matn  *unvonoff
-*stars 100 — reply orqali rasmiy Stars xaridi (Super Ega)
+*stars 100 — reply orqali Telegram Stars Gift oynasi (Super Ega)
 
 MODERATSIYA (reply)
 *warn  *unwarn  *warns  *clearwarns
@@ -270,8 +243,8 @@ SOZLAMA
 *topup 100
 
 🎁 REAL TELEGRAM GIFT
-Reply + *give  (mavjud Giftlar)
-*give 25 / 50 / 100 — shu narxdagi mavjud Giftni qidiradi.
+Reply + *give
+*give 25 / 50 / 100
 
 💎 PREMIUM
 Reply + *premium 3 / 6 / 12
@@ -337,7 +310,6 @@ async def show_me(update,ctx):
     else:
         txt=f"👤 {u.full_name}\n🆔 {u.id}\n🎖 {title_for(u.id)}\n⭐ Kredit: {wallet(u.id)}"
     await update.effective_message.reply_text(txt)
-
 
 async def title_command(update,ctx,cmd,args):
     chat=update.effective_chat; msg=update.effective_message; actor=update.effective_user
@@ -407,7 +379,6 @@ async def top10_result(bot,chat_id,with_gifts=False,actor_id=None):
         await bot.send_message(chat_id,f"❌ Giftlar olinmadi: {e}"); return
     if not gift:
         await bot.send_message(chat_id,"❌ Hozir 50 ⭐ lik Telegram Gift mavjud emas."); return
-    # Gift is paid from the Super Owner's prepaid Veritas credit.
     cost=50*min(3,len(rows))
     if actor_id is None or wallet(actor_id)<cost:
         await bot.send_message(chat_id,f"❌ Super Ega kreditida kamida {cost} ⭐ kerak."); return
@@ -564,7 +535,6 @@ async def gift_send(update,ctx,args):
         return await update.effective_message.reply_text("🎁 Mavjud narxlar: "+", ".join(map(str,prices[:30])))
     g=candidates[0]; cost=int(g.star_count)
     if wallet(sender)<cost: return await update.effective_message.reply_text(f"⭐ Kredit yetarli emas. Kerak: {cost}, sizda: {wallet(sender)}")
-    # debit first, restore on API failure
     if not wallet_change(sender,-cost,"gift_pending",target,meta={"gift_id":str(g.id)}): return
     try:
         await ctx.bot.send_gift(user_id=target,gift_id=g.id,text=f"🎁 Veritas orqali {update.effective_user.first_name}dan sovg‘a")
@@ -647,7 +617,6 @@ async def passive(update,ctx):
     msg=update.effective_message; u=update.effective_user; chat=update.effective_chat
     if not msg or not u or chat.type not in ("group","supergroup"): return
     ensure_user(u); ensure_group(chat)
-    # Activity: one XP/message; counters reset lazily by UTC day/week.
     day=datetime.now(timezone.utc).strftime("%Y-%m-%d"); week=datetime.now(timezone.utc).strftime("%G-%V")
     with db() as c:
         r=c.execute("SELECT * FROM members WHERE chat_id=? AND user_id=?",(chat.id,u.id)).fetchone()
@@ -659,25 +628,21 @@ async def passive(update,ctx):
     if await protected(ctx.bot,chat.id,u.id) or one("SELECT 1 FROM approved WHERE chat_id=? AND user_id=?",(chat.id,u.id)): return
     g=one("SELECT * FROM groups WHERE chat_id=?",(chat.id,))
     text=(msg.text or msg.caption or "").lower()
-    # blacklist
     for r in all_("SELECT word FROM blacklist WHERE chat_id=?",(chat.id,)):
         if r["word"] in text:
             try: await msg.delete()
             except TelegramError: pass
             return
-    # links
     if g and g["links"] and URL_RE.search(text):
         try: await msg.delete()
         except TelegramError: pass
         return
-    # locks
     d=json.loads(g["locks"] or "{}") if g else {}
     mt=media_type(msg)
     if (mt and d.get(mt)) or (d.get("links") and URL_RE.search(text)):
         try: await msg.delete()
         except TelegramError: pass
         return
-    # flood: N messages / 8 sec
     if g and g["antiflood"]:
         k=(chat.id,u.id); arr=[x for x in FLOOD_CACHE.get(k,[]) if now()-x<=8]; arr.append(now()); FLOOD_CACHE[k]=arr
         if len(arr)>g["flood_limit"]:
@@ -687,12 +652,10 @@ async def passive(update,ctx):
             except TelegramError: pass
             FLOOD_CACHE[k]=[]
             return
-    # notes via #name
     if msg.text and msg.text.startswith("#"):
         name=msg.text[1:].split()[0].lower()
         r=one("SELECT text FROM notes WHERE chat_id=? AND name=?",(chat.id,name))
         if r: return await msg.reply_text(r["text"])
-    # filters
     if text:
         for r in all_("SELECT key,response FROM filters_ WHERE chat_id=?",(chat.id,)):
             if r["key"] in text: return await msg.reply_text(r["response"])
@@ -797,7 +760,6 @@ async def giveaway_job(ctx):
             try: await ctx.bot.send_message(g["chat_id"],"🎉 Konkurs tugadi. Ishtirokchi yo‘q.")
             except TelegramError: pass
             continue
-        # creator funds prizes; failures are reported, never silently faked
         sent=[]
         for uid in winners:
             price=int(g["prize"])
