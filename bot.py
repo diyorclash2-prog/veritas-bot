@@ -1,10 +1,13 @@
 # VERITAS BOT v7 — single-file build
-# Python 3.11+ | python-telegram-bot[job-queue]>=22.5,<23
+# Python 3.11+ | python-telegram-bot[job-queue]>=22.5,<23 | Telethon>=1.45,<2
 #
 # ENV:
 # BOT_TOKEN=...
 # SUPER_OWNER_IDS=5859289233,7056675943
 # DB_PATH=veritas_v7.sqlite3
+# TG_API_ID=...
+# TG_API_HASH=...
+# TG_SESSION=...
 #
 # Notes:
 # - "wallet" below is prepaid bot credit backed by Telegram Stars received by this bot.
@@ -15,6 +18,12 @@
 import os, re, sqlite3, time, random, logging, json
 from datetime import datetime, timezone, timedelta
 from typing import Optional
+
+try:
+    from telethon import TelegramClient, functions as tl_functions, types as tl_types
+    from telethon.sessions import StringSession
+except ImportError:
+    TelegramClient = tl_functions = tl_types = StringSession = None
 
 from telegram import (
     Update, InlineKeyboardButton, InlineKeyboardMarkup, ChatPermissions,
@@ -28,6 +37,9 @@ from telegram.ext import (
 )
 
 TOKEN = os.getenv("BOT_TOKEN", "").strip()
+TG_API_ID = int(os.getenv("TG_API_ID", "0") or 0)
+TG_API_HASH = os.getenv("TG_API_HASH", "").strip()
+TG_SESSION = os.getenv("TG_SESSION", "").strip()
 DB_PATH = os.getenv("DB_PATH", "veritas_v7.sqlite3")
 SUPER_OWNERS = {int(x) for x in os.getenv("SUPER_OWNER_IDS","").split(",") if x.strip().isdigit()}
 VERSION = "7.0"
@@ -142,6 +154,71 @@ def title_for(uid,custom=""):
     if uid in SUPER_OWNERS: return "👑 Super Ega"
     return custom or "A’zo"
 
+def main_menu_markup(uid):
+    kb=[
+      [InlineKeyboardButton("👤 Profil",callback_data="me"),InlineKeyboardButton("⭐ Hisob",callback_data="wallet")],
+      [InlineKeyboardButton("🎁 Gift",callback_data="gifts"),InlineKeyboardButton("💎 Premium",callback_data="premium")],
+      [InlineKeyboardButton("🏘 Guruhlarim",callback_data="mygroups"),InlineKeyboardButton("📚 Kutubxona",callback_data="library")],
+    ]
+    if uid in SUPER_OWNERS:
+        kb.append([InlineKeyboardButton("👑 Super Ega",callback_data="super")])
+    return InlineKeyboardMarkup(kb)
+
+def back_markup(target="home"):
+    return InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Orqaga",callback_data=target),InlineKeyboardButton("🏠 Bosh menyu",callback_data="home")]])
+
+def super_menu_markup():
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("👥 Kabinetlar",callback_data="cabs:0")],
+        [InlineKeyboardButton("⬅️ Orqaga",callback_data="home"),InlineKeyboardButton("🏠 Bosh menyu",callback_data="home")]
+    ])
+
+def user_total_stats(uid):
+    r=one("SELECT COALESCE(SUM(xp),0) xp,COALESCE(SUM(messages),0) messages FROM members WHERE user_id=?",(uid,))
+    return (int(r["xp"]),int(r["messages"])) if r else (0,0)
+
+async def stars_payment_link(target_user, stars):
+    """Prepare Telegram's official Stars-for-friend payment form via the owner's MTProto session."""
+    if not (TelegramClient and TG_API_ID and TG_API_HASH and TG_SESSION):
+        raise RuntimeError("Stars MTProto sozlamalari to‘liq emas.")
+    client=TelegramClient(StringSession(TG_SESSION),TG_API_ID,TG_API_HASH)
+    await client.connect()
+    try:
+        if not await client.is_user_authorized():
+            raise RuntimeError("TG_SESSION avtorizatsiyadan chiqib qolgan.")
+        lookup=("@"+target_user.username) if getattr(target_user,"username",None) else target_user.id
+        entity=await client.get_input_entity(lookup)
+        opts=await client(tl_functions.payments.GetStarsGiftOptionsRequest(user_id=entity))
+        opt=next((x for x in opts if int(x.stars)==int(stars)),None)
+        if not opt:
+            av=", ".join(str(int(x.stars)) for x in opts)
+            raise ValueError(f"{stars} ⭐ paketi mavjud emas. Mavjud: {av}")
+        purpose=tl_types.InputStorePaymentStarsGift(user_id=entity,stars=opt.stars,currency=opt.currency,amount=opt.amount)
+        invoice=tl_types.InputInvoiceStars(purpose=purpose)
+        form=await client(tl_functions.payments.GetPaymentFormRequest(invoice=invoice))
+        return getattr(form,"url",None), opt.currency, int(opt.amount), int(opt.stars)
+    finally:
+        await client.disconnect()
+
+async def stars_cmd(update,ctx,args):
+    if update.effective_user.id not in SUPER_OWNERS:
+        return await update.effective_message.reply_text("⛔ *stars faqat Super Ega uchun.")
+    t=replied(update)
+    if not t or not t.from_user:
+        return await update.effective_message.reply_text("↩️ Stars oluvchining xabariga reply qiling: *stars 100")
+    if not args or not args[0].isdigit() or int(args[0])<=0:
+        return await update.effective_message.reply_text("Misol: *stars 100")
+    stars=int(args[0])
+    m=await update.effective_message.reply_text("⏳ Telegram rasmiy Stars xarid oynasi tayyorlanmoqda...")
+    try:
+        url,currency,amount,stars=await stars_payment_link(t.from_user,stars)
+        if not url:
+            return await m.edit_text("⚠️ Telegram payment form yaratildi, lekin ushbu xarid uchun web-to‘lov URL qaytmadi. Xaridni Telegram rasmiy klientida tasdiqlash talab qilinadi.")
+        kb=InlineKeyboardMarkup([[InlineKeyboardButton(f"💳 {stars} ⭐ sotib berish",url=url)]])
+        await m.edit_text(f"⭐ Oluvchi: {t.from_user.full_name}\n⭐ Miqdor: {stars}\n💳 Narx: {amount/100:.2f} {currency}\n\nQuyidagi tugma Telegramning rasmiy to‘lov sahifasini ochadi. To‘lovni o‘zingiz tasdiqlaysiz.",reply_markup=kb)
+    except Exception as e:
+        await m.edit_text(f"❌ Stars xarid oynasi ochilmadi.\n{e}")
+
 async def start(update,ctx):
     ensure_user(update.effective_user)
     u=update.effective_user
@@ -149,13 +226,7 @@ async def start(update,ctx):
         ensure_group(update.effective_chat)
         await update.effective_message.reply_text("🪶 Veritas v7 ishlayapti. Shaxsiy kabinet uchun botga private yozing.")
         return
-    kb=[
-      [InlineKeyboardButton("👤 Profil",callback_data="me"),InlineKeyboardButton("⭐ Hisob",callback_data="wallet")],
-      [InlineKeyboardButton("🎁 Gift",callback_data="gifts"),InlineKeyboardButton("💎 Premium",callback_data="premium")],
-      [InlineKeyboardButton("🏘 Guruhlarim",callback_data="mygroups"),InlineKeyboardButton("📚 Kutubxona",callback_data="library")],
-    ]
-    if u.id in SUPER_OWNERS: kb.append([InlineKeyboardButton("👑 Super Ega",callback_data="super")])
-    await update.effective_message.reply_text("🪶 VERITAS v7\n\nShaxsiy kabinet",reply_markup=InlineKeyboardMarkup(kb))
+    await update.effective_message.reply_text("🪶 VERITAS v7\n\nShaxsiy kabinet",reply_markup=main_menu_markup(u.id))
 
 async def cmd_id(update,ctx):
     ensure_user(update.effective_user)
@@ -167,6 +238,7 @@ async def cmd_help(update,ctx):
 ASOSIY
 *help  *id  *men  *aktiv  *aktiv 10  *top 10  *rules  *admins
 *unvon matn  *unvonoff
+*stars 100 — reply orqali rasmiy Stars xaridi (Super Ega)
 
 MODERATSIYA (reply)
 *warn  *unwarn  *warns  *clearwarns
@@ -330,7 +402,7 @@ async def top10_result(bot,chat_id,with_gifts=False,actor_id=None):
         available=await bot.get_available_gifts()
         gift=next((g for g in available.gifts
                    if int(getattr(g,"star_count",0))==50
-                   and (getattr(g,"remaining_count",1) or 0)!=0),None)
+                   and (getattr(g,"remaining_count",None) is None or getattr(g,"remaining_count",0)>0)),None)
     except Exception as e:
         await bot.send_message(chat_id,f"❌ Giftlar olinmadi: {e}"); return
     if not gift:
@@ -536,6 +608,8 @@ async def star_text_router(update,ctx):
     if cmd=="topup":
         a=int(args[0]) if args and args[0].isdigit() else 0
         return await topup(update,ctx,a)
+    if cmd=="stars":
+        return await stars_cmd(update,ctx,args)
     if update.effective_chat.type not in ("group","supergroup"):
         return await msg.reply_text("Bu buyruq guruh uchun.")
     if cmd in {"warn","unwarn","clearwarns","mute","unmute","kick","ban","unban","del","ruxsat","ruxsatsiz","admin","unadmin","approve","unapprove"}:
@@ -635,42 +709,83 @@ async def left_member(update,ctx):
         await update.effective_message.reply_text(f"👋 {update.effective_message.left_chat_member.first_name} guruhni tark etdi.")
 
 async def callback(update,ctx):
-    q=update.callback_query; await q.answer(); d=q.data; u=q.from_user; ensure_user(u)
+    q=update.callback_query; d=q.data; u=q.from_user; ensure_user(u)
+    await q.answer()
+
+    if d=="home":
+        return await q.edit_message_text("🪶 VERITAS v7\n\nShaxsiy kabinet",reply_markup=main_menu_markup(u.id))
+
     if d.startswith("topgift:") or d.startswith("topplain:"):
-        if u.id not in SUPER_OWNERS:
-            return await q.answer("Faqat Super Ega.",show_alert=True)
-        chat_id=int(d.split(":",1)[1])
-        with_gifts=d.startswith("topgift:")
+        if u.id not in SUPER_OWNERS: return
+        chat_id=int(d.split(":",1)[1]); with_gifts=d.startswith("topgift:")
         await q.edit_message_text("⏳ TOP-10 hisoblanmoqda..." if not with_gifts else "⏳ TOP-10 va TOP-3 Giftlar tayyorlanmoqda...")
         return await top10_result(ctx.bot,chat_id,with_gifts,u.id)
+
     if d=="me":
+        xp,msgs=user_total_stats(u.id)
         r=one("SELECT wallet FROM users WHERE user_id=?",(u.id,))
-        return await q.edit_message_text(f"👤 {u.full_name}\n🆔 {u.id}\n🎖 {title_for(u.id)}\n⭐ Kredit: {r['wallet'] if r else 0}")
+        return await q.edit_message_text(f"👤 {u.full_name}\n🆔 {u.id}\n🎖 {title_for(u.id)}\n⭐ Kredit: {r['wallet'] if r else 0}\n✨ XP: {xp}\n💬 Xabarlar: {msgs}",reply_markup=back_markup())
+
     if d=="wallet":
         kb=[[InlineKeyboardButton(f"{x} ⭐",callback_data=f"top:{x}") for x in TOPUPS[i:i+3]] for i in range(0,len(TOPUPS),3)]
+        kb.append([InlineKeyboardButton("⬅️ Orqaga",callback_data="home"),InlineKeyboardButton("🏠 Bosh menyu",callback_data="home")])
         return await q.edit_message_text(f"⭐ Kredit: {wallet(u.id)}\nTo‘ldirish:",reply_markup=InlineKeyboardMarkup(kb))
+
     if d.startswith("top:"):
         amount=int(d.split(":")[1])
-        # send a new invoice; invoices cannot replace callback message
-        fake=update
         return await ctx.bot.send_invoice(chat_id=u.id,title="Veritas Stars krediti",description=f"{amount} ⭐ kredit",payload=f"topup:{u.id}:{amount}:{now()}",currency="XTR",prices=[LabeledPrice("Stars",amount)])
+
     if d=="gifts":
         try:
-            gs=await ctx.bot.get_available_gifts()
-            prices=sorted({int(g.star_count) for g in gs.gifts})
-            return await q.edit_message_text("🎁 Hozirgi Gift narxlari:\n"+", ".join(f"{p} ⭐" for p in prices[:50])+"\n\nGuruhda oluvchiga reply: *give <narx>")
-        except Exception as e: return await q.edit_message_text(f"❌ {e}")
-    if d=="premium": return await q.edit_message_text("💎 Premium: 3 oy — 1000 ⭐ | 6 oy — 1500 ⭐ | 12 oy — 2500 ⭐\nGuruhda reply: *premium 3")
+            gs=await ctx.bot.get_available_gifts(); prices=sorted({int(g.star_count) for g in gs.gifts})
+            return await q.edit_message_text("🎁 Hozirgi Gift narxlari:\n"+", ".join(f"{p} ⭐" for p in prices[:50])+"\n\nGuruhda oluvchiga reply: *give <narx>",reply_markup=back_markup())
+        except Exception as e: return await q.edit_message_text(f"❌ {e}",reply_markup=back_markup())
+
+    if d=="premium":
+        return await q.edit_message_text("💎 Premium: 3 oy — 1000 ⭐ | 6 oy — 1500 ⭐ | 12 oy — 2500 ⭐\nGuruhda reply: *premium 3",reply_markup=back_markup())
+
     if d=="mygroups":
         rows=all_("SELECT chat_id,title FROM groups WHERE owner_id=? OR chat_id IN (SELECT chat_id FROM vadmins WHERE user_id=?)",(u.id,u.id))
-        return await q.edit_message_text("🏘 "+("\n".join(f"{r['title']} ({r['chat_id']})" for r in rows) or "Guruh topilmadi."))
+        return await q.edit_message_text("🏘 "+("\n".join(f"{r['title']} ({r['chat_id']})" for r in rows) or "Guruh topilmadi."),reply_markup=back_markup())
+
     if d=="library":
         rows=all_("SELECT title,author FROM books ORDER BY id DESC LIMIT 20")
-        return await q.edit_message_text("📚 "+("\n".join(f"{r['title']} — {r['author']}" for r in rows) or "Kutubxona hozircha bo‘sh."))
+        return await q.edit_message_text("📚 "+("\n".join(f"{r['title']} — {r['author']}" for r in rows) or "Kutubxona hozircha bo‘sh."),reply_markup=back_markup())
+
     if d=="super":
         if u.id not in SUPER_OWNERS: return await q.edit_message_text("⛔ Ruxsat yo‘q.")
         uc=one("SELECT COUNT(*) n FROM users")["n"]; gc=one("SELECT COUNT(*) n FROM groups")["n"]
-        return await q.edit_message_text(f"👑 SUPER EGA\nFoydalanuvchilar: {uc}\nGuruhlar: {gc}")
+        return await q.edit_message_text(f"👑 SUPER EGA\nFoydalanuvchilar: {uc}\nGuruhlar: {gc}",reply_markup=super_menu_markup())
+
+    if d.startswith("cabs:"):
+        if u.id not in SUPER_OWNERS: return
+        page=max(0,int(d.split(":")[1])); per=8; off=page*per
+        rows=all_("SELECT user_id,username,first_name,wallet FROM users ORDER BY created_at DESC,user_id DESC LIMIT ? OFFSET ?",(per,off))
+        total=one("SELECT COUNT(*) n FROM users")["n"]
+        kb=[]
+        for r in rows:
+            name=(r["first_name"] or r["username"] or str(r["user_id"]))[:28]
+            kb.append([InlineKeyboardButton(f"👤 {name} · {r['wallet']}⭐",callback_data=f"cab:{r['user_id']}:{page}")])
+        nav=[]
+        if page>0: nav.append(InlineKeyboardButton("◀️",callback_data=f"cabs:{page-1}"))
+        if off+per<total: nav.append(InlineKeyboardButton("▶️",callback_data=f"cabs:{page+1}"))
+        if nav: kb.append(nav)
+        kb.append([InlineKeyboardButton("⬅️ Orqaga",callback_data="super"),InlineKeyboardButton("🏠 Bosh menyu",callback_data="home")])
+        return await q.edit_message_text(f"👥 SHAXSIY KABINETLAR\nJami: {total} | Sahifa: {page+1}",reply_markup=InlineKeyboardMarkup(kb))
+
+    if d.startswith("cab:"):
+        if u.id not in SUPER_OWNERS: return
+        _,sid,spage=d.split(":"); uid=int(sid); page=int(spage)
+        r=one("SELECT * FROM users WHERE user_id=?",(uid,))
+        if not r: return await q.edit_message_text("Foydalanuvchi topilmadi.",reply_markup=back_markup("super"))
+        xp,msgs=user_total_stats(uid)
+        mr=one("SELECT title FROM members WHERE user_id=? AND title<>'' ORDER BY messages DESC LIMIT 1",(uid,))
+        custom=mr["title"] if mr else ""
+        uname=("@"+r["username"]) if r["username"] else "—"
+        text=(f"👤 SHAXSIY KABINET\n\nIsm: {r['first_name'] or '—'}\nUsername: {uname}\n🆔 ID: {uid}\n"
+              f"🎖 Unvon: {title_for(uid,custom)}\n⭐ Kredit: {r['wallet']}\n✨ XP: {xp}\n💬 Xabarlar: {msgs}\n📈 Level: {level(xp)}")
+        kb=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Kabinetlar",callback_data=f"cabs:{page}"),InlineKeyboardButton("🏠 Bosh menyu",callback_data="home")]])
+        return await q.edit_message_text(text,reply_markup=kb)
 
 async def giveaway_job(ctx):
     rows=all_("SELECT * FROM giveaways WHERE status='open' AND end_at<=?",(now(),))
