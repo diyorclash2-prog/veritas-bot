@@ -10,7 +10,7 @@
 # *stars now opens Telegram's official Stars Gift section.
 # Recipient/amount are displayed by Veritas, but must be selected/confirmed in Telegram.
 
-import os, re, sqlite3, time, random, logging, json, asyncio
+import os, re, sqlite3, time, random, logging, json, asyncio, base64
 import urllib.request
 import urllib.error
 from datetime import datetime, timezone, timedelta
@@ -1203,42 +1203,87 @@ def _clean_json_text ( text ) :
     return t[a:b+1] if a>=0 and b>a else t
 
 def _openai_book_quiz_sync ( pdf_bytes,filename,title,count ) :
-    fid=""
+    """Matnli yoki skaner PDFni Responses API orqali o'qib, kitobning o'zidan quiz tuzadi."""
+    if not OPENAI_API_KEY:
+        raise RuntimeError ( "OPENAI_API_KEY sozlanmagan")
+    if not pdf_bytes or not pdf_bytes.startswith ( b"%PDF" ) :
+        raise RuntimeError ( "Fayl haqiqiy PDF emas")
+    if len ( pdf_bytes) > 45 * 1024 * 1024:
+        raise RuntimeError ( "PDF 45 MB dan katta")
+
+    safe= ( filename or "book.pdf" ) .replace ( '"','' ) .replace ( "\r","" ) .replace ( "\n","")
+    file_data="data:application/pdf;base64,"+base64.b64encode ( pdf_bytes ) .decode ( "ascii")
+    instruction=(
+      f"Bu PDF — ‘{title}’ kitobi. PDFni to‘liq tahlil qiling va FAQAT shu kitob mazmuniga tayangan holda aynan {count} ta test tuzing. "
+      "Agar PDF skanerlangan bo‘lsa, sahifa rasmlaridagi matnni ham o‘qing. Tashqi bilim qo‘shmang. "
+      "Har savolda aynan 4 ta variant bo‘lsin va faqat bittasi to‘g‘ri bo‘lsin. "
+      "Savollar takrorlanmasin, kitobni o‘qiganlikni tekshiradigan mazmunli savollar bo‘lsin. "
+      "Savol va variantlarni o‘zbek tilida yozing. "
+      "Faqat JSON massiv qaytaring. Har element: "
+      '{"question":"...","options":["...","...","...","..."],"correct":0,"explanation":"..."}. '
+      "correct faqat 0,1,2,3 dan biri. explanation kitobdagi javobga tayangan juda qisqa izoh. "
+      "Markdown yoki JSONdan tashqari hech qanday matn yozmang."
+    )
+    payload=json.dumps ( {
+      "model":OPENAI_MODEL,
+      "input":[{
+        "role":"user",
+        "content":[
+          {"type":"input_file","filename":safe,"file_data":file_data,"detail":"low"},
+          {"type":"input_text","text":instruction}
+        ]
+      }],
+      "max_output_tokens":max ( 2200,count*320)
+    },ensure_ascii=False ) .encode ( "utf-8")
+
+    req=urllib.request.Request(
+      "https://api.openai.com/v1/responses",
+      data=payload,
+      headers={"Authorization":f"Bearer {OPENAI_API_KEY}","Content-Type":"application/json"},
+      method="POST"
+    )
     try:
-        fid=_openai_upload_pdf_sync ( pdf_bytes,filename )
-        if not fid: raise RuntimeError ( "OpenAI fayl ID qaytarmadi" )
-        instruction=(
-          f"Ushbu PDF — ‘{title}’ kitobi. Faqat PDF ichidagi ma’lumotlarga tayangan holda {count} ta test tuzing. "
-          "Tashqi bilim qo‘shmang. Har savolda aynan 4 ta variant bo‘lsin va faqat bittasi to‘g‘ri bo‘lsin. "
-          "Savollar bir-birini takrorlamasin, mazmunli va kitobni tushunganini tekshirsin. "
-          "Faqat JSON massiv qaytaring. Har element: question (string ) , options (4 string ) , correct (0-3 integer ) , explanation (string, kitobga tayangan juda qisqa izoh ) . "
-          "Markdown yoki JSONdan tashqari matn yozmang."
-        )
-        payload=json.dumps ( {
-          "model":OPENAI_MODEL,
-          "input":[{"role":"user","content":[{"type":"input_file","file_id":fid},{"type":"input_text","text":instruction}]}],
-          "max_output_tokens":max ( 1800,count*280 )
-        },ensure_ascii=False ).encode ( "utf-8" )
-        req=urllib.request.Request ( "https://api.openai.com/v1/responses",data=payload,headers={"Authorization":f"Bearer {OPENAI_API_KEY}","Content-Type":"application/json"},method="POST" )
-        with urllib.request.urlopen ( req,timeout=150 ) as resp: data=json.loads ( resp.read ( ).decode ( "utf-8" ) )
-        raw=_clean_json_text ( _extract_response_text ( data ) )
-        items=json.loads ( raw )
-        if not isinstance ( items,list ): raise ValueError ( "AI JSON massiv qaytarmadi" )
-        out=[]
-        for x in items:
-            if not isinstance ( x,dict ): continue
-            q=str ( x.get ( "question","" ) ).strip ( )[:300]
-            opts=x.get ( "options",[] )
-            try: correct=int ( x.get ( "correct",-1 ) )
-            except Exception: correct=-1
-            exp=str ( x.get ( "explanation","" ) ).strip ( )[:200]
-            if q and isinstance ( opts,list ) and len ( opts )==4 and 0<=correct<4:
-                opts=[str ( z ).strip ( )[:100] for z in opts]
-                if all ( opts ): out.append ( {"question":q,"options":opts,"correct":correct,"explanation":exp} )
-        if len ( out ) < count: raise ValueError ( f"AI {len ( out ) } ta yaroqli test qaytardi" )
-        return out[:count]
-    finally:
-        _openai_delete_file_sync ( fid )
+        with urllib.request.urlopen ( req,timeout=180) as resp:
+            data=json.loads ( resp.read (  ) .decode ( "utf-8" ) )
+    except urllib.error.HTTPError as e:
+        detail=""
+        try: detail=e.read (  ) .decode ( "utf-8","replace" ) [:3000]
+        except Exception: pass
+        log.error ( "Book quiz OpenAI HTTP %s: %s",getattr ( e,"code","?" ) ,detail)
+        raise RuntimeError ( f"OpenAI HTTP {getattr ( e,'code','?' ) }: {detail[:600]}")
+    except Exception as e:
+        log.exception ( "Book quiz OpenAI connection error")
+        raise RuntimeError ( f"OpenAI ulanish xatosi: {e}")
+
+    raw_text=_extract_response_text ( data)
+    if not raw_text:
+        log.error ( "Book quiz empty OpenAI response: %s",str ( data ) [:3000])
+        raise RuntimeError ( "AI bo‘sh javob qaytardi")
+    raw=_clean_json_text ( raw_text)
+    try:
+        items=json.loads ( raw)
+    except Exception:
+        log.error ( "Book quiz invalid JSON: %s",raw_text[:5000])
+        raise RuntimeError ( "AI testlarni JSON formatida qaytarmadi")
+    if not isinstance ( items,list ) :
+        raise RuntimeError ( "AI JSON massiv qaytarmadi")
+
+    out=[]
+    for x in items:
+        if not isinstance ( x,dict ) : continue
+        q=str ( x.get ( "question","" )  ) .strip (  ) [:300]
+        opts=x.get ( "options",[])
+        try: correct=int ( x.get ( "correct",-1 ) )
+        except Exception: correct=-1
+        exp=str ( x.get ( "explanation","" )  ) .strip (  ) [:190]
+        if q and isinstance ( opts,list) and len ( opts ) ==4 and 0<=correct<4:
+            opts=[str ( z ) .strip (  ) [:100] for z in opts]
+            if all ( opts ) :
+                out.append ( {"question":q,"options":opts,"correct":correct,"explanation":exp})
+        if len ( out ) >=count: break
+    if len ( out ) <count:
+        raise RuntimeError ( f"AI {len ( out ) } ta yaroqli test qaytardi, {count} ta kerak")
+    return out[:count]
 
 
 async def quiz_replace_message ( q, ctx, text, reply_markup=None ) :
@@ -1273,42 +1318,85 @@ async def _quiz_allowed_groups ( ctx,uid ) :
 async def _make_and_send_book_quiz ( q,ctx,bid,chat_id,count ) :
     u=q.from_user
     r=one ( "SELECT title,pdf_file_id FROM library_books WHERE id=? AND status='approved'", ( bid,) )
-    if not r or not r["pdf_file_id"]: return await q.edit_message_text ( "❌ Kitob PDF’i topilmadi.",reply_markup=back_markup ( "library" ) )
-    if count not in ( 5,10,20 ): return await q.answer ( "Test soni noto‘g‘ri.",show_alert=True )
-    if u.id not in SUPER_OWNERS and not await is_tg_admin ( ctx.bot,chat_id,u.id ):
-        return await q.answer ( "Bu guruhda admin emassiz.",show_alert=True )
-    if not OPENAI_API_KEY: return await q.edit_message_text ( "⚠️ Veritas AI kaliti sozlanmagan.",reply_markup=back_markup ( "library" ) )
-    await q.edit_message_text ( f"🧠 ‘{r['title']}’ kitobi o‘qilmoqda...\n\n{count} ta test tayyorlanadi. Biroz kuting." )
+    if not r or not r["pdf_file_id"]:
+        return await q.edit_message_text ( "❌ Kitob PDF’i topilmadi.",reply_markup=back_markup ( "library" ) )
+    if count not in (5,10,20 ) :
+        return await q.answer ( "Test soni noto‘g‘ri.",show_alert=True)
+    if u.id not in SUPER_OWNERS and not await is_tg_admin ( ctx.bot,chat_id,u.id ) :
+        return await q.answer ( "Bu guruhda admin emassiz.",show_alert=True)
+    if not OPENAI_API_KEY:
+        return await q.edit_message_text ( "⚠️ Veritas AI kaliti sozlanmagan.",reply_markup=back_markup ( "library" ) )
+
+    await q.edit_message_text(
+        f"🧠 ‘{r['title']}’ kitobi o‘qilmoqda...\n\n"
+        f"{count} ta test tayyorlanadi. Matnli yoki skaner PDF bo‘lishi mumkin.\nBiroz kuting."
+    )
     path=f"/tmp/veritas_book_{bid}_{u.id}.pdf"
     try:
-        tgfile=await ctx.bot.get_file ( r["pdf_file_id"] )
-        fsize=int ( getattr ( tgfile,"file_size",0 ) or 0 )
-        if fsize and fsize>19*1024*1024:
-            return await q.edit_message_text ( "⚠️ Hozircha test tuzish uchun PDF 19 MB dan kichik bo‘lishi kerak.",reply_markup=back_markup ( "library" ) )
-        await tgfile.download_to_drive ( custom_path=path )
-        pdf_bytes=Path ( path ).read_bytes ( )
-        if len ( pdf_bytes )>19*1024*1024:
-            return await q.edit_message_text ( "⚠️ Hozircha test tuzish uchun PDF 19 MB dan kichik bo‘lishi kerak.",reply_markup=back_markup ( "library" ) )
-        quizzes=await asyncio.to_thread ( _openai_book_quiz_sync,pdf_bytes,f"book_{bid}.pdf",r["title"],count )
-        await ctx.bot.send_message ( chat_id,f"🧠 VASATIYA KITOB TESTI\n\n📖 {r['title']}\n📝 {len ( quizzes ) } ta savol\n\nTestni boshlaymiz 👇" )
+        tgfile=await ctx.bot.get_file ( r["pdf_file_id"])
+        fsize=int ( getattr ( tgfile,"file_size",0) or 0)
+        if fsize and fsize>45*1024*1024:
+            return await q.edit_message_text(
+                "⚠️ PDF juda katta. Hozir test uchun 45 MB gacha PDF qabul qilinadi.",
+                reply_markup=back_markup ( "library")
+            )
+        await tgfile.download_to_drive ( custom_path=path)
+        pdf_bytes=Path ( path ) .read_bytes ( )
+        if len ( pdf_bytes ) >45*1024*1024:
+            return await q.edit_message_text(
+                "⚠️ PDF juda katta. Hozir test uchun 45 MB gacha PDF qabul qilinadi.",
+                reply_markup=back_markup ( "library")
+            )
+        if not pdf_bytes.startswith ( b"%PDF" ) :
+            raise RuntimeError ( "Telegramdan olingan fayl PDF emas")
+
+        quizzes=await asyncio.to_thread(
+            _openai_book_quiz_sync,pdf_bytes,f"book_{bid}.pdf",r["title"],count
+        )
+
+        await ctx.bot.send_message(
+            chat_id,
+            f"🧠 VASATIYA KITOB TESTI\n\n📖 {r['title']}\n📝 {len ( quizzes ) } ta savol\n\nTestni boshlaymiz 👇"
+        )
         sent=0
-        for i,x in enumerate ( quizzes,1 ):
-            await ctx.bot.send_poll ( chat_id=chat_id,question=f"{i}. {x['question']}"[:300],options=x["options"],type="quiz",correct_option_id=x["correct"],is_anonymous=False,explanation= ( x["explanation"] or None ) ,protect_content=False )
+        for i,x in enumerate ( quizzes,1 ) :
+            await ctx.bot.send_poll(
+                chat_id=chat_id,
+                question=f"{i}. {x['question']}"[:300],
+                options=x["options"],
+                type="quiz",
+                correct_option_id=x["correct"],
+                is_anonymous=False,
+                explanation= ( x["explanation"] or None ) ,
+                protect_content=False
+            )
             sent+=1
-            await asyncio.sleep ( 0.35 )
-        return await q.edit_message_text ( f"✅ Tayyor!\n\n📖 {r['title']}\n🧠 {sent} ta test guruhga yuborildi.",reply_markup=InlineKeyboardMarkup ( [[InlineKeyboardButton ( "📖 Kitobga qaytish",callback_data=f"libbook:{bid}" ) ]] ) )
-    except urllib.error.HTTPError as e:
-        detail=""
-        try: detail=e.read ( ).decode ( "utf-8" )[:1000]
-        except Exception: pass
-        log.error ( "Book quiz OpenAI HTTP %s %s",getattr ( e,"code","?" ),detail )
-        return await q.edit_message_text ( "⚠️ AI kitobdan test tuza olmadi. PDF o‘qilishi yoki API holatini tekshiring.",reply_markup=back_markup ( "library" ) )
-    except Exception:
-        log.exception ( "Book quiz error" )
-        return await q.edit_message_text ( "⚠️ Kitobdan test tuzishda xatolik bo‘ldi. PDF matnli/o‘qiladigan ekanini tekshiring.",reply_markup=back_markup ( "library" ) )
+            await asyncio.sleep ( 0.4)
+
+        return await q.edit_message_text(
+            f"✅ Tayyor!\n\n📖 {r['title']}\n🧠 {sent} ta test guruhga yuborildi.",
+            reply_markup=InlineKeyboardMarkup(
+                [[InlineKeyboardButton ( "📖 Kitobga qaytish",callback_data=f"libbook:{bid}" ) ]]
+            )
+        )
+    except Exception as e:
+        log.exception ( "Book quiz error: %s",e)
+        s=str ( e)
+        if "401" in s:
+            msg="⚠️ OpenAI kaliti qabul qilinmadi. Railway’dagi OPENAI_API_KEY ni tekshiring."
+        elif "429" in s:
+            msg="⚠️ OpenAI limiti yoki balans sabab test tuzilmadi. API balansini tekshiring."
+        elif "45 MB" in s:
+            msg="⚠️ PDF juda katta. Hozir test uchun 45 MB gacha PDF qabul qilinadi."
+        elif "JSON" in s or "yaroqli test" in s:
+            msg="⚠️ AI kitobni o‘qidi, lekin test formatini to‘g‘ri qaytarmadi. Qayta urinib ko‘ring."
+        else:
+            msg="⚠️ Kitobdan test tuzishda xatolik bo‘ldi. Aniq sabab Railway logiga yozildi."
+        return await q.edit_message_text ( msg,reply_markup=back_markup ( "library" ) )
     finally:
-        try: Path ( path ).unlink ( missing_ok=True )
+        try: Path ( path ) .unlink ( missing_ok=True)
         except Exception: pass
+
 
 async def group_ai_reply ( update,ctx ) :
     msg=update.effective_message; chat=update.effective_chat; u=update.effective_user
