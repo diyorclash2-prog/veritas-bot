@@ -1333,7 +1333,21 @@ async def _make_and_send_book_quiz ( q,ctx,bid,chat_id,count ) :
     )
     path=f"/tmp/veritas_book_{bid}_{u.id}.pdf"
     try:
-        tgfile=await ctx.bot.get_file ( r["pdf_file_id"])
+        # Bot API getFile katta PDFlarda "File is too big" qaytarishi mumkin.
+        # Avval Telegram Bot API orqali urinib ko'ramiz; katta fayl bo'lsa foydalanuvchiga
+        # aniq xabar beramiz. Keyingi bosqichda Local Bot API/MTProto orqali katta PDFlar
+        # uchun alohida downloader ulash mumkin.
+        try:
+            tgfile=await ctx.bot.get_file ( r["pdf_file_id"])
+        except Exception as e:
+            if "File is too big" in str ( e ) :
+                return await q.edit_message_text(
+                    "⚠️ Bu PDF Telegram Bot API yuklab olish limitidan katta.\n\n"
+                    "Kitob kutubxonada qoladi, lekin AI test tuzishi uchun hozircha kichikroq PDF kerak. "
+                    "Katta kitoblar uchun alohida yuklash tizimini ulash kerak.",
+                    reply_markup=back_markup ( "library")
+                )
+            raise
         fsize=int ( getattr ( tgfile,"file_size",0) or 0)
         if fsize and fsize>45*1024*1024:
             return await q.edit_message_text(
