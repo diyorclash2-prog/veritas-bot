@@ -41,6 +41,7 @@ OPENAI_MODEL = os.getenv ( "OPENAI_MODEL", "gpt-5.6-luna" ) .strip ( ) or "gpt-5
 TG_API_ID = int ( os.getenv ( "TG_API_ID", "0") or 0)
 TG_API_HASH = os.getenv ( "TG_API_HASH", "" ) .strip ( )
 TG_SESSION = os.getenv ( "TG_SESSION", "" ) .strip ( )
+TG_STORAGE_CHAT_ID = int ( os.getenv ( "TG_STORAGE_CHAT_ID", "0") or 0)
 DEMO_DAYS = 7
 WEEK_PRICE = 100
 PREMIUM = {3:1000, 6:1500, 12:2500}
@@ -1392,6 +1393,45 @@ async def _quiz_allowed_groups ( ctx,uid ) :
         except Exception: pass
     return out[:40]
 
+async def _download_large_telegram_file ( ctx, file_id, path ) :
+    """
+    Bot API getFile katta faylni bermasa:
+    1) bot file_id orqali PDFni maxsus storage guruhiga server-side yuboradi;
+    2) Telethon user session shu xabarni MTProto orqali yuklab oladi.
+    Bot va TG_SESSION egasi storage guruhida bo‘lishi kerak.
+    """
+    if not (TelegramClient and StringSession ) :
+        raise RuntimeError ( "Telethon o‘rnatilmagan")
+    if not TG_API_ID or not TG_API_HASH or not TG_SESSION:
+        raise RuntimeError ( "TG_API_ID/TG_API_HASH/TG_SESSION sozlanmagan")
+    if not TG_STORAGE_CHAT_ID:
+        raise RuntimeError ( "TG_STORAGE_CHAT_ID sozlanmagan")
+
+    storage_msg = await ctx.bot.send_document(
+        chat_id=TG_STORAGE_CHAT_ID,
+        document=file_id,
+        caption="Veritas AI vaqtinchalik PDF"
+    )
+    client = TelegramClient ( StringSession ( TG_SESSION ) , TG_API_ID, TG_API_HASH)
+    try:
+        await client.connect ( )
+        if not await client.is_user_authorized (  ) :
+            raise RuntimeError ( "TG_SESSION avtorizatsiyadan chiqib qolgan")
+        entity = await client.get_entity ( TG_STORAGE_CHAT_ID)
+        msg = await client.get_messages ( entity, ids=storage_msg.message_id)
+        if not msg:
+            raise RuntimeError ( "Storage guruhidagi PDF xabari topilmadi")
+        saved = await client.download_media ( msg, file=path)
+        if not saved or not Path ( path ) .exists (  ) :
+            raise RuntimeError ( "MTProto PDFni yuklay olmadi")
+        return path
+    finally:
+        await client.disconnect ( )
+        try:
+            await ctx.bot.delete_message ( TG_STORAGE_CHAT_ID, storage_msg.message_id)
+        except Exception:
+            pass
+
 async def _make_and_send_book_quiz ( q,ctx,bid,chat_id,count ) :
     u=q.from_user
     r=one ( "SELECT title,pdf_file_id FROM library_books WHERE id=? AND status='approved'", ( bid,) )
@@ -1410,18 +1450,21 @@ async def _make_and_send_book_quiz ( q,ctx,bid,chat_id,count ) :
     )
     path=f"/tmp/veritas_book_{bid}_{u.id}.pdf"
     try:
-        tgfile=await ctx.bot.get_file ( r["pdf_file_id"])
-        fsize=int ( getattr ( tgfile,"file_size",0) or 0)
-        if fsize and fsize>45*1024*1024:
-            return await q.edit_message_text(
-                "⚠️ PDF juda katta. Hozir test uchun 45 MB gacha PDF qabul qilinadi.",
-                reply_markup=back_markup ( "library")
-            )
-        await tgfile.download_to_drive ( custom_path=path)
+        try:
+            tgfile=await ctx.bot.get_file ( r["pdf_file_id"])
+            await tgfile.download_to_drive ( custom_path=path)
+        except TelegramError as e:
+            if "File is too big" not in str ( e ) :
+                raise
+            log.info ( "Bot API file too big; MTProto fallback boshlandi.")
+            await _download_large_telegram_file ( ctx, r["pdf_file_id"], path)
+
         pdf_bytes=Path ( path ) .read_bytes ( )
+        # OpenAI file input uchun 50 MB request chegarasidan xavfsiz pastda ushlaymiz.
         if len ( pdf_bytes ) >45*1024*1024:
             return await q.edit_message_text(
-                "⚠️ PDF juda katta. Hozir test uchun 45 MB gacha PDF qabul qilinadi.",
+                "⚠️ Telegramdan PDF olindi, lekin AIga yuborish uchun 45 MB dan katta. "
+                "Keyingi bosqichda katta kitobni bo‘lib o‘qish tizimini qo‘shamiz.",
                 reply_markup=back_markup ( "library")
             )
         if not pdf_bytes.startswith ( b"%PDF" ) :
@@ -1467,6 +1510,12 @@ async def _make_and_send_book_quiz ( q,ctx,bid,chat_id,count ) :
             msg="⚠️ PDF juda katta. Hozir test uchun 45 MB gacha PDF qabul qilinadi."
         elif "JSON" in s or "yaroqli test" in s:
             msg="⚠️ AI kitobni o‘qidi, lekin test formatini to‘g‘ri qaytarmadi. Qayta urinib ko‘ring."
+        elif "TG_STORAGE_CHAT_ID" in s:
+            msg="⚠️ Katta PDF uchun storage guruh hali sozlanmagan."
+        elif "Telethon" in s:
+            msg="⚠️ Katta PDF moduli uchun Telethon kutubxonasi kerak."
+        elif "TG_API_ID" in s or "TG_SESSION" in s:
+            msg="⚠️ Katta PDF uchun Telegram MTProto sozlamalari to‘liq emas."
         else:
             msg="⚠️ Kitobdan test tuzishda xatolik bo‘ldi. Aniq sabab Railway logiga yozildi."
         return await q.edit_message_text ( msg,reply_markup=back_markup ( "library" ) )
