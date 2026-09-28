@@ -1240,6 +1240,23 @@ def _openai_book_quiz_sync ( pdf_bytes,filename,title,count ) :
     finally:
         _openai_delete_file_sync ( fid )
 
+
+async def quiz_replace_message ( q, ctx, text, reply_markup=None ) :
+    """Quiz menyusini rasmli yoki oddiy xabardan ishonchli ochadi."""
+    msg = q.message
+    try:
+        # Kitob kartasi cover rasmi bilan yuborilgan bo'lsa edit_message_text ishlamaydi.
+        if msg and (msg.photo or msg.video or msg.document or msg.audio or msg.animation ) :
+            chat_id = msg.chat.id
+            try:
+                await msg.delete ( )
+            except Exception:
+                pass
+            return await ctx.bot.send_message ( chat_id, text, reply_markup=reply_markup)
+        return await q.edit_message_text ( text, reply_markup=reply_markup)
+    except TelegramError:
+        return await ctx.bot.send_message ( q.message.chat.id, text, reply_markup=reply_markup)
+
 async def _quiz_allowed_groups ( ctx,uid ) :
     rows=all_ ( "SELECT chat_id,title FROM groups ORDER BY title" )
     out=[]
@@ -1700,11 +1717,11 @@ async def callback ( update,ctx ) :
         if not r or not r["pdf_file_id"]: return await q.answer ( "PDF mavjud emas",show_alert=True )
         groups=await _quiz_allowed_groups ( ctx,u.id )
         if not groups:
-            return await q.edit_message_text ( "👥 Test yuborish uchun Veritas ishlayotgan kamida bitta guruhda admin bo‘lishingiz kerak.",reply_markup=InlineKeyboardMarkup ( [[InlineKeyboardButton ( "⬅️ Kitob",callback_data=f"libbook:{bid}" ) ]] ) )
+            return await quiz_replace_message ( q,ctx,"👥 Test yuborish uchun Veritas ishlayotgan kamida bitta guruhda admin bo‘lishingiz kerak.",reply_markup=InlineKeyboardMarkup ( [[InlineKeyboardButton ( "⬅️ Kitob",callback_data=f"libbook:{bid}" ) ]] ) )
         kb=[]
         for cid,title in groups[:20]: kb.append ( [InlineKeyboardButton ( "👥 "+title[:35],callback_data=f"libqgrp:{bid}:{cid}" ) ] )
         kb.append ( [InlineKeyboardButton ( "⬅️ Kitob",callback_data=f"libbook:{bid}" ) ] )
-        return await q.edit_message_text ( f"🧠 TEST TUZISH\n\n📖 {r['title']}\n\nTest qaysi guruhga yuborilsin?",reply_markup=InlineKeyboardMarkup ( kb ) )
+        return await quiz_replace_message ( q,ctx,f"🧠 TEST TUZISH\n\n📖 {r['title']}\n\nTest qaysi guruhga yuborilsin?",reply_markup=InlineKeyboardMarkup ( kb ) )
 
     if d.startswith ( "libqgrp:" ) :
         _,sbid,schat=d.split ( ":" ); bid=int ( sbid ); chat_id=int ( schat )
@@ -1713,7 +1730,7 @@ async def callback ( update,ctx ) :
         gr=one ( "SELECT title FROM groups WHERE chat_id=?", ( chat_id,) ); book=one ( "SELECT title FROM library_books WHERE id=?", ( bid,) )
         if not gr or not book: return await q.answer ( "Kitob yoki guruh topilmadi.",show_alert=True )
         kb=InlineKeyboardMarkup ( [[InlineKeyboardButton ( "5 ta",callback_data=f"libqrun:{bid}:{chat_id}:5" ),InlineKeyboardButton ( "10 ta",callback_data=f"libqrun:{bid}:{chat_id}:10" ),InlineKeyboardButton ( "20 ta",callback_data=f"libqrun:{bid}:{chat_id}:20" )],[InlineKeyboardButton ( "⬅️ Guruhlar",callback_data=f"libquiz:{bid}" ) ]] )
-        return await q.edit_message_text ( f"🧠 TEST TUZISH\n\n📖 {book['title']}\n👥 {gr['title']}\n\nNechta test tuzilsin?",reply_markup=kb )
+        return await quiz_replace_message ( q,ctx,f"🧠 TEST TUZISH\n\n📖 {book['title']}\n👥 {gr['title']}\n\nNechta test tuzilsin?",reply_markup=kb )
 
     if d.startswith ( "libqrun:" ) :
         _,sbid,schat,scount=d.split ( ":" )
