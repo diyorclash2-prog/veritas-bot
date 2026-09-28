@@ -36,6 +36,10 @@ DEMO_DAYS = 7
 WEEK_PRICE = 100
 PREMIUM = {3:1000, 6:1500, 12:2500}
 TOPUPS = (25,50,100,250,500,1000,2500)
+AI_PRIVATE_PRICE = 100
+AI_PRIVATE_DAYS = 30
+AI_GROUP_PLANS = {7:250, 30:500}
+AI_RATE_CACHE = {}
 FLOOD_CACHE = {}
 STATE = {}
 URL_RE = re.compile ( r" ( https?://|www\.|t\.me/|telegram\.me/|@\w+ ) ", re.I)
@@ -85,6 +89,11 @@ def init_db (  ) :
       charge_id TEXT PRIMARY KEY,user_id INTEGER,amount INTEGER,payload TEXT,created_at INTEGER,refunded INTEGER DEFAULT 0 ) ;
     CREATE TABLE IF NOT EXISTS subscriptions(
       chat_id INTEGER PRIMARY KEY, payer_id INTEGER, paid_until INTEGER DEFAULT 0 ) ;
+    CREATE TABLE IF NOT EXISTS ai_user_subscriptions(
+      user_id INTEGER PRIMARY KEY, paid_until INTEGER DEFAULT 0, updated_at INTEGER DEFAULT 0 ) ;
+    CREATE TABLE IF NOT EXISTS ai_group_subscriptions(
+      chat_id INTEGER PRIMARY KEY, payer_id INTEGER DEFAULT 0, paid_until INTEGER DEFAULT 0,
+      source TEXT DEFAULT 'paid', updated_at INTEGER DEFAULT 0 ) ;
     CREATE TABLE IF NOT EXISTS giveaways(
       id INTEGER PRIMARY KEY AUTOINCREMENT,chat_id INTEGER,creator_id INTEGER,kind TEXT,
       prize TEXT,winners INTEGER,end_at INTEGER,status TEXT DEFAULT 'open',created_at INTEGER ) ;
@@ -185,6 +194,7 @@ def main_menu_markup ( uid ) :
       [InlineKeyboardButton ( "👤 Profil",callback_data="me" ) ,InlineKeyboardButton ( "⭐ Hisob",callback_data="wallet" ) ],
       [InlineKeyboardButton ( "🎁 Gift",callback_data="gifts" ) ,InlineKeyboardButton ( "💎 Premium",callback_data="premium" ) ],
       [InlineKeyboardButton ( "🏘 Guruhlarim",callback_data="mygroups" ) ],
+      [InlineKeyboardButton ( "🤖 Veritas AI",callback_data="ai_private" ) ],
       [InlineKeyboardButton ( "📚 Vasatiya kutubxonasi",callback_data="library" ) ,InlineKeyboardButton ( "📜 Sahih Hadislar",callback_data="hadith" ) ],
       [InlineKeyboardButton ( "ℹ️ Veritas haqida",callback_data="about" ) ],
     ]
@@ -206,6 +216,50 @@ def super_menu_markup (  ) :
 def user_total_stats ( uid ) :
     r=one ( "SELECT COALESCE ( SUM ( xp ) ,0) xp,COALESCE ( SUM ( messages ) ,0) messages FROM members WHERE user_id=?", ( uid, ) )
     return (int ( r["xp"] ) ,int ( r["messages"] ) ) if r else (0,0)
+
+def fmt_until ( ts ) :
+    if not ts: return "—"
+    return datetime.fromtimestamp ( int ( ts ),timezone.utc ) .strftime ( "%d.%m.%Y %H:%M UTC" )
+
+def ai_user_until ( uid ) :
+    r=one ( "SELECT paid_until FROM ai_user_subscriptions WHERE user_id=?", ( uid, ) )
+    return int ( r["paid_until"] ) if r else 0
+
+def ai_user_active ( uid ) :
+    return uid in SUPER_OWNERS or ai_user_until ( uid ) > now ( )
+
+def ai_group_until ( chat_id ) :
+    r=one ( "SELECT paid_until FROM ai_group_subscriptions WHERE chat_id=?", ( chat_id, ) )
+    return int ( r["paid_until"] ) if r else 0
+
+def ai_group_active ( chat_id ) :
+    return ai_group_until ( chat_id ) > now ( )
+
+def extend_ai_user ( uid,days ) :
+    old=ai_user_until ( uid ); base=max ( now ( ),old ); until=base+int ( days ) *86400
+    execute ( "INSERT INTO ai_user_subscriptions ( user_id,paid_until,updated_at) VALUES ( ?,?,? ) ON CONFLICT ( user_id) DO UPDATE SET paid_until=excluded.paid_until,updated_at=excluded.updated_at", ( uid,until,now ( ) ) )
+    return until
+
+def extend_ai_group ( chat_id,days,payer_id=0,source="paid" ) :
+    old=ai_group_until ( chat_id ); base=max ( now ( ),old ); until=base+int ( days ) *86400
+    execute ( "INSERT INTO ai_group_subscriptions ( chat_id,payer_id,paid_until,source,updated_at) VALUES ( ?,?,?,?,? ) ON CONFLICT ( chat_id) DO UPDATE SET payer_id=excluded.payer_id,paid_until=excluded.paid_until,source=excluded.source,updated_at=excluded.updated_at", ( chat_id,payer_id,until,source,now ( ) ) )
+    return until
+
+def ai_rate_ok ( scope_id,uid,seconds=5 ) :
+    k= ( scope_id,uid ) ; t=time.time ( ); last=AI_RATE_CACHE.get ( k,0 )
+    if t-last < seconds: return False
+    AI_RATE_CACHE[k]=t; return True
+
+def ai_group_menu ( chat_id,uid ) :
+    kb=[
+      [InlineKeyboardButton ( "⭐ 250 — 7 kun",callback_data=f"aigbuy:{chat_id}:7" ) ,InlineKeyboardButton ( "⭐ 500 — 30 kun",callback_data=f"aigbuy:{chat_id}:30" ) ]
+    ]
+    if uid in SUPER_OWNERS:
+        kb += [
+          [InlineKeyboardButton ( "👑 Bepul 1 kun",callback_data=f"aigfree:{chat_id}:1" ) ,InlineKeyboardButton ( "👑 7 kun",callback_data=f"aigfree:{chat_id}:7" ) ,InlineKeyboardButton ( "👑 30 kun",callback_data=f"aigfree:{chat_id}:30" ) ],
+          [InlineKeyboardButton ( "⛔ AI ni o‘chirish",callback_data=f"aigoff:{chat_id}" ) ]
+        ]
+    return InlineKeyboardMarkup ( kb )
 
 
 def is_library_admin ( uid ) :
@@ -286,6 +340,7 @@ def library_list_markup ( rows,page,prefix,total,extra="" ) :
 async def library_private_input ( update,ctx ) :
     if update.effective_chat.type!="private": return
     uid=update.effective_user.id; st=STATE.get ( uid)
+    if st: ctx.user_data["workflow_message_id"]=update.effective_message.message_id
     if st and str ( st.get ( "mode","" )  ) .startswith ( "had_" ) :
         return await hadith_private_input ( update,ctx)
     if not st or not str ( st.get ( "mode","" )  ) .startswith ( "lib_" ) : return
@@ -751,7 +806,9 @@ async def show_me ( update,ctx ) :
                    COALESCE (  ( SELECT messages FROM members WHERE chat_id=? AND user_id=? ) ,0 ) """, ( chat.id,chat.id,u.id )  ) ["n"]
         txt=f"👤 {u.full_name}\n🆔 {u.id}\n🎖 {title_for ( u.id,custom ) }\n⭐ Kredit: {wallet ( u.id ) }\n📈 Level: {level ( xp ) } | XP: {xp}\n💬 Xabarlar: {msgs}\n🏆 Reyting: #{rank}"
     else:
-        txt=f"👤 {u.full_name}\n🆔 {u.id}\n🎖 {title_for ( u.id ) }\n⭐ Kredit: {wallet ( u.id ) }"
+        ai_until=ai_user_until ( u.id )
+        ai_status=( "👑 Cheksiz (Super Ega ) " if u.id in SUPER_OWNERS else ( "✅ FAOL — "+fmt_until ( ai_until ) if ai_until>now ( ) else "❌ YO‘Q" ) )
+        txt=f"👤 {u.full_name}\n🆔 {u.id}\n🎖 {title_for ( u.id ) }\n⭐ Kredit: {wallet ( u.id ) }\n🤖 AI Premium: {ai_status}"
     await update.effective_message.reply_text ( txt)
 
 async def title_command ( update,ctx,cmd,args ) :
@@ -1033,6 +1090,12 @@ async def star_text_router ( update,ctx ) :
         return await add_hadith_command ( update,ctx)
     if cmd=="del.hadis":
         return await delete_hadith_command ( update,ctx,args)
+    if cmd=="ai":
+        if update.effective_chat.type not in ("group","supergroup" ) :
+            return await msg.reply_text ( "🤖 Shaxsiy Veritas AI uchun bosh menyudagi «Veritas AI» tugmasidan foydalaning." )
+        until=ai_group_until ( update.effective_chat.id )
+        status=( "✅ FAOL\n📅 "+fmt_until ( until ) ) if until>now ( ) else "❌ FAOL EMAS"
+        return await msg.reply_text ( f"🤖 VERITAS AI — GURUH\n\n{status}\n\n250 ⭐ — 7 kun\n500 ⭐ — 30 kun",reply_markup=ai_group_menu ( update.effective_chat.id,update.effective_user.id ) )
     if update.effective_chat.type not in ("group","supergroup" ) :
         return await msg.reply_text ( "Bu buyruq guruh uchun.")
     if cmd in {"warn","unwarn","clearwarns","mute","unmute","kick","ban","unban","del","ruxsat","ruxsatsiz","admin","unadmin","approve","unapprove"}:
@@ -1099,34 +1162,61 @@ async def group_ai_reply ( update,ctx ) :
     if not msg or not u or chat.type not in ("group","supergroup") : return False
     if u.is_bot or not msg.reply_to_message or not msg.text: return False
     replied_msg=msg.reply_to_message
-    me=ctx.bot.id
-    if not replied_msg.from_user or replied_msg.from_user.id!=me: return False
+    if not replied_msg.from_user or replied_msg.from_user.id!=ctx.bot.id: return False
     question=msg.text.strip ( )
     if not question or question.startswith ( "*" ) : return False
+    if not ai_group_active ( chat.id ) :
+        await msg.reply_text ( "🔒 Bu guruhda Veritas AI obunasi faol emas.\n\n*ai yozib tariflarni oching: 250 ⭐ / 7 kun yoki 500 ⭐ / 30 kun." )
+        return True
+    if not ai_rate_ok ( chat.id,u.id,5 ) :
+        await msg.reply_text ( "⏳ Juda tez so‘rov yuborildi. 5 soniyadan keyin qayta yozing." )
+        return True
     if not OPENAI_API_KEY:
         await msg.reply_text ( "⚠️ Veritas AI kaliti sozlanmagan.")
         return True
     try:
         await ctx.bot.send_chat_action ( chat.id,"typing")
         previous= ( replied_msg.text or replied_msg.caption or "" ) .strip ( )
-        prompt= ( f"Oldingi Veritas xabari:\n{previous[:3000]}\n\n" if previous else "") + f"Foydalanuvchi savoli:\n{question[:5000]}"
+        prompt= ( f"Oldingi Veritas xabari:\n{previous[:2500]}\n\n" if previous else "") + f"Foydalanuvchi savoli:\n{question[:4000]}"
         answer=await asyncio.to_thread ( _openai_response_sync,prompt)
         if not answer: answer="Hozir javob hosil bo‘lmadi. Qayta urinib ko‘ring."
-        for i in range ( 0,len ( answer ) ,4000 ) :
-            await msg.reply_text ( answer[i:i+4000])
+        for i in range ( 0,len ( answer ) ,4000 ) : await msg.reply_text ( answer[i:i+4000])
     except urllib.error.HTTPError as e:
         detail=""
         try: detail=e.read (  ) .decode ( "utf-8" ) [:700]
         except Exception: pass
         log.error ( "OpenAI HTTP error %s: %s",getattr ( e,"code","?" ) ,detail)
-        if getattr ( e,"code",0 ) ==429:
-            await msg.reply_text ( "⚠️ Veritas AI uchun API krediti/limiti yetarli emas. OpenAI billingni tekshiring.")
-        else:
-            await msg.reply_text ( "⚠️ Veritas AI hozir javob bera olmadi. Keyinroq qayta urinib ko‘ring.")
+        await msg.reply_text ( "⚠️ Veritas AI hozir javob bera olmadi. Keyinroq qayta urinib ko‘ring.")
     except Exception:
         log.exception ( "Veritas AI error")
         await msg.reply_text ( "⚠️ Veritas AI bilan ulanishda xatolik bo‘ldi.")
     return True
+
+async def private_ai_reply ( update,ctx ) :
+    msg=update.effective_message; u=update.effective_user; chat=update.effective_chat
+    if not msg or not u or chat.type!="private" or u.is_bot or not msg.text: return
+    text=msg.text.strip ( )
+    if not text or text.startswith ( "*" ) or text.startswith ( "/" ): return
+    if STATE.get ( u.id ): return
+    if ctx.user_data.get ( "workflow_message_id" )==msg.message_id: return
+    ensure_user ( u )
+    if not ai_user_active ( u.id ) :
+        kb=InlineKeyboardMarkup ( [[InlineKeyboardButton ( "💎 100 ⭐ — 30 kun",callback_data="aipbuy" ) ],[InlineKeyboardButton ( "⭐ Hisobni to‘ldirish",callback_data="wallet" ) ]] )
+        return await msg.reply_text ( "🔒 Shaxsiy Veritas AI faqat AI Premium a’zolar uchun.\n\n💎 100 ⭐ — 30 kun",reply_markup=kb )
+    if not ai_rate_ok ( "private",u.id,4 ) : return await msg.reply_text ( "⏳ 4 soniyadan keyin yana yozing." )
+    if not OPENAI_API_KEY: return await msg.reply_text ( "⚠️ Veritas AI kaliti sozlanmagan." )
+    try:
+        await ctx.bot.send_chat_action ( chat.id,"typing" )
+        previous=""
+        if msg.reply_to_message and msg.reply_to_message.from_user and msg.reply_to_message.from_user.id==ctx.bot.id:
+            previous= ( msg.reply_to_message.text or msg.reply_to_message.caption or "" ) [:2500]
+        prompt= ( f"Oldingi Veritas javobi:\n{previous}\n\n" if previous else "" ) +f"Foydalanuvchi:\n{text[:4000]}"
+        answer=await asyncio.to_thread ( _openai_response_sync,prompt )
+        if not answer: answer="Hozir javob hosil bo‘lmadi. Qayta urinib ko‘ring."
+        for i in range ( 0,len ( answer ),4000 ): await msg.reply_text ( answer[i:i+4000] )
+    except Exception:
+        log.exception ( "Private Veritas AI error" )
+        await msg.reply_text ( "⚠️ Veritas AI hozir javob bera olmadi." )
 
 async def passive ( update,ctx ) :
     msg=update.effective_message; u=update.effective_user; chat=update.effective_chat
@@ -1224,7 +1314,44 @@ async def callback ( update,ctx ) :
     if d=="me":
         xp,msgs=user_total_stats ( u.id)
         r=one ( "SELECT wallet FROM users WHERE user_id=?", ( u.id, ) )
-        return await q.edit_message_text ( f"👤 {u.full_name}\n🆔 {u.id}\n🎖 {title_for ( u.id ) }\n⭐ Kredit: {r['wallet'] if r else 0}\n✨ XP: {xp}\n💬 Xabarlar: {msgs}",reply_markup=back_markup (  ) )
+        ai_until=ai_user_until ( u.id )
+        ai_status=( "👑 Cheksiz (Super Ega ) " if u.id in SUPER_OWNERS else ( "✅ FAOL — "+fmt_until ( ai_until ) if ai_until>now ( ) else "❌ YO‘Q" ) )
+        return await q.edit_message_text ( f"👤 {u.full_name}\n🆔 {u.id}\n🎖 {title_for ( u.id ) }\n⭐ Kredit: {r['wallet'] if r else 0}\n✨ XP: {xp}\n💬 Xabarlar: {msgs}\n\n🤖 AI Premium: {ai_status}",reply_markup=back_markup (  ) )
+
+    if d=="ai_private":
+        until=ai_user_until ( u.id )
+        if u.id in SUPER_OWNERS: status="👑 FAOL — Super Ega"
+        elif until>now ( ): status="✅ FAOL\n📅 "+fmt_until ( until )
+        else: status="❌ FAOL EMAS"
+        kb=InlineKeyboardMarkup ( [[InlineKeyboardButton ( "💎 100 ⭐ — 30 kun",callback_data="aipbuy" ) ],[InlineKeyboardButton ( "⬅️ Orqaga",callback_data="home" ) ]] )
+        return await q.edit_message_text ( f"🤖 VERITAS AI — SHAXSIY YORDAMCHI\n\n{status}\n\nPremium narxi: 100 ⭐ / 30 kun.\nFaol bo‘lsa botga oddiy xabar yozishingiz kifoya.",reply_markup=kb )
+
+    if d=="aipbuy":
+        if u.id in SUPER_OWNERS: return await q.answer ( "Super Ega uchun AI allaqachon faol.",show_alert=True )
+        if wallet ( u.id ) <AI_PRIVATE_PRICE: return await q.answer ( "Kredit yetarli emas. Hisobni Stars bilan to‘ldiring.",show_alert=True )
+        if not wallet_change ( u.id,-AI_PRIVATE_PRICE,"ai_private_30d",u.id ): return
+        until=extend_ai_user ( u.id,AI_PRIVATE_DAYS )
+        return await q.edit_message_text ( f"✅ Shaxsiy Veritas AI Premium yoqildi.\n💎 {AI_PRIVATE_PRICE} ⭐\n📅 {fmt_until ( until )} gacha",reply_markup=back_markup ( "home" ) )
+
+    if d.startswith ( "aigbuy:" ) :
+        _,schat,sdays=d.split ( ":" ); chat_id=int ( schat ); days=int ( sdays ); price=AI_GROUP_PLANS.get ( days )
+        if not price: return
+        if wallet ( u.id ) <price: return await q.answer ( f"Kredit yetarli emas. Kerak: {price} ⭐",show_alert=True )
+        if not wallet_change ( u.id,-price,f"ai_group_{days}d",chat_id ): return
+        until=extend_ai_group ( chat_id,days,u.id,"paid" )
+        return await q.edit_message_text ( f"✅ Veritas AI guruh uchun yoqildi.\n⭐ {price}\n📅 {fmt_until ( until )} gacha",reply_markup=ai_group_menu ( chat_id,u.id ) )
+
+    if d.startswith ( "aigfree:" ) :
+        if u.id not in SUPER_OWNERS: return await q.answer ( "Faqat Super Ega.",show_alert=True )
+        _,schat,sdays=d.split ( ":" ); chat_id=int ( schat ); days=int ( sdays )
+        if days not in ( 1,7,30 ): return
+        until=extend_ai_group ( chat_id,days,u.id,"super_free" )
+        return await q.edit_message_text ( f"👑 Guruhga Veritas AI bepul yoqildi.\n📅 {days} kun — {fmt_until ( until )} gacha",reply_markup=ai_group_menu ( chat_id,u.id ) )
+
+    if d.startswith ( "aigoff:" ) :
+        if u.id not in SUPER_OWNERS: return await q.answer ( "Faqat Super Ega.",show_alert=True )
+        chat_id=int ( d.split ( ":" )[1] ); execute ( "UPDATE ai_group_subscriptions SET paid_until=0,updated_at=? WHERE chat_id=?", ( now ( ),chat_id ) )
+        return await q.edit_message_text ( "⛔ Bu guruh uchun Veritas AI o‘chirildi.",reply_markup=ai_group_menu ( chat_id,u.id ) )
 
     if d=="wallet":
         kb=[[InlineKeyboardButton ( f"{x} ⭐",callback_data=f"top:{x}") for x in TOPUPS[i:i+3]] for i in range ( 0,len ( TOPUPS ) ,3 ) ]
@@ -1638,6 +1765,7 @@ def main (  ) :
     app.add_handler ( MessageHandler ( filters.TEXT & filters.Regex ( r"^\*" ) ,star_text_router ) ,group=0)
     app.add_handler ( MessageHandler ( filters.ChatType.PRIVATE & ~filters.COMMAND & ~filters.SUCCESSFUL_PAYMENT,library_private_input ) ,group=1)
     app.add_handler ( MessageHandler ( filters.ALL & ~filters.StatusUpdate.ALL & ~filters.SUCCESSFUL_PAYMENT,passive ) ,group=2)
+    app.add_handler ( MessageHandler ( filters.ChatType.PRIVATE & filters.TEXT & ~filters.COMMAND & ~filters.Regex ( r"^\*" ) ,private_ai_reply ) ,group=3)
     if app.job_queue: app.job_queue.run_repeating ( giveaway_job,60,first=10)
     app.add_error_handler ( error_handler)
     log.info ( "VERITAS v8 starting")
