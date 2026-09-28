@@ -328,23 +328,42 @@ async def library_private_input ( update,ctx ) :
         else: return await msg.reply_text ( "🖼 Rasm yuboring yoki «o'tkazish» deb yozing.")
         st["mode"]="lib_add_pdf"; return await msg.reply_text ( "📄 Endi PDF faylni yuboring:")
     if mode=="lib_add_pdf":
-        if not msg.document: return await msg.reply_text ( "📄 PDF hujjat yuboring.")
-        name= ( msg.document.file_name or "" ) .lower (  ) ; mime= ( msg.document.mime_type or "" ) .lower ( )
-        if not (name.endswith ( ".pdf") or mime=="application/pdf" ) : return await msg.reply_text ( "❌ Faqat PDF fayl qabul qilinadi.")
-        uniq=msg.document.file_unique_id or ""
+        # Faylning o‘zini Railway'ga yuklamaymiz; Telegram file_id saqlanadi.
+        doc=msg.document
+        if not doc:
+            return await msg.reply_text ( "📄 PDF hujjatni 📎 Fayl/Document sifatida yuboring.\n\n⚠️ Rasm yoki boshqa turdagi xabar PDF sifatida qabul qilinmaydi.")
+        name= ( doc.file_name or "" ) .lower (  ) .strip (  ) ; mime= ( doc.mime_type or "" ) .lower (  ) .strip ( )
+        if not (name.endswith ( ".pdf") or mime=="application/pdf" ) :
+            return await msg.reply_text ( f"❌ Bu PDF emas.\nFayl: {doc.file_name or 'nomsiz'}\nTuri: {doc.mime_type or 'noma’lum'}\n\nPDF fayl yuboring.")
+        uniq=doc.file_unique_id or ""
         if uniq and one ( "SELECT id FROM library_books WHERE pdf_unique_id=? AND status<>'deleted'", ( uniq, )  ) :
-            STATE.pop ( uid,None ) ; return await msg.reply_text ( "⚠️ Aynan shu PDF avval qo‘shilgan.",reply_markup=library_home_markup ( uid ) )
-        data["pdf_file_id"]=msg.document.file_id; data["pdf_unique_id"]=uniq
+            STATE.pop ( uid,None)
+            return await msg.reply_text ( "⚠️ Aynan shu PDF avval qo‘shilgan.",reply_markup=library_home_markup ( uid ) )
+        data["pdf_file_id"]=doc.file_id; data["pdf_unique_id"]=uniq
+        data["pdf_file_name"]=doc.file_name or ""; data["pdf_file_size"]=int ( doc.file_size or 0)
         st["mode"]="lib_add_audio"
-        return await msg.reply_text ( "🎧 Audio kitob bo‘lsa audio fayl yuboring. Bo‘lmasa: o'tkazish")
+        size_mb= ( int ( doc.file_size or 0 ) / ( 1024*1024 ) ) if doc.file_size else 0
+        kb=InlineKeyboardMarkup ( [[InlineKeyboardButton ( "⏭ Audio yo‘q — o‘tkazish",callback_data="libskipaudio" ) ]])
+        return await msg.reply_text(
+            f"✅ PDF qabul qilindi" + (f" ({size_mb:.1f} MB ) " if size_mb else "") +
+            "\n\n🎧 Endi audio kitobni yuboring.\nMP3, M4A, M4B, OGG, OPUS, WAV, FLAC yoki voice qabul qilinadi.", reply_markup=kb)
     if mode=="lib_add_audio":
-        if msg.audio:
-            data["audio_file_id"]=msg.audio.file_id; data["audio_unique_id"]=msg.audio.file_unique_id or ""
-        elif msg.voice:
-            data["audio_file_id"]=msg.voice.file_id; data["audio_unique_id"]=msg.voice.file_unique_id or ""
+        af=None
+        if msg.audio: af=msg.audio
+        elif msg.voice: af=msg.voice
+        elif msg.document:
+            d=msg.document
+            name= ( d.file_name or "" ) .lower (  ) .strip (  ) ; mime= ( d.mime_type or "" ) .lower (  ) .strip ( )
+            audio_ext= ( ".mp3",".m4a",".m4b",".aac",".ogg",".opus",".wav",".flac",".wma")
+            if mime.startswith ( "audio/") or name.endswith ( audio_ext ) : af=d
+            else: return await msg.reply_text ( "❌ Bu audio fayl emas.\nMP3/M4A/M4B/OGG/OPUS/WAV/FLAC yuboring yoki «o'tkazish» deb yozing.")
         elif msg.text and msg.text.lower (  ) .replace ( "‘","'" ) .replace ( "’","'") in ("o'tkazish","otkazish" ) :
             data["audio_file_id"]=""; data["audio_unique_id"]=""
-        else: return await msg.reply_text ( "🎧 Audio/voice yuboring yoki «o'tkazish» deb yozing.")
+        else:
+            return await msg.reply_text ( "🎧 Audio, voice yoki audio-fayl yuboring.\nAudio kerak bo‘lmasa «o'tkazish» deb yozing.")
+        if af:
+            data["audio_file_id"]=af.file_id; data["audio_unique_id"]=af.file_unique_id or ""
+            data["audio_file_size"]=int ( getattr ( af,"file_size",0) or 0)
         with db ( ) as c:
             cur=c.execute ( """INSERT INTO library_books ( title,author,lang,description,cover_file_id,pdf_file_id,pdf_unique_id,audio_file_id,audio_unique_id,added_by,status,created_at)
                              VALUES ( ?,?,?,?,?,?,?,?,?,?,?,? ) """,
@@ -1189,6 +1208,24 @@ async def callback ( update,ctx ) :
         if not r: return await q.edit_message_text ( "❌ Hadis topilmadi.",reply_markup=back_markup ( "hadith" ) )
         execute ( "UPDATE hadiths SET status='deleted' WHERE id=?", ( hid, )  ) ; audit ( u.id,0,"hadith_delete",f"{r['collection']} {r['number']}")
         return await q.edit_message_text ( f"✅ {r['collection']} {r['number']} o‘chirildi.",reply_markup=back_markup ( "hadith" ) )
+
+    if d=="libskipaudio":
+        st=STATE.get ( u.id)
+        if not st or st.get ( "mode" ) !="lib_add_audio":
+            return await q.answer ( "Kitob qo‘shish jarayoni faol emas.",show_alert=True)
+        st["data"]["audio_file_id"]=""; st["data"]["audio_unique_id"]=""
+        data=st["data"]
+        with db ( ) as c:
+            cur=c.execute ( """INSERT INTO library_books ( title,author,lang,description,cover_file_id,pdf_file_id,pdf_unique_id,audio_file_id,audio_unique_id,added_by,status,created_at)
+                             VALUES ( ?,?,?,?,?,?,?,?,?,?,?,? ) """,
+                          (data["title"],data["author"],data.get ( "lang","uz" ) ,data.get ( "description","" ) ,data.get ( "cover_file_id","" ) ,data.get ( "pdf_file_id","" ) ,data.get ( "pdf_unique_id","" ) ,"","",u.id,"approved",now (  )  ) )
+            bid=cur.lastrowid
+            for cat in data.get ( "categories",[] ) :
+                c.execute ( "INSERT OR IGNORE INTO library_categories ( name) VALUES ( ? ) ", ( cat, ) )
+                cr=c.execute ( "SELECT id FROM library_categories WHERE name=? COLLATE NOCASE", ( cat, )  ) .fetchone ( )
+                c.execute ( "INSERT OR IGNORE INTO library_book_categories ( book_id,category_id) VALUES ( ?,? ) ", ( bid,cr["id"] ) )
+        STATE.pop ( u.id,None ) ; audit ( u.id,0,"library_add",str ( bid ) )
+        return await q.edit_message_text ( f"✅ Kitob Vasatiya kutubxonasiga qo‘shildi.\n📖 {data['title']}\nID: {bid}",reply_markup=library_home_markup ( u.id ) )
 
     if d=="library":
         total=one ( "SELECT COUNT ( *) n FROM library_books WHERE status='approved'" ) ["n"]
