@@ -10,7 +10,9 @@
 # *stars now opens Telegram's official Stars Gift section.
 # Recipient/amount are displayed by Veritas, but must be selected/confirmed in Telegram.
 
-import os, re, sqlite3, time, random, logging, json
+import os, re, sqlite3, time, random, logging, json, asyncio
+import urllib.request
+import urllib.error
 from datetime import datetime, timezone, timedelta
 
 from telegram import (
@@ -28,6 +30,8 @@ TOKEN = os.getenv ( "BOT_TOKEN", "" ) .strip ( )
 DB_PATH = os.getenv ( "DB_PATH", "veritas_v7.sqlite3")
 SUPER_OWNERS = {int ( x) for x in os.getenv ( "SUPER_OWNER_IDS","" ) .split ( ",") if x.strip (  ) .isdigit (  ) }
 VERSION = "8.0"
+OPENAI_API_KEY = os.getenv ( "OPENAI_API_KEY", "" ) .strip ( )
+OPENAI_MODEL = os.getenv ( "OPENAI_MODEL", "gpt-5.6-luna" ) .strip ( ) or "gpt-5.6-luna"
 DEMO_DAYS = 7
 WEEK_PRICE = 100
 PREMIUM = {3:1000, 6:1500, 12:2500}
@@ -1062,6 +1066,68 @@ def media_type ( msg ) :
     if msg.audio:return "audio"
     return None
 
+def _openai_response_sync ( prompt ) :
+    payload=json.dumps ( {
+        "model":OPENAI_MODEL,
+        "instructions":(
+            "Siz Veritas guruh yordamchisisiz. Foydalanuvchi qaysi tilda yozsa, asosan o‘sha tilda javob bering. "
+            "Javobni Telegram guruhiga mos, aniq va ortiqcha uzun bo‘lmagan shaklda yozing. "
+            "Bilmagan narsangizni uydirmang. Diniy, tibbiy, huquqiy yoki moliyaviy mavzularda noaniqlik bo‘lsa buni ochiq ayting."
+        ),
+        "input":prompt,
+        "max_output_tokens":700
+    },ensure_ascii=False ) .encode ( "utf-8")
+    req=urllib.request.Request(
+        "https://api.openai.com/v1/responses",
+        data=payload,
+        headers={"Authorization":f"Bearer {OPENAI_API_KEY}","Content-Type":"application/json"},
+        method="POST"
+    )
+    with urllib.request.urlopen ( req,timeout=45) as resp:
+        data=json.loads ( resp.read (  ) .decode ( "utf-8" ) )
+    if data.get ( "output_text" ) :
+        return str ( data["output_text"] ) .strip ( )
+    parts=[]
+    for item in data.get ( "output",[] ) :
+        for content in item.get ( "content",[] ) :
+            if content.get ( "type" ) =="output_text" and content.get ( "text" ) :
+                parts.append ( content["text"])
+    return "\n".join ( parts ) .strip ( )
+
+async def group_ai_reply ( update,ctx ) :
+    msg=update.effective_message; chat=update.effective_chat; u=update.effective_user
+    if not msg or not u or chat.type not in ("group","supergroup") : return False
+    if u.is_bot or not msg.reply_to_message or not msg.text: return False
+    replied_msg=msg.reply_to_message
+    me=ctx.bot.id
+    if not replied_msg.from_user or replied_msg.from_user.id!=me: return False
+    question=msg.text.strip ( )
+    if not question or question.startswith ( "*" ) : return False
+    if not OPENAI_API_KEY:
+        await msg.reply_text ( "⚠️ Veritas AI kaliti sozlanmagan.")
+        return True
+    try:
+        await ctx.bot.send_chat_action ( chat.id,"typing")
+        previous= ( replied_msg.text or replied_msg.caption or "" ) .strip ( )
+        prompt= ( f"Oldingi Veritas xabari:\n{previous[:3000]}\n\n" if previous else "") + f"Foydalanuvchi savoli:\n{question[:5000]}"
+        answer=await asyncio.to_thread ( _openai_response_sync,prompt)
+        if not answer: answer="Hozir javob hosil bo‘lmadi. Qayta urinib ko‘ring."
+        for i in range ( 0,len ( answer ) ,4000 ) :
+            await msg.reply_text ( answer[i:i+4000])
+    except urllib.error.HTTPError as e:
+        detail=""
+        try: detail=e.read (  ) .decode ( "utf-8" ) [:700]
+        except Exception: pass
+        log.error ( "OpenAI HTTP error %s: %s",getattr ( e,"code","?" ) ,detail)
+        if getattr ( e,"code",0 ) ==429:
+            await msg.reply_text ( "⚠️ Veritas AI uchun API krediti/limiti yetarli emas. OpenAI billingni tekshiring.")
+        else:
+            await msg.reply_text ( "⚠️ Veritas AI hozir javob bera olmadi. Keyinroq qayta urinib ko‘ring.")
+    except Exception:
+        log.exception ( "Veritas AI error")
+        await msg.reply_text ( "⚠️ Veritas AI bilan ulanishda xatolik bo‘ldi.")
+    return True
+
 async def passive ( update,ctx ) :
     msg=update.effective_message; u=update.effective_user; chat=update.effective_chat
     if not msg or not u or chat.type not in ("group","supergroup" ) : return
@@ -1074,6 +1140,7 @@ async def passive ( update,ctx ) :
         else:
             daily= ( r["daily"] if r["last_day"]==day else 0 ) +1; weekly= ( r["weekly"] if r["last_week"]==week else 0 ) +1
             c.execute ( "UPDATE members SET xp=xp+1,messages=messages+1,daily=?,weekly=?,last_day=?,last_week=? WHERE chat_id=? AND user_id=?", ( daily,weekly,day,week,chat.id,u.id ) )
+    if await group_ai_reply ( update,ctx ) : return
     if await protected ( ctx.bot,chat.id,u.id) or one ( "SELECT 1 FROM approved WHERE chat_id=? AND user_id=?", ( chat.id,u.id )  ) : return
     g=one ( "SELECT * FROM groups WHERE chat_id=?", ( chat.id, ) )
     text= ( msg.text or msg.caption or "" ) .lower ( )
