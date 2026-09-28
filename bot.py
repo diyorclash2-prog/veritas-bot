@@ -36,7 +36,7 @@ FLOOD_CACHE = {}
 STATE = {}
 URL_RE = re.compile ( r" ( https?://|www\.|t\.me/|telegram\.me/|@\w+ ) ", re.I)
 
-logging.basicConfig(level=logging.INFO)
+logging.basicConfig ( level=logging.INFO)
 log = logging.getLogger ( "veritas-v8")
 
 def now (  ) : return int ( time.time (  ) )
@@ -281,6 +281,8 @@ def library_list_markup ( rows,page,prefix,total,extra="" ) :
 async def library_private_input ( update,ctx ) :
     if update.effective_chat.type!="private": return
     uid=update.effective_user.id; st=STATE.get ( uid)
+    if st and str ( st.get ( "mode","" )  ) .startswith ( "had_" ) :
+        return await hadith_private_input ( update,ctx)
     if not st or not str ( st.get ( "mode","" )  ) .startswith ( "lib_" ) : return
     msg=update.effective_message
     mode=st["mode"]
@@ -431,26 +433,54 @@ async def content_admin_command ( update,ctx,cmd ) :
 async def add_hadith_command ( update,ctx ) :
     msg=update.effective_message; uid=update.effective_user.id
     if not is_hadith_admin ( uid ) : return await msg.reply_text ( "⛔ Hadis qo‘shish huquqi yo‘q.")
-    raw=msg.text or ""
-    body=raw[len ( "*add.hadis" ) :].strip ( )
-    parts=[x.strip ( ) for x in body.split ( "|" ) ]
-    if len ( parts ) <3:
-        return await msg.reply_text ( "Format:\n*add.hadis buxoriy 1 | arabcha matn | tarjima | sharh | manba\n\nArabcha bo‘lmasa ham | | joyini qoldiring.")
-    head=parts[0].split ( )
-    if len ( head ) <2 or not head[-1].isdigit (  ) : return await msg.reply_text ( "❌ Avval to‘plam va raqam yozing. Misol: buxoriy 1")
-    num=int ( head[-1] ) ; collection=hadith_collection_key ( " ".join ( head[:-1] ) )
-    arabic=parts[1]; translation=parts[2]
-    explanation=parts[3] if len ( parts ) >3 else ""; source=parts[4] if len ( parts ) >4 else ""
-    if not translation: return await msg.reply_text ( "❌ Tarjima bo‘sh bo‘lmasin.")
-    try:
-        execute ( "INSERT INTO hadiths ( collection,number,arabic,translation,explanation,source,added_by,status,created_at) VALUES ( ?,?,?,?,?,?,?,?,? ) ",
-                (collection,num,arabic,translation,explanation,source,uid,"approved",now (  )  ) )
-    except sqlite3.IntegrityError:
-        return await msg.reply_text ( f"⚠️ {collection} {num} bazada allaqachon mavjud.")
-    audit ( uid,update.effective_chat.id,"hadith_add",f"{collection} {num}")
-    r=one ( "SELECT * FROM hadiths WHERE lower ( collection ) =lower ( ?) AND number=?", ( collection,num ) )
-    await msg.reply_text ( "✅ Hadis qo‘shildi.")
-    await send_hadith ( update.effective_chat.id,ctx,r)
+    if update.effective_chat.type != "private":
+        return await msg.reply_text ( "📜 Hadis qo‘shish xavfsiz va qulay bo‘lishi uchun botning private chatida *add.hadis yozing.")
+    STATE[uid]={"mode":"had_add_collection","data":{}}
+    await msg.reply_text ( "📜 HADIS QO‘SHISH — 1/6\n\nTo‘plam nomini yuboring.\nMisol: Buxoriy")
+
+async def hadith_private_input ( update,ctx ) :
+    uid=update.effective_user.id; msg=update.effective_message; st=STATE.get ( uid)
+    if not st or not str ( st.get ( "mode","" )  ) .startswith ( "had_" ) : return
+    if not is_hadith_admin ( uid ) :
+        STATE.pop ( uid,None ) ; return await msg.reply_text ( "⛔ Hadis boshqaruv huquqi yo‘q.")
+    if not msg.text:
+        return await msg.reply_text ( "✍️ Bu bosqichda matn yuboring.")
+    text=msg.text.strip (  ) ; data=st.setdefault ( "data",{} ) ; mode=st["mode"]
+    if text.casefold ( ) in {"bekor","cancel","/cancel"}:
+        STATE.pop ( uid,None ) ; return await msg.reply_text ( "❌ Hadis qo‘shish bekor qilindi.",reply_markup=main_menu_markup ( uid ) )
+    if mode=="had_add_collection":
+        data["collection"]=hadith_collection_key ( text ) ; st["mode"]="had_add_number"
+        return await msg.reply_text ( "📜 2/6 — Hadis raqamini yuboring.\nMisol: 1")
+    if mode=="had_add_number":
+        if not text.isdigit ( ) or int ( text ) <=0: return await msg.reply_text ( "❌ Musbat raqam yuboring. Misol: 1")
+        data["number"]=int ( text)
+        if one ( "SELECT 1 FROM hadiths WHERE lower ( collection ) =lower ( ?) AND number=? AND status<>'deleted'", ( data["collection"],data["number"] )  ) :
+            STATE.pop ( uid,None ) ; return await msg.reply_text ( f"⚠️ {data['collection']} {data['number']} bazada mavjud.",reply_markup=main_menu_markup ( uid ) )
+        st["mode"]="had_add_arabic"
+        return await msg.reply_text ( "📜 3/6 — Hadisning arabcha asl matnini yuboring.\nArabcha matn bo‘lmasa: o'tkazish")
+    if mode=="had_add_arabic":
+        data["arabic"]="" if text.casefold (  ) .replace ( "‘","'" ) .replace ( "’","'") in {"o'tkazish","otkazish"} else text
+        st["mode"]="had_add_translation"
+        return await msg.reply_text ( "📜 4/6 — O‘zbekcha tarjimasini yuboring:")
+    if mode=="had_add_translation":
+        data["translation"]=text; st["mode"]="had_add_explanation"
+        return await msg.reply_text ( "📜 5/6 — Qisqa sharh yuboring.\nSharh bo‘lmasa: o'tkazish")
+    if mode=="had_add_explanation":
+        data["explanation"]="" if text.casefold (  ) .replace ( "‘","'" ) .replace ( "’","'") in {"o'tkazish","otkazish"} else text
+        st["mode"]="had_add_source"
+        return await msg.reply_text ( "📜 6/6 — Manbani yuboring.\nMisol: Sahih al-Buxoriy, Kitob ...")
+    if mode=="had_add_source":
+        data["source"]=text
+        try:
+            execute ( "INSERT INTO hadiths ( collection,number,arabic,translation,explanation,source,added_by,status,created_at) VALUES ( ?,?,?,?,?,?,?,?,? ) ",
+                    (data["collection"],data["number"],data.get ( "arabic","" ) ,data["translation"],data.get ( "explanation","" ) ,data["source"],uid,"approved",now (  )  ) )
+        except sqlite3.IntegrityError:
+            STATE.pop ( uid,None ) ; return await msg.reply_text ( "⚠️ Bu hadis bazada mavjud.",reply_markup=main_menu_markup ( uid ) )
+        audit ( uid,update.effective_chat.id,"hadith_add",f"{data['collection']} {data['number']}")
+        r=one ( "SELECT * FROM hadiths WHERE lower ( collection ) =lower ( ?) AND number=?", ( data["collection"],data["number"] ) )
+        STATE.pop ( uid,None)
+        await msg.reply_text ( "✅ Hadis saqlandi.")
+        return await send_hadith ( update.effective_chat.id,ctx,r)
 
 async def delete_hadith_command ( update,ctx,args ) :
     msg=update.effective_message; uid=update.effective_user.id
@@ -461,6 +491,38 @@ async def delete_hadith_command ( update,ctx,args ) :
     if not r: return await msg.reply_text ( "❌ Hadis topilmadi.")
     kb=InlineKeyboardMarkup ( [[InlineKeyboardButton ( "✅ O‘chirish",callback_data=f"hdel:{r['id']}" ) ,InlineKeyboardButton ( "❌ Bekor",callback_data="hadith" ) ]])
     await msg.reply_text ( f"🗑 {r['collection']} {r['number']} hadisni o‘chirishni tasdiqlaysizmi?",reply_markup=kb)
+
+async def broadcast_command ( update,ctx,args ) :
+    msg=update.effective_message; uid=update.effective_user.id
+    if uid not in SUPER_OWNERS:
+        return await msg.reply_text ( "⛔ *post faqat Super Ega uchun.")
+    targets=[]
+    for r in all_ ( "SELECT user_id FROM users WHERE blocked=0" ) :
+        targets.append ( int ( r["user_id"] ) )
+    for r in all_ ( "SELECT chat_id FROM groups" ) :
+        targets.append ( int ( r["chat_id"] ) )
+    # Takroriy IDlarni olib tashlaymiz; manba chatiga qayta yubormaymiz.
+    targets=list ( dict.fromkeys ( targets ) )
+    source=msg.reply_to_message
+    direct_text=" ".join ( args ) .strip ( )
+    if not source and not direct_text:
+        return await msg.reply_text ( "📢 Xabar yuborish:\n1) Post/xabarga reply qilib *post yozing\nyoki\n2) *post Xabaringiz")
+    sent=0; failed=0
+    status=await msg.reply_text ( f"📢 Yuborish boshlandi...\nQabul qiluvchilar: {len ( targets ) }")
+    for chat_id in targets:
+        if chat_id==update.effective_chat.id: continue
+        try:
+            if source:
+                await ctx.bot.copy_message ( chat_id=chat_id,from_chat_id=source.chat_id,message_id=source.message_id)
+            else:
+                await ctx.bot.send_message ( chat_id,direct_text)
+            sent+=1
+        except TelegramError:
+            failed+=1
+        except Exception:
+            failed+=1
+    audit ( uid,update.effective_chat.id,"broadcast",f"sent={sent},failed={failed}")
+    await status.edit_text ( f"✅ Xabarnoma tugadi.\n\n📨 Yuborildi: {sent}\n⚠️ Yetib bormadi: {failed}")
 
 async def stars_cmd ( update, ctx, args ) :
     uid = update.effective_user.id
@@ -528,11 +590,11 @@ async def cmd_help ( update,ctx ) :
 📜 SAHIH HADISLAR
 *hadis — bazadan bitta random hadis chiqaradi
 *hadis buxoriy 1 — aynan Buxoriy 1-hadisni chiqaradi
-*add.hadis ... — yangi hadis qo‘shadi (hadis admini)
+*add.hadis — private chatda bosqichma-bosqich yangi hadis qo‘shadi (hadis admini)
 *del.hadis buxoriy 1 — hadisni tasdiqlab o‘chiradi (hadis admini)
 *ad.hadis — reply qilingan odamga hadis qo‘shish huquqi beradi (Super Ega)
 *unad.hadis — hadis huquqini olib tashlaydi (Super Ega)
-*hadisadmins — hadis adminlarini ko‘rsatadi (Super Ega)
+*hadisadmins — hadis adminlarini ko‘rsatadi (Super Ega ) \n\n📢 XABARNOMA\n*post <matn> — barcha foydalanuvchi va guruhlarga matn yuboradi (Super Ega ) \n*post — post/xabarga reply qilinsa, o‘sha postni hammaga nusxalaydi (Super Ega)
 
 🛡 MODERATSIYA — reply orqali
 *warn — ogohlantirish beradi; 3 warn = ban
@@ -922,6 +984,8 @@ async def star_text_router ( update,ctx ) :
         return await topup ( update,ctx,a)
     if cmd=="stars":
         return await stars_cmd ( update,ctx,args)
+    if cmd=="post":
+        return await broadcast_command ( update,ctx,args)
     if cmd in {"ad.book","unad.book","bookadmins","ad.hadis","unad.hadis","hadisadmins"}:
         return await content_admin_command ( update,ctx,cmd)
     if cmd=="hadis":
@@ -1026,7 +1090,13 @@ async def callback ( update,ctx ) :
     await q.answer ( )
 
     if d=="home":
-        return await q.edit_message_text ( "🪶 VERITAS v8\n\nShaxsiy kabinet",reply_markup=main_menu_markup ( u.id ) )
+        try:
+            if q.message.photo or q.message.video or q.message.document or q.message.audio or q.message.animation:
+                await q.message.delete ( )
+                return await ctx.bot.send_message ( q.message.chat.id,"🪶 VERITAS v8\n\nShaxsiy kabinet",reply_markup=main_menu_markup ( u.id ) )
+            return await q.edit_message_text ( "🪶 VERITAS v8\n\nShaxsiy kabinet",reply_markup=main_menu_markup ( u.id ) )
+        except TelegramError:
+            return await ctx.bot.send_message ( q.message.chat.id,"🪶 VERITAS v8\n\nShaxsiy kabinet",reply_markup=main_menu_markup ( u.id ) )
 
     if d.startswith ( "topgift:") or d.startswith ( "topplain:" ) :
         if u.id not in SUPER_OWNERS: return
@@ -1076,8 +1146,20 @@ async def callback ( update,ctx ) :
         cols=all_ ( "SELECT collection,COUNT ( *) n FROM hadiths WHERE status='approved' GROUP BY collection ORDER BY collection")
         kb=[[InlineKeyboardButton ( f"📚 {r['collection']} · {r['n']}",callback_data=f"hcol:{r['collection']}:0" ) ] for r in cols[:20]]
         kb.append ( [InlineKeyboardButton ( "🎲 Random hadis",callback_data="hrandom" ) ])
+        if is_hadith_admin ( u.id ) : kb.append ( [InlineKeyboardButton ( "➕ Hadis qo‘shish",callback_data="hadd" ) ])
         kb.append ( [InlineKeyboardButton ( "⬅️ Orqaga",callback_data="home" ) ,InlineKeyboardButton ( "🏠 Bosh menyu",callback_data="home" ) ])
-        return await q.edit_message_text ( f"📜 SAHIH HADISLAR\n\nJami hadislar: {total}\nTo‘plamni tanlang yoki random hadis o‘qing.",reply_markup=InlineKeyboardMarkup ( kb ) )
+        txt=f"📜 SAHIH HADISLAR\n\nJami hadislar: {total}\nTo‘plamni tanlang yoki random hadis o‘qing."
+        try:
+            if q.message.photo or q.message.video or q.message.document or q.message.audio or q.message.animation:
+                await q.message.delete (  ) ; return await ctx.bot.send_message ( q.message.chat.id,txt,reply_markup=InlineKeyboardMarkup ( kb ) )
+            return await q.edit_message_text ( txt,reply_markup=InlineKeyboardMarkup ( kb ) )
+        except TelegramError:
+            return await ctx.bot.send_message ( q.message.chat.id,txt,reply_markup=InlineKeyboardMarkup ( kb ) )
+
+    if d=="hadd":
+        if not is_hadith_admin ( u.id ) : return await q.answer ( "Ruxsat yo‘q",show_alert=True)
+        STATE[u.id]={"mode":"had_add_collection","data":{}}
+        return await q.edit_message_text ( "📜 HADIS QO‘SHISH — 1/6\n\nTo‘plam nomini yuboring.\nMisol: Buxoriy")
 
     if d=="hrandom":
         r=one ( "SELECT * FROM hadiths WHERE status='approved' ORDER BY RANDOM ( ) LIMIT 1")
@@ -1110,7 +1192,14 @@ async def callback ( update,ctx ) :
 
     if d=="library":
         total=one ( "SELECT COUNT ( *) n FROM library_books WHERE status='approved'" ) ["n"]
-        return await q.edit_message_text ( f"📚 VASATIYA KUTUBXONASI\n\nJami kitoblar: {total}\nTil, kategoriya yoki qidiruv orqali kitob toping.",reply_markup=library_home_markup ( u.id ) )
+        txt=f"📚 VASATIYA KUTUBXONASI\n\nJami kitoblar: {total}\nTil, kategoriya yoki qidiruv orqali kitob toping."
+        try:
+            if q.message.photo or q.message.video or q.message.document or q.message.audio or q.message.animation:
+                await q.message.delete ( )
+                return await ctx.bot.send_message ( q.message.chat.id,txt,reply_markup=library_home_markup ( u.id ) )
+            return await q.edit_message_text ( txt,reply_markup=library_home_markup ( u.id ) )
+        except TelegramError:
+            return await ctx.bot.send_message ( q.message.chat.id,txt,reply_markup=library_home_markup ( u.id ) )
 
     if d=="libsearch":
         STATE[u.id]={"mode":"lib_search"}
