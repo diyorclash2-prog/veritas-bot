@@ -15,6 +15,12 @@ import urllib.request
 import urllib.error
 from datetime import datetime, timezone, timedelta
 
+try:
+    from telethon import TelegramClient
+    from telethon.sessions import StringSession
+except ImportError:
+    TelegramClient = StringSession = None
+
 from telegram import (
     Update, InlineKeyboardButton, InlineKeyboardMarkup, ChatPermissions,
     LabeledPrice
@@ -32,6 +38,9 @@ SUPER_OWNERS = {int ( x) for x in os.getenv ( "SUPER_OWNER_IDS","" ) .split ( ",
 VERSION = "8.0"
 OPENAI_API_KEY = os.getenv ( "OPENAI_API_KEY", "" ) .strip ( )
 OPENAI_MODEL = os.getenv ( "OPENAI_MODEL", "gpt-5.6-luna" ) .strip ( ) or "gpt-5.6-luna"
+TG_API_ID = int ( os.getenv ( "TG_API_ID", "0") or 0)
+TG_API_HASH = os.getenv ( "TG_API_HASH", "" ) .strip ( )
+TG_SESSION = os.getenv ( "TG_SESSION", "" ) .strip ( )
 DEMO_DAYS = 7
 WEEK_PRICE = 100
 PREMIUM = {3:1000, 6:1500, 12:2500}
@@ -1167,6 +1176,74 @@ def _openai_response_sync ( prompt ) :
     return "\n".join ( parts ) .strip ( )
 
 
+
+def _openai_image_response_sync ( image_bytes, mime_type, user_text ) :
+    if not OPENAI_API_KEY:
+        raise RuntimeError ( "OPENAI_API_KEY sozlanmagan")
+    import base64 as _b64
+    data_url=f"data:{mime_type};base64,"+_b64.b64encode ( image_bytes ) .decode ( "ascii")
+    payload=json.dumps ( {
+        "model":OPENAI_MODEL,
+        "instructions":(
+            "Siz Veritas Botsiz. O‘zingiz haqingizda so‘rashsa ‘Men Veritas Botman’ deb boshlang. "
+            "Foydalanuvchi yuborgan rasmni diqqat bilan ko‘ring. Undagi matn, jadval, diagramma, kitob sahifasi "
+            "yoki boshqa ko‘rinadigan ma’lumotni tahlil qiling. Ko‘rinmagan narsani uydirmang. "
+            "Foydalanuvchi qaysi tilda yozsa o‘sha tilda javob bering."
+        ),
+        "input":[{
+            "role":"user",
+            "content":[
+                {"type":"input_image","image_url":data_url,"detail":"auto"},
+                {"type":"input_text","text":user_text or "Bu rasmni ko‘rib, undagi ma’lumotni tushuntirib bering."}
+            ]
+        }],
+        "max_output_tokens":900
+    },ensure_ascii=False ) .encode ( "utf-8")
+    req=urllib.request.Request(
+        "https://api.openai.com/v1/responses",
+        data=payload,
+        headers={"Authorization":f"Bearer {OPENAI_API_KEY}","Content-Type":"application/json"},
+        method="POST"
+    )
+    with urllib.request.urlopen ( req,timeout=90) as resp:
+        data=json.loads ( resp.read (  ) .decode ( "utf-8" ) )
+    return _extract_response_text ( data) or "Rasm tahlil qilindi, lekin javob hosil bo‘lmadi."
+
+async def private_ai_media_reply ( update,ctx ) :
+    msg=update.effective_message; u=update.effective_user; chat=update.effective_chat
+    if not msg or not u or chat.type!="private" or u.is_bot:
+        return
+    if STATE.get ( u.id ) :
+        return
+    # Only image support in this first safe phase; PDF large-file downloader follows separately.
+    photo = msg.photo[-1] if msg.photo else None
+    image_doc = None
+    if msg.document and (msg.document.mime_type or "" ) .lower (  ) .startswith ( "image/" ) :
+        image_doc=msg.document
+    if not photo and not image_doc:
+        return
+    ensure_user ( u)
+    if not ai_user_active ( u.id ) :
+        kb=InlineKeyboardMarkup ( [[InlineKeyboardButton ( "💎 100 ⭐ — 30 kun",callback_data="aipbuy" ) ],
+                                 [InlineKeyboardButton ( "⭐ Hisobni to‘ldirish",callback_data="wallet" ) ]])
+        return await msg.reply_text ( "🔒 Rasmni Veritas AI bilan tahlil qilish AI Premium uchun.\n\n💎 100 ⭐ — 30 kun",reply_markup=kb)
+    if not OPENAI_API_KEY:
+        return await msg.reply_text ( "⚠️ Veritas AI kaliti sozlanmagan.")
+    try:
+        await ctx.bot.send_chat_action ( chat.id,"typing")
+        obj=photo or image_doc
+        tgfile=await ctx.bot.get_file ( obj.file_id)
+        raw=bytes ( await tgfile.download_as_bytearray (  ) )
+        mime= ( getattr ( image_doc,"mime_type",None) or "image/jpeg")
+        prompt= ( msg.caption or "" ) .strip ( ) or "Bu rasmni ko‘rib, undagi ma’lumotni tushuntirib bering."
+        answer=await asyncio.to_thread ( _openai_image_response_sync,raw,mime,prompt)
+        for i in range ( 0,len ( answer ) ,4000 ) :
+            await msg.reply_text ( answer[i:i+4000])
+    except Exception as e:
+        log.exception ( "Private AI image error: %s",e)
+        await msg.reply_text ( "⚠️ Rasmni tahlil qilishda xatolik bo‘ldi.")
+
+
 def _openai_upload_pdf_sync ( pdf_bytes,filename ) :
     boundary="----VeritasBoundary"+str ( int ( time.time ( ) *1000 ) )
     safe= ( filename or "book.pdf" ) .replace ( '"','' ) .replace ( "\r","" ) .replace ( "\n","")
@@ -1333,21 +1410,7 @@ async def _make_and_send_book_quiz ( q,ctx,bid,chat_id,count ) :
     )
     path=f"/tmp/veritas_book_{bid}_{u.id}.pdf"
     try:
-        # Bot API getFile katta PDFlarda "File is too big" qaytarishi mumkin.
-        # Avval Telegram Bot API orqali urinib ko'ramiz; katta fayl bo'lsa foydalanuvchiga
-        # aniq xabar beramiz. Keyingi bosqichda Local Bot API/MTProto orqali katta PDFlar
-        # uchun alohida downloader ulash mumkin.
-        try:
-            tgfile=await ctx.bot.get_file ( r["pdf_file_id"])
-        except Exception as e:
-            if "File is too big" in str ( e ) :
-                return await q.edit_message_text(
-                    "⚠️ Bu PDF Telegram Bot API yuklab olish limitidan katta.\n\n"
-                    "Kitob kutubxonada qoladi, lekin AI test tuzishi uchun hozircha kichikroq PDF kerak. "
-                    "Katta kitoblar uchun alohida yuklash tizimini ulash kerak.",
-                    reply_markup=back_markup ( "library")
-                )
-            raise
+        tgfile=await ctx.bot.get_file ( r["pdf_file_id"])
         fsize=int ( getattr ( tgfile,"file_size",0) or 0)
         if fsize and fsize>45*1024*1024:
             return await q.edit_message_text(
@@ -2044,6 +2107,7 @@ def main (  ) :
     app.add_handler ( MessageHandler ( filters.StatusUpdate.LEFT_CHAT_MEMBER,left_member ) )
     app.add_handler ( MessageHandler ( filters.TEXT & filters.Regex ( r"^\*" ) ,star_text_router ) ,group=0)
     app.add_handler ( MessageHandler ( filters.ChatType.PRIVATE & ~filters.COMMAND & ~filters.SUCCESSFUL_PAYMENT,library_private_input ) ,group=1)
+    app.add_handler ( MessageHandler ( filters.ChatType.PRIVATE & (filters.PHOTO | filters.Document.IMAGE ) ,private_ai_media_reply ) ,group=1)
     app.add_handler ( MessageHandler ( filters.ALL & ~filters.StatusUpdate.ALL & ~filters.SUCCESSFUL_PAYMENT,passive ) ,group=2)
     app.add_handler ( MessageHandler ( filters.ChatType.PRIVATE & filters.TEXT & ~filters.COMMAND & ~filters.Regex ( r"^\*" ) ,private_ai_reply ) ,group=3)
     if app.job_queue: app.job_queue.run_repeating ( giveaway_job,60,first=10)
