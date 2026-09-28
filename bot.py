@@ -249,7 +249,8 @@ def library_book_markup ( uid,book_id,back="library" ) :
     if r and r["audio_file_id"]: row.append ( InlineKeyboardButton ( "🎧 Audio",callback_data=f"libaudio:{book_id}" ) )
     if row: kb.append ( row)
     kb.append ( [InlineKeyboardButton ( "💔 Sevimlidan olish" if fav else "❤️ Sevimliga",callback_data=f"libfavtoggle:{book_id}" ) ])
-    if is_library_admin ( uid ) : kb.append ( [InlineKeyboardButton ( "🗑 O‘chirish",callback_data=f"libdelask:{book_id}" ) ])
+    if is_library_admin ( uid ) :
+        kb.append ( [InlineKeyboardButton ( "✏️ Tahrirlash",callback_data=f"libedit:{book_id}" ) ,InlineKeyboardButton ( "🗑 O‘chirish",callback_data=f"libdelask:{book_id}" ) ])
     kb.append ( [InlineKeyboardButton ( "⬅️ Kutubxona",callback_data=back ) ,InlineKeyboardButton ( "🏠 Bosh menyu",callback_data="home" ) ])
     return InlineKeyboardMarkup ( kb)
 
@@ -298,6 +299,57 @@ async def library_private_input ( update,ctx ) :
     if not is_library_admin ( uid ) :
         STATE.pop ( uid,None ) ; return await msg.reply_text ( "⛔ Kutubxona boshqaruv huquqi yo‘q.")
     data=st.setdefault ( "data",{})
+    if mode.startswith ( "lib_edit_" ) :
+        bid=int ( data.get ( "book_id",0 ) )
+        if not bid or not one ( "SELECT 1 FROM library_books WHERE id=? AND status='approved'", ( bid, ) ) :
+            STATE.pop ( uid,None ) ; return await msg.reply_text ( "❌ Kitob topilmadi." )
+        field=mode[9:]
+        if field=="title":
+            if not msg.text: return await msg.reply_text ( "Yangi kitob nomini matn qilib yuboring." )
+            execute ( "UPDATE library_books SET title=? WHERE id=?", ( msg.text.strip ( ) [:250],bid ) )
+        elif field=="author":
+            if not msg.text: return await msg.reply_text ( "Yangi muallif nomini matn qilib yuboring." )
+            execute ( "UPDATE library_books SET author=? WHERE id=?", ( msg.text.strip ( ) [:250],bid ) )
+        elif field=="categories":
+            if not msg.text: return await msg.reply_text ( "Kategoriyalarni vergul bilan yuboring." )
+            cats=[x.strip ( ) [:80] for x in msg.text.split ( "," ) if x.strip ( ) ][:10]
+            with db ( ) as c:
+                c.execute ( "DELETE FROM library_book_categories WHERE book_id=?", ( bid, ) )
+                for cat in cats:
+                    c.execute ( "INSERT OR IGNORE INTO library_categories ( name) VALUES ( ? ) ", ( cat, ) )
+                    cr=c.execute ( "SELECT id FROM library_categories WHERE name=? COLLATE NOCASE", ( cat, ) ).fetchone ( )
+                    c.execute ( "INSERT OR IGNORE INTO library_book_categories ( book_id,category_id) VALUES ( ?,? ) ", ( bid,cr["id"] ) )
+        elif field=="description":
+            if not msg.text: return await msg.reply_text ( "Yangi tavsifni matn qilib yuboring." )
+            execute ( "UPDATE library_books SET description=? WHERE id=?", ( msg.text.strip ( ) [:3000],bid ) )
+        elif field=="cover":
+            if msg.photo: fid=msg.photo[-1].file_id
+            elif msg.text and msg.text.casefold ( ).replace ( "‘","'" ).replace ( "’","'" ) in {"o'chirish","ochirish","o'tkazish","otkazish"}: fid=""
+            else: return await msg.reply_text ( "🖼 Yangi rasm yuboring. Muqovani olib tashlash uchun «o‘chirish» yozing." )
+            execute ( "UPDATE library_books SET cover_file_id=? WHERE id=?", ( fid,bid ) )
+        elif field=="pdf":
+            if not msg.document: return await msg.reply_text ( "📄 Yangi PDFni Document sifatida yuboring." )
+            doc=msg.document; name= ( doc.file_name or "" ) .lower ( ); mime= ( doc.mime_type or "" ) .lower ( )
+            if not (name.endswith ( ".pdf" ) or mime=="application/pdf" ) : return await msg.reply_text ( "❌ Bu PDF emas." )
+            uniq=doc.file_unique_id or ""
+            dup=one ( "SELECT id FROM library_books WHERE pdf_unique_id=? AND id<>? AND status<>'deleted'", ( uniq,bid ) ) if uniq else None
+            if dup: return await msg.reply_text ( f"⚠️ Bu PDF boshqa kitobda mavjud. ID: {dup['id']}" )
+            execute ( "UPDATE library_books SET pdf_file_id=?,pdf_unique_id=? WHERE id=?", ( doc.file_id,uniq,bid ) )
+        elif field=="audio":
+            af=None
+            if msg.audio: af=msg.audio
+            elif msg.voice: af=msg.voice
+            elif msg.document:
+                d=msg.document; name= ( d.file_name or "" ) .lower ( ); mime= ( d.mime_type or "" ) .lower ( )
+                if mime.startswith ( "audio/" ) or name.endswith ( ( ".mp3",".m4a",".m4b",".aac",".ogg",".opus",".wav",".flac",".wma" ) ): af=d
+            if msg.text and msg.text.casefold ( ).replace ( "‘","'" ).replace ( "’","'" ) in {"o'chirish","ochirish","o'tkazish","otkazish"}:
+                execute ( "UPDATE library_books SET audio_file_id='',audio_unique_id='' WHERE id=?", ( bid, ) )
+            elif af:
+                execute ( "UPDATE library_books SET audio_file_id=?,audio_unique_id=? WHERE id=?", ( af.file_id,af.file_unique_id or "",bid ) )
+            else: return await msg.reply_text ( "🎧 Yangi audio/voice/audio-fayl yuboring. Olib tashlash uchun «o‘chirish» yozing." )
+        else: return
+        STATE.pop ( uid,None ) ; audit ( uid,0,"library_edit",f"{bid}:{field}" )
+        return await msg.reply_text ( "✅ Kitob ma’lumoti yangilandi.",reply_markup=InlineKeyboardMarkup ( [[InlineKeyboardButton ( "📖 Kitobni ochish",callback_data=f"libbook:{bid}" ) ,InlineKeyboardButton ( "📚 Kutubxona",callback_data="library" ) ]] ) )
     if mode=="lib_add_title":
         if not msg.text: return await msg.reply_text ( "Kitob nomini matn qilib yuboring.")
         data["title"]=msg.text.strip (  ) [:250]; st["mode"]="lib_add_author"
@@ -467,14 +519,39 @@ async def hadith_private_input ( update,ctx ) :
     text=msg.text.strip (  ) ; data=st.setdefault ( "data",{} ) ; mode=st["mode"]
     if text.casefold ( ) in {"bekor","cancel","/cancel"}:
         STATE.pop ( uid,None ) ; return await msg.reply_text ( "❌ Hadis qo‘shish bekor qilindi.",reply_markup=main_menu_markup ( uid ) )
+    if mode.startswith ( "had_edit_" ) :
+        hid=int ( data.get ( "hadith_id",0 ) )
+        if not hid or not one ( "SELECT 1 FROM hadiths WHERE id=? AND status='approved'", ( hid, ) ) :
+            STATE.pop ( uid,None ) ; return await msg.reply_text ( "❌ Hadis topilmadi." )
+        field=mode[9:]
+        if field=="collection": value=hadith_collection_key ( text )
+        elif field=="number":
+            if not text.isdigit ( ) or int ( text ) <=0: return await msg.reply_text ( "❌ Musbat raqam yuboring." )
+            value=int ( text )
+        elif field in {"arabic","explanation","source"}:
+            value="" if text.casefold ( ).replace ( "‘","'" ).replace ( "’","'" ) in {"o'tkazish","otkazish","o'chirish","ochirish"} else text
+        elif field=="translation": value=text
+        else: return
+        current=one ( "SELECT collection,number FROM hadiths WHERE id=?", ( hid, ) )
+        col=value if field=="collection" else current["collection"]; num=value if field=="number" else current["number"]
+        dup=one ( "SELECT id FROM hadiths WHERE lower ( collection ) =lower ( ?) AND number=? AND id<>? AND status<>'deleted'", ( col,num,hid ) )
+        if dup: return await msg.reply_text ( f"⚠️ {col} {num} boshqa hadis sifatida bazada mavjud. ID: {dup['id']}" )
+        execute ( f"UPDATE hadiths SET {field}=? WHERE id=?", ( value,hid ) )
+        STATE.pop ( uid,None ) ; audit ( uid,0,"hadith_edit",f"{hid}:{field}" )
+        r=one ( "SELECT * FROM hadiths WHERE id=?", ( hid, ) )
+        kb=InlineKeyboardMarkup ( [[InlineKeyboardButton ( "✏️ Yana tahrirlash",callback_data=f"hedit:{hid}" ) ],[InlineKeyboardButton ( "📜 Hadislar",callback_data="hadith" ) ]] )
+        return await msg.reply_text ( "✅ Hadis yangilandi.\n\n"+hadith_text ( r ),reply_markup=kb )
     if mode=="had_add_collection":
         data["collection"]=hadith_collection_key ( text ) ; st["mode"]="had_add_number"
         return await msg.reply_text ( "📜 2/6 — Hadis raqamini yuboring.\nMisol: 1")
     if mode=="had_add_number":
         if not text.isdigit ( ) or int ( text ) <=0: return await msg.reply_text ( "❌ Musbat raqam yuboring. Misol: 1")
         data["number"]=int ( text)
-        if one ( "SELECT 1 FROM hadiths WHERE lower ( collection ) =lower ( ?) AND number=? AND status<>'deleted'", ( data["collection"],data["number"] )  ) :
-            STATE.pop ( uid,None ) ; return await msg.reply_text ( f"⚠️ {data['collection']} {data['number']} bazada mavjud.",reply_markup=main_menu_markup ( uid ) )
+        existing=one ( "SELECT * FROM hadiths WHERE lower ( collection ) =lower ( ?) AND number=? AND status<>'deleted'", ( data["collection"],data["number"] )  )
+        if existing:
+            STATE.pop ( uid,None )
+            kb=InlineKeyboardMarkup ( [[InlineKeyboardButton ( "✏️ Mavjud hadisni tahrirlash",callback_data=f"hedit:{existing['id']}" ) ],[InlineKeyboardButton ( "❌ Bekor",callback_data="hadith" ) ]] )
+            return await msg.reply_text ( f"⚠️ {data['collection']} {data['number']} bazada mavjud.\n\nYangi nusxa qo‘shilmaydi. Mavjud hadisni tahrirlashingiz mumkin.",reply_markup=kb )
         st["mode"]="had_add_arabic"
         return await msg.reply_text ( "📜 3/6 — Hadisning arabcha asl matnini yuboring.\nArabcha matn bo‘lmasa: o'tkazish")
     if mode=="had_add_arabic":
@@ -587,96 +664,35 @@ async def cmd_id ( update,ctx ) :
     await update.effective_message.reply_text ( f"👤 ID: {update.effective_user.id}\n💬 Chat ID: {update.effective_chat.id}")
 
 async def cmd_help ( update,ctx ) :
-    text="""🪶 VERITAS v8 — BUYRUQLAR
+    kb=InlineKeyboardMarkup ( [
+        [InlineKeyboardButton ( "📚 Vasatiya",callback_data="help:library" ) ,InlineKeyboardButton ( "📜 Hadislar",callback_data="help:hadith" ) ],
+        [InlineKeyboardButton ( "🛡 Adminlar",callback_data="help:admins" ) ,InlineKeyboardButton ( "👥 Moderatsiya",callback_data="help:moderation" ) ],
+        [InlineKeyboardButton ( "🔐 Himoya",callback_data="help:security" ) ,InlineKeyboardButton ( "💬 Filter / Notes",callback_data="help:filters" ) ],
+        [InlineKeyboardButton ( "⚙️ Guruh sozlamalari",callback_data="help:settings" ) ],
+        [InlineKeyboardButton ( "⭐ Stars / Gift",callback_data="help:stars" ) ,InlineKeyboardButton ( "🎉 Giveaway",callback_data="help:giveaway" ) ],
+        [InlineKeyboardButton ( "📢 Xabarnoma",callback_data="help:broadcast" ) ,InlineKeyboardButton ( "📌 Asosiy",callback_data="help:main" ) ],
+        [InlineKeyboardButton ( "🏠 Bosh menyu",callback_data="home" ) ]
+    ] )
+    await update.effective_message.reply_text ( "❓ VERITAS YORDAM MARKAZI\n\nKerakli bo‘limni tanlang:",reply_markup=kb )
 
-📌 ASOSIY
-*help — barcha buyruqlarni ko‘rsatadi
-*id — Telegram ID va chat IDni ko‘rsatadi
-*men — profil va faollikni ko‘rsatadi
-*aktiv — guruhdagi eng faol 10 a’zo
-*aktiv 20 — ko‘rsatiladigan TOP sonini tanlaydi
-*top 10 — Super Ega uchun TOP-10 yakunlash paneli
-*rules — guruh qoidalarini ko‘rsatadi
-*admins — Telegram va Veritas adminlarini ko‘rsatadi
-*unvon <nom> — reply qilingan a’zoga unvon beradi
-*unvonoff — reply qilingan a’zoning unvonini olib tashlaydi
+def help_menu_markup (  ) :
+    return InlineKeyboardMarkup ( [[InlineKeyboardButton ( "⬅️ Yordam bo‘limlari",callback_data="help:home" ) ,InlineKeyboardButton ( "🏠 Bosh menyu",callback_data="home" ) ]] )
 
-📚 VASATIYA KUTUBXONASI
-*ad.book — reply qilingan odamga kitob qo‘shish huquqi beradi (Super Ega)
-*unad.book — kitob qo‘shish huquqini olib tashlaydi (Super Ega)
-*bookadmins — kutubxona adminlarini ko‘rsatadi (Super Ega)
-
-📜 SAHIH HADISLAR
-*hadis — bazadan bitta random hadis chiqaradi
-*hadis buxoriy 1 — aynan Buxoriy 1-hadisni chiqaradi
-*add.hadis — private chatda bosqichma-bosqich yangi hadis qo‘shadi (hadis admini)
-*del.hadis buxoriy 1 — hadisni tasdiqlab o‘chiradi (hadis admini)
-*ad.hadis — reply qilingan odamga hadis qo‘shish huquqi beradi (Super Ega)
-*unad.hadis — hadis huquqini olib tashlaydi (Super Ega)
-*hadisadmins — hadis adminlarini ko‘rsatadi (Super Ega ) \n\n📢 XABARNOMA\n*post <matn> — barcha foydalanuvchi va guruhlarga matn yuboradi (Super Ega ) \n*post — post/xabarga reply qilinsa, o‘sha postni hammaga nusxalaydi (Super Ega)
-
-🛡 MODERATSIYA — reply orqali
-*warn — ogohlantirish beradi; 3 warn = ban
-*unwarn — bitta warnni kamaytiradi
-*warns — warn sonini ko‘rsatadi
-*clearwarns — barcha warnlarni tozalaydi
-*mute — yozishni taqiqlaydi
-*unmute — yozish huquqini qaytaradi
-*kick — guruhdan chiqaradi
-*ban — guruhdan bloklaydi
-*unban — bandan chiqaradi
-*del — reply qilingan xabarni o‘chiradi
-
-👮 RUXSAT / ADMIN
-*ruxsat — reply qilingan odamni Veritas admin qiladi
-*ruxsatsiz — Veritas admin huquqini oladi
-*admin — Telegram admin huquqi beradi
-*unadmin — Telegram admin huquqini oladi
-*approve — a’zoni himoya ro‘yxatiga qo‘shadi
-*unapprove — himoyadan chiqaradi
-*approved — himoyalanganlar IDlarini ko‘rsatadi
-
-🔐 HIMOYA
-*links on/off — link himoyasini yoqadi/o‘chiradi
-*blacklist <so‘z> — taqiqlangan so‘z qo‘shadi
-*unblacklist <so‘z> — taqiqlangan so‘zni olib tashlaydi
-*blacklists — blacklistni ko‘rsatadi
-*lock <turi> — media/link turini qulflaydi
-*unlock <turi> — qulfni ochadi
-*locks — faol qulflarni ko‘rsatadi
-*antiflood on/off — flood himoyasini boshqaradi
-*flood 5 — flood chegarasini belgilaydi
-*report — reply qilingan xabarni adminlarga bildiradi
-*reports on/off — report funksiyasini boshqaradi
-
-💬 FILTER VA NOTES
-*filter <kalit> <javob> — avtomatik javob qo‘shadi
-*filters — filterlarni ko‘rsatadi
-*stop <kalit> — bitta filterni o‘chiradi
-*stopall — barcha filterlarni o‘chiradi
-*save <nom> <matn> — note saqlaydi
-*get <nom> — noteni chiqaradi
-*notes — notelarni ko‘rsatadi
-*clear <nom> — noteni o‘chiradi
-
-⚙️ GURUH SOZLAMALARI
-*welcome on/off — kutib olish xabarini boshqaradi
-*goodbye on/off — xayrlashuv xabarini boshqaradi
-*setrules <matn> — guruh qoidalarini saqlaydi
-
-⭐ STARS / SOVG‘A
-*topup 100 — Veritas Stars kreditini to‘ldiradi
-*stars 100 — replydagi odam uchun Telegram Stars Gift oynasini ochadi (Super Ega)
-*give <narx> — replydagi odamga real Telegram Gift yuboradi
-*premium 3/6/12 — replydagi odamga Telegram Premium sovg‘a qiladi
-
-🎉 GIVEAWAY
-*giveaway gift <narx> <daq> <g‘oliblar> — Gift konkursini ochadi
-*join — faol konkursga qo‘shiladi
-
-📜 Hadis qo‘shish namunasi:
-*add.hadis buxoriy 1 | arabcha matn | o‘zbekcha tarjima | qisqa sharh | manba"""
-    await update.effective_message.reply_text ( text)
+def help_text ( section ) :
+    data={
+      "main":"📌 ASOSIY\n\n*help — yordam markazi\n*id — Telegram ID va chat ID\n*men — profil va faollik\n*aktiv — faol a’zolar\n*top 10 — Super Ega TOP paneli\n*rules — guruh qoidalari\n*admins — adminlar\n*unvon <nom> / *unvonoff — unvon boshqaruvi",
+      "library":"📚 VASATIYA KUTUBXONASI\n\nMenyudan kitob qidirish, kategoriya, yangi kitoblar va sevimlilar ishlaydi.\n\n*ad.book — replydagi odamga kutubxona adminligi\n*unad.book — huquqni olish\n*bookadmins — kutubxona adminlari\n\nKitob admini kitob qo‘shishi, ✏️ Tahrirlash orqali nom, muallif, til, kategoriya, tavsif, muqova, PDF va audioni yangilashi mumkin.",
+      "hadith":"📜 SAHIH HADISLAR\n\n*hadis — random hadis\n*hadis buxoriy 1 — aniq hadis\n*add.hadis — private chatda hadis qo‘shish\n*del.hadis buxoriy 1 — o‘chirish\n*ad.hadis / *unad.hadis — hadis admini huquqi\n*hadisadmins — hadis adminlari\n\nMavjud hadis topilsa uni ✏️ Tahrirlash mumkin.",
+      "admins":"🛡 ADMINLAR\n\n*ruxsat / *ruxsatsiz — Veritas admini\n*admin / *unadmin — Telegram admini\n*approve / *unapprove / *approved — himoyalangan a’zolar\n*ad.book / *unad.book — kutubxona admini\n*ad.hadis / *unad.hadis — hadis admini",
+      "moderation":"👥 MODERATSIYA\n\nReply orqali: *warn, *unwarn, *warns, *clearwarns, *mute, *unmute, *kick, *ban, *unban, *del",
+      "security":"🔐 HIMOYA\n\n*links on/off\n*blacklist <so‘z> / *unblacklist <so‘z> / *blacklists\n*lock <turi> / *unlock <turi> / *locks\n*antiflood on/off\n*flood 5\n*report / *reports on/off",
+      "filters":"💬 FILTER VA NOTES\n\n*filter <kalit> <javob> / *filters / *stop <kalit> / *stopall\n*save <nom> <matn> / *get <nom> / *notes / *clear <nom>",
+      "settings":"⚙️ GURUH SOZLAMALARI\n\n*welcome on/off\n*goodbye on/off\n*setrules <matn>",
+      "stars":"⭐ STARS / SOVG‘A\n\n*topup 100 — kabinet krediti\n*stars 100 — Telegram Stars Gift oynasi (Super Ega ) \n*give <narx> — real Gift\n*premium 3/6/12 — Premium sovg‘asi",
+      "giveaway":"🎉 GIVEAWAY\n\n*giveaway gift <narx> <daq> <g‘oliblar> — konkurs ochish\n*join — konkursga qo‘shilish",
+      "broadcast":"📢 XABARNOMA\n\n*post <matn> — barcha foydalanuvchi va guruhlarga matn\n*post — xabar/postga reply qilinsa o‘sha xabarni hammaga nusxalaydi\n\nFaqat Super Ega uchun."
+    }
+    return data.get ( section,"Bo‘lim topilmadi." )
 
 async def cmd_super ( update,ctx ) :
     ensure_user ( update.effective_user)
@@ -1108,6 +1124,21 @@ async def callback ( update,ctx ) :
     q=update.callback_query; d=q.data; u=q.from_user; ensure_user ( u)
     await q.answer ( )
 
+    if d=="help:home":
+        kb=InlineKeyboardMarkup ( [
+            [InlineKeyboardButton ( "📚 Vasatiya",callback_data="help:library" ) ,InlineKeyboardButton ( "📜 Hadislar",callback_data="help:hadith" ) ],
+            [InlineKeyboardButton ( "🛡 Adminlar",callback_data="help:admins" ) ,InlineKeyboardButton ( "👥 Moderatsiya",callback_data="help:moderation" ) ],
+            [InlineKeyboardButton ( "🔐 Himoya",callback_data="help:security" ) ,InlineKeyboardButton ( "💬 Filter / Notes",callback_data="help:filters" ) ],
+            [InlineKeyboardButton ( "⚙️ Guruh sozlamalari",callback_data="help:settings" ) ],
+            [InlineKeyboardButton ( "⭐ Stars / Gift",callback_data="help:stars" ) ,InlineKeyboardButton ( "🎉 Giveaway",callback_data="help:giveaway" ) ],
+            [InlineKeyboardButton ( "📢 Xabarnoma",callback_data="help:broadcast" ) ,InlineKeyboardButton ( "📌 Asosiy",callback_data="help:main" ) ],
+            [InlineKeyboardButton ( "🏠 Bosh menyu",callback_data="home" ) ]
+        ] )
+        return await q.edit_message_text ( "❓ VERITAS YORDAM MARKAZI\n\nKerakli bo‘limni tanlang:",reply_markup=kb )
+
+    if d.startswith ( "help:" ) :
+        return await q.edit_message_text ( help_text ( d.split ( ":",1 )[1] ),reply_markup=help_menu_markup ( ) )
+
     if d=="home":
         try:
             if q.message.photo or q.message.video or q.message.document or q.message.audio or q.message.animation:
@@ -1200,7 +1231,37 @@ async def callback ( update,ctx ) :
     if d.startswith ( "hshow:" ) :
         hid=int ( d.split ( ":" ) [1] ) ; r=one ( "SELECT * FROM hadiths WHERE id=? AND status='approved'", ( hid, ) )
         if not r: return await q.edit_message_text ( "❌ Hadis topilmadi.",reply_markup=back_markup ( "hadith" ) )
+        if is_hadith_admin ( u.id ) :
+            uploader=one ( "SELECT first_name FROM users WHERE user_id=?", ( r["added_by"], ) ); nm= ( uploader["first_name"] if uploader and uploader["first_name"] else f"ID {r['added_by']}")
+            kb=InlineKeyboardMarkup ( [[InlineKeyboardButton ( f"👤 Qo‘shdi: {nm[:35]}",url=f"tg://user?id={r['added_by']}" ) ],[InlineKeyboardButton ( "✏️ Tahrirlash",callback_data=f"hedit:{r['id']}" ) ,InlineKeyboardButton ( "🗑 O‘chirish",callback_data=f"hdelask:{r['id']}" ) ],[InlineKeyboardButton ( "⬅️ Hadislar",callback_data="hadith" ) ,InlineKeyboardButton ( "🏠 Bosh menyu",callback_data="home" ) ]] )
+            return await q.edit_message_text ( hadith_text ( r ),reply_markup=kb )
         return await q.edit_message_text ( hadith_text ( r ) ,reply_markup=hadith_markup ( r ) )
+
+    if d.startswith ( "hedit:" ) :
+        if not is_hadith_admin ( u.id ) : return await q.answer ( "Ruxsat yo‘q",show_alert=True )
+        hid=int ( d.split ( ":" )[1] ); r=one ( "SELECT * FROM hadiths WHERE id=? AND status='approved'", ( hid, ) )
+        if not r: return await q.edit_message_text ( "❌ Hadis topilmadi.",reply_markup=back_markup ( "hadith" ) )
+        kb=InlineKeyboardMarkup ( [
+          [InlineKeyboardButton ( "📚 To‘plam",callback_data=f"heditfield:{hid}:collection" ) ,InlineKeyboardButton ( "🔢 Raqam",callback_data=f"heditfield:{hid}:number" ) ],
+          [InlineKeyboardButton ( "🇸🇦 Arabcha",callback_data=f"heditfield:{hid}:arabic" ) ,InlineKeyboardButton ( "🇺🇿 Tarjima",callback_data=f"heditfield:{hid}:translation" ) ],
+          [InlineKeyboardButton ( "📝 Sharh",callback_data=f"heditfield:{hid}:explanation" ) ,InlineKeyboardButton ( "📖 Manba",callback_data=f"heditfield:{hid}:source" ) ],
+          [InlineKeyboardButton ( "⬅️ Hadis",callback_data=f"hshow:{hid}" ) ] ] )
+        return await q.edit_message_text ( "✏️ HADISNI TAHRIRLASH\n\nQaysi qismini o‘zgartirasiz?",reply_markup=kb )
+
+    if d.startswith ( "heditfield:" ) :
+        if not is_hadith_admin ( u.id ) : return await q.answer ( "Ruxsat yo‘q",show_alert=True )
+        _,shid,field=d.split ( ":",2 ); hid=int ( shid )
+        prompts={"collection":"Yangi to‘plam nomini yuboring:","number":"Yangi hadis raqamini yuboring:","arabic":"Yangi arabcha matnni yuboring. Olib tashlash uchun: o‘chirish","translation":"Yangi o‘zbekcha tarjimani yuboring:","explanation":"Yangi sharhni yuboring. Olib tashlash uchun: o‘chirish","source":"Yangi manbani yuboring. Olib tashlash uchun: o‘chirish"}
+        if field not in prompts: return
+        STATE[u.id]={"mode":f"had_edit_{field}","data":{"hadith_id":hid}}
+        return await q.edit_message_text ( "✏️ "+prompts[field],reply_markup=back_markup ( f"hedit:{hid}" ) )
+
+    if d.startswith ( "hdelask:" ) :
+        if not is_hadith_admin ( u.id ) : return await q.answer ( "Ruxsat yo‘q",show_alert=True )
+        hid=int ( d.split ( ":" )[1] ); r=one ( "SELECT collection,number FROM hadiths WHERE id=?", ( hid, ) )
+        if not r: return
+        kb=InlineKeyboardMarkup ( [[InlineKeyboardButton ( "✅ O‘chirish",callback_data=f"hdel:{hid}" ) ,InlineKeyboardButton ( "❌ Bekor",callback_data=f"hshow:{hid}" ) ]] )
+        return await q.edit_message_text ( f"🗑 {r['collection']} {r['number']} hadisni o‘chirishni tasdiqlaysizmi?",reply_markup=kb )
 
     if d.startswith ( "hdel:" ) :
         if not is_hadith_admin ( u.id ) : return await q.answer ( "Ruxsat yo‘q",show_alert=True)
@@ -1327,6 +1388,43 @@ async def callback ( update,ctx ) :
         try: await ctx.bot.send_audio ( u.id,r["audio_file_id"],caption=f"🎧 {r['title']}\nVasatiya kutubxonasi")
         except Exception: await ctx.bot.send_document ( u.id,r["audio_file_id"],caption=f"🎧 {r['title']}")
         return
+
+    if d.startswith ( "libedit:" ) :
+        if not is_library_admin ( u.id ) : return await q.answer ( "Ruxsat yo‘q",show_alert=True )
+        bid=int ( d.split ( ":" )[1] ); r=one ( "SELECT id,title FROM library_books WHERE id=? AND status='approved'", ( bid, ) )
+        if not r: return await q.edit_message_text ( "❌ Kitob topilmadi.",reply_markup=back_markup ( "library" ) )
+        kb=InlineKeyboardMarkup ( [
+          [InlineKeyboardButton ( "📖 Nomi",callback_data=f"libeditfield:{bid}:title" ) ,InlineKeyboardButton ( "✍️ Muallif",callback_data=f"libeditfield:{bid}:author" ) ],
+          [InlineKeyboardButton ( "🌐 Til",callback_data=f"libeditfield:{bid}:lang" ) ,InlineKeyboardButton ( "🗂 Kategoriya",callback_data=f"libeditfield:{bid}:categories" ) ],
+          [InlineKeyboardButton ( "📝 Tavsif",callback_data=f"libeditfield:{bid}:description" ) ,InlineKeyboardButton ( "🖼 Muqova",callback_data=f"libeditfield:{bid}:cover" ) ],
+          [InlineKeyboardButton ( "📄 PDF",callback_data=f"libeditfield:{bid}:pdf" ) ,InlineKeyboardButton ( "🎧 Audio",callback_data=f"libeditfield:{bid}:audio" ) ],
+          [InlineKeyboardButton ( "⬅️ Kitob",callback_data=f"libbook:{bid}" ) ] ] )
+        txt=f"✏️ KITOBNI TAHRIRLASH\n\n📖 {r['title']}\nQaysi qismini o‘zgartirasiz?"
+        try:
+            if q.message.photo or q.message.video or q.message.document or q.message.audio or q.message.animation:
+                await q.message.delete ( )
+                return await ctx.bot.send_message ( q.message.chat.id,txt,reply_markup=kb )
+            return await q.edit_message_text ( txt,reply_markup=kb )
+        except TelegramError:
+            return await ctx.bot.send_message ( q.message.chat.id,txt,reply_markup=kb )
+
+    if d.startswith ( "libeditfield:" ) :
+        if not is_library_admin ( u.id ) : return await q.answer ( "Ruxsat yo‘q",show_alert=True )
+        _,sbid,field=d.split ( ":",2 ); bid=int ( sbid )
+        if field=="lang":
+            kb=InlineKeyboardMarkup ( [[InlineKeyboardButton ( "🇺🇿 O‘zbekcha",callback_data=f"libeditlang:{bid}:uz" ) ,InlineKeyboardButton ( "🇷🇺 Русский",callback_data=f"libeditlang:{bid}:ru" ) ,InlineKeyboardButton ( "🇬🇧 English",callback_data=f"libeditlang:{bid}:en" ) ],[InlineKeyboardButton ( "⬅️ Orqaga",callback_data=f"libedit:{bid}" ) ]] )
+            return await q.edit_message_text ( "🌐 Yangi tilni tanlang:",reply_markup=kb )
+        prompts={"title":"Yangi kitob nomini yuboring:","author":"Yangi muallif nomini yuboring:","categories":"Yangi kategoriyalarni vergul bilan yuboring:","description":"Yangi tavsifni yuboring:","cover":"Yangi muqova rasmini yuboring. Olib tashlash uchun: o‘chirish","pdf":"Yangi PDF faylni Document sifatida yuboring:","audio":"Yangi audio/voice/audio-fayl yuboring. Olib tashlash uchun: o‘chirish"}
+        if field not in prompts: return
+        STATE[u.id]={"mode":f"lib_edit_{field}","data":{"book_id":bid}}
+        return await q.edit_message_text ( "✏️ "+prompts[field],reply_markup=back_markup ( f"libedit:{bid}" ) )
+
+    if d.startswith ( "libeditlang:" ) :
+        if not is_library_admin ( u.id ) : return await q.answer ( "Ruxsat yo‘q",show_alert=True )
+        _,sbid,lang=d.split ( ":",2 ); bid=int ( sbid )
+        if lang not in {"uz","ru","en"}: return
+        execute ( "UPDATE library_books SET lang=? WHERE id=?", ( lang,bid ) ); audit ( u.id,0,"library_edit",f"{bid}:lang" )
+        return await q.edit_message_text ( "✅ Kitob tili yangilandi.",reply_markup=InlineKeyboardMarkup ( [[InlineKeyboardButton ( "✏️ Tahrirlash",callback_data=f"libedit:{bid}" ) ,InlineKeyboardButton ( "📖 Kitob",callback_data=f"libbook:{bid}" ) ]] ) )
 
     if d.startswith ( "libdelask:" ) :
         if not is_library_admin ( u.id ) : return
