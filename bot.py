@@ -36,7 +36,7 @@ FLOOD_CACHE = {}
 STATE = {}
 URL_RE = re.compile ( r" ( https?://|www\.|t\.me/|telegram\.me/|@\w+ ) ", re.I)
 
-logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
+logging.basicConfig ( level=logging.INFO, format="% ( asctime ) s % ( levelname ) s % ( name ) s: % ( message ) s")
 log = logging.getLogger ( "veritas-v8")
 
 def now (  ) : return int ( time.time (  ) )
@@ -180,7 +180,8 @@ def main_menu_markup ( uid ) :
     kb=[
       [InlineKeyboardButton ( "👤 Profil",callback_data="me" ) ,InlineKeyboardButton ( "⭐ Hisob",callback_data="wallet" ) ],
       [InlineKeyboardButton ( "🎁 Gift",callback_data="gifts" ) ,InlineKeyboardButton ( "💎 Premium",callback_data="premium" ) ],
-      [InlineKeyboardButton ( "🏘 Guruhlarim",callback_data="mygroups" ) ,InlineKeyboardButton ( "📚 Vasatiya kutubxonasi",callback_data="library" ) ],
+      [InlineKeyboardButton ( "🏘 Guruhlarim",callback_data="mygroups" ) ],
+      [InlineKeyboardButton ( "📚 Vasatiya kutubxonasi",callback_data="library" ) ,InlineKeyboardButton ( "📜 Sahih Hadislar",callback_data="hadith" ) ],
       [InlineKeyboardButton ( "ℹ️ Veritas haqida",callback_data="about" ) ],
     ]
     if uid in SUPER_OWNERS:
@@ -193,6 +194,8 @@ def back_markup ( target="home" ) :
 def super_menu_markup (  ) :
     return InlineKeyboardMarkup ( [
         [InlineKeyboardButton ( "👥 Kabinetlar",callback_data="cabs:0" ) ],
+        [InlineKeyboardButton ( "🛡 Barcha adminlar",callback_data="alladmins:0" ) ],
+        [InlineKeyboardButton ( "🏘 Bot ishlayotgan guruhlar",callback_data="botgroups:0" ) ],
         [InlineKeyboardButton ( "⬅️ Orqaga",callback_data="home" ) ,InlineKeyboardButton ( "🏠 Bosh menyu",callback_data="home" ) ]
     ])
 
@@ -1215,6 +1218,58 @@ async def callback ( update,ctx ) :
         if u.id not in SUPER_OWNERS: return await q.edit_message_text ( "⛔ Ruxsat yo‘q.")
         uc=one ( "SELECT COUNT ( *) n FROM users" ) ["n"]; gc=one ( "SELECT COUNT ( *) n FROM groups" ) ["n"]
         return await q.edit_message_text ( f"👑 SUPER EGA\nFoydalanuvchilar: {uc}\nGuruhlar: {gc}",reply_markup=super_menu_markup (  ) )
+
+    if d.startswith ( "alladmins:" ) :
+        if u.id not in SUPER_OWNERS: return
+        page=max ( 0,int ( d.split ( ":" ) [1] )  ) ; per=8
+        entries=[]
+        for sid in sorted ( SUPER_OWNERS ) :
+            ur=one ( "SELECT first_name,username FROM users WHERE user_id=?", ( sid, ) )
+            nm= ( ur["first_name"] if ur and ur["first_name"] else str ( sid ) )
+            if ur and ur["username"]: nm += " @"+ur["username"]
+            entries.append (  ( "👑 Super Ega",sid,nm,"" ) )
+        for r in all_ ( "SELECT a.user_id,u.first_name,u.username FROM library_admins a LEFT JOIN users u ON u.user_id=a.user_id ORDER BY a.created_at DESC" ) :
+            nm= ( r["first_name"] or str ( r["user_id"] ) ) + ( ( " @"+r["username"]) if r["username"] else "")
+            entries.append (  ( "📚 Kitob admini",int ( r["user_id"] ) ,nm,"" ) )
+        for r in all_ ( "SELECT a.user_id,u.first_name,u.username FROM hadith_admins a LEFT JOIN users u ON u.user_id=a.user_id ORDER BY a.created_at DESC" ) :
+            nm= ( r["first_name"] or str ( r["user_id"] ) ) + ( ( " @"+r["username"]) if r["username"] else "")
+            entries.append (  ( "📜 Hadis admini",int ( r["user_id"] ) ,nm,"" ) )
+        for r in all_ ( """SELECT v.user_id,v.chat_id,u.first_name,u.username,g.title FROM vadmins v
+                         LEFT JOIN users u ON u.user_id=v.user_id LEFT JOIN groups g ON g.chat_id=v.chat_id
+                         ORDER BY g.title,u.first_name""" ) :
+            nm= ( r["first_name"] or str ( r["user_id"] ) ) + ( ( " @"+r["username"]) if r["username"] else "")
+            entries.append (  ( "🪶 Veritas admini",int ( r["user_id"] ) ,nm,r["title"] or str ( r["chat_id"] )  ) )
+        # Bir odam bir necha rolga ega bo‘lishi mumkin — rollar alohida ko‘rsatiladi.
+        total=len ( entries ) ; off=page*per; chunk=entries[off:off+per]
+        lines=[f"🛡 BARCHA ADMINLAR\nJami rollar: {total} | Sahifa: {page+1}\n"]
+        for role,uid2,nm,grp in chunk:
+            lines.append ( f"{role}\n• {nm}\n• ID: {uid2}" + (f"\n• Guruh: {grp}" if grp else "" ) )
+        if not chunk: lines.append ( "Admin topilmadi.")
+        nav=[]
+        if page>0: nav.append ( InlineKeyboardButton ( "◀️",callback_data=f"alladmins:{page-1}" ) )
+        if off+per<total: nav.append ( InlineKeyboardButton ( "▶️",callback_data=f"alladmins:{page+1}" ) )
+        kb=[]
+        if nav: kb.append ( nav)
+        kb.append ( [InlineKeyboardButton ( "⬅️ Super Ega",callback_data="super" ) ,InlineKeyboardButton ( "🏠 Bosh menyu",callback_data="home" ) ])
+        return await q.edit_message_text ( "\n\n".join ( lines ) ,reply_markup=InlineKeyboardMarkup ( kb ) )
+
+    if d.startswith ( "botgroups:" ) :
+        if u.id not in SUPER_OWNERS: return
+        page=max ( 0,int ( d.split ( ":" ) [1] )  ) ; per=8; off=page*per
+        rows=all_ ( "SELECT chat_id,title,owner_id,created_at,demo_until,paid_until,free FROM groups ORDER BY created_at DESC,chat_id DESC LIMIT ? OFFSET ?", ( per,off ) )
+        total=one ( "SELECT COUNT ( *) n FROM groups" ) ["n"]
+        lines=[f"🏘 BOT ISHLAYOTGAN GURUHLAR\nJami: {total} | Sahifa: {page+1}\n"]
+        for i,r in enumerate ( rows,off+1 ) :
+            owner= ( f" | Ega ID: {r['owner_id']}" if r['owner_id'] else "")
+            lines.append ( f"{i}. {r['title'] or 'Nomsiz guruh'}\n🆔 {r['chat_id']}{owner}")
+        if not rows: lines.append ( "Guruh topilmadi.")
+        nav=[]
+        if page>0: nav.append ( InlineKeyboardButton ( "◀️",callback_data=f"botgroups:{page-1}" ) )
+        if off+per<total: nav.append ( InlineKeyboardButton ( "▶️",callback_data=f"botgroups:{page+1}" ) )
+        kb=[]
+        if nav: kb.append ( nav)
+        kb.append ( [InlineKeyboardButton ( "⬅️ Super Ega",callback_data="super" ) ,InlineKeyboardButton ( "🏠 Bosh menyu",callback_data="home" ) ])
+        return await q.edit_message_text ( "\n\n".join ( lines ) ,reply_markup=InlineKeyboardMarkup ( kb ) )
 
     if d.startswith ( "cabs:" ) :
         if u.id not in SUPER_OWNERS: return
