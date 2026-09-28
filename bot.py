@@ -36,7 +36,7 @@ FLOOD_CACHE = {}
 STATE = {}
 URL_RE = re.compile ( r" ( https?://|www\.|t\.me/|telegram\.me/|@\w+ ) ", re.I)
 
-logging.basicConfig ( level=logging.INFO, format="% ( asctime ) s % ( levelname ) s % ( name ) s: % ( message ) s")
+logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 log = logging.getLogger ( "veritas-v8")
 
 def now (  ) : return int ( time.time (  ) )
