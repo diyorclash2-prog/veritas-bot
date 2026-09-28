@@ -2106,10 +2106,15 @@ def main (  ) :
     app.add_handler ( MessageHandler ( filters.StatusUpdate.NEW_CHAT_MEMBERS,new_members ) )
     app.add_handler ( MessageHandler ( filters.StatusUpdate.LEFT_CHAT_MEMBER,left_member ) )
     app.add_handler ( MessageHandler ( filters.TEXT & filters.Regex ( r"^\*" ) ,star_text_router ) ,group=0)
+    # Private workflow first. It handles library/hadith upload states.
     app.add_handler ( MessageHandler ( filters.ChatType.PRIVATE & ~filters.COMMAND & ~filters.SUCCESSFUL_PAYMENT,library_private_input ) ,group=1)
-    app.add_handler ( MessageHandler ( filters.ChatType.PRIVATE & (filters.PHOTO | filters.Document.IMAGE ) ,private_ai_media_reply ) ,group=1)
-    app.add_handler ( MessageHandler ( filters.ALL & ~filters.StatusUpdate.ALL & ~filters.SUCCESSFUL_PAYMENT,passive ) ,group=2)
-    app.add_handler ( MessageHandler ( filters.ChatType.PRIVATE & filters.TEXT & ~filters.COMMAND & ~filters.Regex ( r"^\*" ) ,private_ai_reply ) ,group=3)
+    # Vision must be in a DIFFERENT handler group. In the old build it shared group=1
+    # with library_private_input, so python-telegram-bot never reached it.
+    app.add_handler ( MessageHandler ( filters.ChatType.PRIVATE & (filters.PHOTO | filters.Document.IMAGE ) ,private_ai_media_reply ) ,group=2)
+    # Group passive processing is separate.
+    app.add_handler ( MessageHandler ( filters.ALL & ~filters.StatusUpdate.ALL & ~filters.SUCCESSFUL_PAYMENT,passive ) ,group=3)
+    # Plain private text AI comes last.
+    app.add_handler ( MessageHandler ( filters.ChatType.PRIVATE & filters.TEXT & ~filters.COMMAND & ~filters.Regex ( r"^\*" ) ,private_ai_reply ) ,group=4)
     if app.job_queue: app.job_queue.run_repeating ( giveaway_job,60,first=10)
     app.add_error_handler ( error_handler)
     log.info ( "VERITAS v8 starting")
