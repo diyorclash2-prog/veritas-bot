@@ -36,7 +36,7 @@ FLOOD_CACHE = {}
 STATE = {}
 URL_RE = re.compile ( r" ( https?://|www\.|t\.me/|telegram\.me/|@\w+ ) ", re.I)
 
-logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
+logging.basicConfig ( level=logging.INFO, format="% ( asctime ) s % ( levelname ) s % ( name ) s: % ( message ) s")
 log = logging.getLogger ( "veritas-v8")
 
 def now (  ) : return int ( time.time (  ) )
@@ -113,6 +113,17 @@ def init_db (  ) :
     CREATE TABLE IF NOT EXISTS library_progress(
       user_id INTEGER,book_id INTEGER,kind TEXT DEFAULT 'pdf',position TEXT DEFAULT '',updated_at INTEGER,
       PRIMARY KEY ( user_id,book_id,kind )  ) ;
+
+    -- V8: Sahih Hadislar moduli
+    CREATE TABLE IF NOT EXISTS hadith_admins(
+      user_id INTEGER PRIMARY KEY,added_by INTEGER,created_at INTEGER ) ;
+    CREATE TABLE IF NOT EXISTS hadiths(
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      collection TEXT NOT NULL, number INTEGER NOT NULL,
+      arabic TEXT DEFAULT '', translation TEXT NOT NULL, explanation TEXT DEFAULT '', source TEXT DEFAULT '',
+      added_by INTEGER NOT NULL,status TEXT DEFAULT 'approved',created_at INTEGER NOT NULL,
+      UNIQUE ( collection,number )  ) ;
+    CREATE INDEX IF NOT EXISTS idx_hadith_collection_number ON hadiths ( collection,number ) ;
 
     CREATE TABLE IF NOT EXISTS audit(
       id INTEGER PRIMARY KEY AUTOINCREMENT,actor_id INTEGER,chat_id INTEGER,action TEXT,detail TEXT,created_at INTEGER ) ;
@@ -341,6 +352,113 @@ async def library_private_input ( update,ctx ) :
         STATE.pop ( uid,None ) ; audit ( uid,0,"library_add",str ( bid ) )
         return await msg.reply_text ( f"✅ Kitob Vasatiya kutubxonasiga qo‘shildi.\n📖 {data['title']}\nID: {bid}",reply_markup=library_home_markup ( uid ) )
 
+def is_hadith_admin ( uid ) :
+    return uid in SUPER_OWNERS or bool ( one ( "SELECT 1 FROM hadith_admins WHERE user_id=?", ( uid, )  ) )
+
+def hadith_collection_key ( name ) :
+    x= ( name or "" ) .strip (  ) .casefold ( )
+    aliases={
+        "buxoriy":"Buxoriy","bukhari":"Buxoriy","bukhariy":"Buxoriy",
+        "muslim":"Muslim","termiziy":"Termiziy","tirmiziy":"Termiziy","tirmidhi":"Termiziy",
+        "abu dovud":"Abu Dovud","abudovud":"Abu Dovud","abu dawood":"Abu Dovud",
+        "nasai":"Nasoiy","nasoiy":"Nasoiy","ibn moja":"Ibn Moja","ibnmajah":"Ibn Moja"
+    }
+    return aliases.get ( x, ( name or "" ) .strip (  ) .title (  ) )
+
+def hadith_text ( r ) :
+    parts=[f"📜 {r['collection']} — {r['number']}-hadis"]
+    if r["arabic"]: parts += ["",r["arabic"]]
+    parts += ["",f"🇺🇿 {r['translation']}"]
+    if r["explanation"]: parts += ["",f"📝 Sharh: {r['explanation']}"]
+    if r["source"]: parts += ["",f"📚 Manba: {r['source']}"]
+    return "\n".join ( parts)
+
+def hadith_markup ( r,back="hadith" ) :
+    uploader=one ( "SELECT first_name,username FROM users WHERE user_id=?", ( r["added_by"], ) )
+    name= ( uploader["first_name"] if uploader and uploader["first_name"] else f"ID {r['added_by']}")
+    kb=[[InlineKeyboardButton ( f"👤 Qo‘shdi: {name[:40]}",url=f"tg://user?id={r['added_by']}" ) ]]
+    kb.append ( [InlineKeyboardButton ( "⬅️ Hadislar",callback_data=back ) ,InlineKeyboardButton ( "🏠 Bosh menyu",callback_data="home" ) ])
+    return InlineKeyboardMarkup ( kb)
+
+async def send_hadith ( chat_id,ctx,r,reply_to=None ) :
+    if not r: return
+    await ctx.bot.send_message ( chat_id,hadith_text ( r ) ,reply_markup=hadith_markup ( r ) ,reply_to_message_id=reply_to)
+
+async def hadith_command ( update,ctx,args ) :
+    msg=update.effective_message
+    if not args:
+        r=one ( "SELECT * FROM hadiths WHERE status='approved' ORDER BY RANDOM ( ) LIMIT 1")
+        if not r: return await msg.reply_text ( "📜 Hozircha hadis bazasi bo‘sh.")
+        return await send_hadith ( update.effective_chat.id,ctx,r,msg.message_id)
+    if not args[-1].isdigit (  ) :
+        return await msg.reply_text ( "Misol: *hadis buxoriy 1")
+    num=int ( args[-1] ) ; collection=hadith_collection_key ( " ".join ( args[:-1] ) )
+    r=one ( "SELECT * FROM hadiths WHERE lower ( collection ) =lower ( ?) AND number=? AND status='approved'", ( collection,num ) )
+    if not r: return await msg.reply_text ( f"❌ {collection} {num} topilmadi.")
+    return await send_hadith ( update.effective_chat.id,ctx,r,msg.message_id)
+
+async def content_admin_command ( update,ctx,cmd ) :
+    msg=update.effective_message; uid=update.effective_user.id
+    if uid not in SUPER_OWNERS: return await msg.reply_text ( "⛔ Bu buyruq faqat Super Ega uchun.")
+    t=replied ( update)
+    if cmd in {"ad.book","unad.book","ad.hadis","unad.hadis"}:
+        if not t or not t.from_user: return await msg.reply_text ( "↩️ Foydalanuvchi xabariga reply qiling.")
+        ensure_user ( t.from_user ) ; target=t.from_user.id
+        if cmd=="ad.book":
+            execute ( "INSERT OR REPLACE INTO library_admins ( user_id,added_by,created_at) VALUES ( ?,?,? ) ", ( target,uid,now (  )  ) )
+            return await msg.reply_text ( f"✅ {t.from_user.full_name} — kutubxona admini qilindi.")
+        if cmd=="unad.book":
+            execute ( "DELETE FROM library_admins WHERE user_id=?", ( target, ) )
+            return await msg.reply_text ( f"✅ {t.from_user.full_name}ning kutubxona adminligi olib tashlandi.")
+        if cmd=="ad.hadis":
+            execute ( "INSERT OR REPLACE INTO hadith_admins ( user_id,added_by,created_at) VALUES ( ?,?,? ) ", ( target,uid,now (  )  ) )
+            return await msg.reply_text ( f"✅ {t.from_user.full_name} — hadis admini qilindi.")
+        execute ( "DELETE FROM hadith_admins WHERE user_id=?", ( target, ) )
+        return await msg.reply_text ( f"✅ {t.from_user.full_name}ning hadis adminligi olib tashlandi.")
+    table="library_admins" if cmd=="bookadmins" else "hadith_admins"
+    rows=all_ ( f"SELECT a.user_id,u.first_name,u.username FROM {table} a LEFT JOIN users u ON u.user_id=a.user_id ORDER BY a.created_at")
+    title="📚 Kutubxona adminlari" if cmd=="bookadmins" else "📜 Hadis adminlari"
+    lines=[title]
+    for i,r in enumerate ( rows,1 ) :
+        nm= ( r["first_name"] or "Nomsiz") + ( ( " @"+r["username"]) if r["username"] else "")
+        lines.append ( f"{i}. {nm} — {r['user_id']}")
+    if len ( lines ) ==1: lines.append ( "Hozircha admin yo‘q.")
+    await msg.reply_text ( "\n".join ( lines ) )
+
+async def add_hadith_command ( update,ctx ) :
+    msg=update.effective_message; uid=update.effective_user.id
+    if not is_hadith_admin ( uid ) : return await msg.reply_text ( "⛔ Hadis qo‘shish huquqi yo‘q.")
+    raw=msg.text or ""
+    body=raw[len ( "*add.hadis" ) :].strip ( )
+    parts=[x.strip ( ) for x in body.split ( "|" ) ]
+    if len ( parts ) <3:
+        return await msg.reply_text ( "Format:\n*add.hadis buxoriy 1 | arabcha matn | tarjima | sharh | manba\n\nArabcha bo‘lmasa ham | | joyini qoldiring.")
+    head=parts[0].split ( )
+    if len ( head ) <2 or not head[-1].isdigit (  ) : return await msg.reply_text ( "❌ Avval to‘plam va raqam yozing. Misol: buxoriy 1")
+    num=int ( head[-1] ) ; collection=hadith_collection_key ( " ".join ( head[:-1] ) )
+    arabic=parts[1]; translation=parts[2]
+    explanation=parts[3] if len ( parts ) >3 else ""; source=parts[4] if len ( parts ) >4 else ""
+    if not translation: return await msg.reply_text ( "❌ Tarjima bo‘sh bo‘lmasin.")
+    try:
+        execute ( "INSERT INTO hadiths ( collection,number,arabic,translation,explanation,source,added_by,status,created_at) VALUES ( ?,?,?,?,?,?,?,?,? ) ",
+                (collection,num,arabic,translation,explanation,source,uid,"approved",now (  )  ) )
+    except sqlite3.IntegrityError:
+        return await msg.reply_text ( f"⚠️ {collection} {num} bazada allaqachon mavjud.")
+    audit ( uid,update.effective_chat.id,"hadith_add",f"{collection} {num}")
+    r=one ( "SELECT * FROM hadiths WHERE lower ( collection ) =lower ( ?) AND number=?", ( collection,num ) )
+    await msg.reply_text ( "✅ Hadis qo‘shildi.")
+    await send_hadith ( update.effective_chat.id,ctx,r)
+
+async def delete_hadith_command ( update,ctx,args ) :
+    msg=update.effective_message; uid=update.effective_user.id
+    if not is_hadith_admin ( uid ) : return await msg.reply_text ( "⛔ Hadis o‘chirish huquqi yo‘q.")
+    if len ( args ) <2 or not args[-1].isdigit (  ) : return await msg.reply_text ( "Misol: *del.hadis buxoriy 1")
+    num=int ( args[-1] ) ; collection=hadith_collection_key ( " ".join ( args[:-1] ) )
+    r=one ( "SELECT id,collection,number FROM hadiths WHERE lower ( collection ) =lower ( ?) AND number=? AND status='approved'", ( collection,num ) )
+    if not r: return await msg.reply_text ( "❌ Hadis topilmadi.")
+    kb=InlineKeyboardMarkup ( [[InlineKeyboardButton ( "✅ O‘chirish",callback_data=f"hdel:{r['id']}" ) ,InlineKeyboardButton ( "❌ Bekor",callback_data="hadith" ) ]])
+    await msg.reply_text ( f"🗑 {r['collection']} {r['number']} hadisni o‘chirishni tasdiqlaysizmi?",reply_markup=kb)
+
 async def stars_cmd ( update, ctx, args ) :
     uid = update.effective_user.id
     msg = update.effective_message
@@ -385,53 +503,95 @@ async def cmd_id ( update,ctx ) :
     await update.effective_message.reply_text ( f"👤 ID: {update.effective_user.id}\n💬 Chat ID: {update.effective_chat.id}")
 
 async def cmd_help ( update,ctx ) :
-    text="""🪶 VERITAS v8
+    text="""🪶 VERITAS v8 — BUYRUQLAR
 
-ASOSIY
-*help  *id  *men  *aktiv  *aktiv 10  *top 10  *rules  *admins
-*unvon matn  *unvonoff
-*stars 100 — reply orqali Telegram Stars Gift oynasi (Super Ega)
+📌 ASOSIY
+*help — barcha buyruqlarni ko‘rsatadi
+*id — Telegram ID va chat IDni ko‘rsatadi
+*men — profil va faollikni ko‘rsatadi
+*aktiv — guruhdagi eng faol 10 a’zo
+*aktiv 20 — ko‘rsatiladigan TOP sonini tanlaydi
+*top 10 — Super Ega uchun TOP-10 yakunlash paneli
+*rules — guruh qoidalarini ko‘rsatadi
+*admins — Telegram va Veritas adminlarini ko‘rsatadi
+*unvon <nom> — reply qilingan a’zoga unvon beradi
+*unvonoff — reply qilingan a’zoning unvonini olib tashlaydi
 
-MODERATSIYA (reply)
-*warn  *unwarn  *warns  *clearwarns
-*mute  *unmute  *kick  *ban  *unban  *del
+📚 VASATIYA KUTUBXONASI
+*ad.book — reply qilingan odamga kitob qo‘shish huquqi beradi (Super Ega)
+*unad.book — kitob qo‘shish huquqini olib tashlaydi (Super Ega)
+*bookadmins — kutubxona adminlarini ko‘rsatadi (Super Ega)
 
-VERITAS ADMIN (reply)
-*ruxsat  *ruxsatsiz
+📜 SAHIH HADISLAR
+*hadis — bazadan bitta random hadis chiqaradi
+*hadis buxoriy 1 — aynan Buxoriy 1-hadisni chiqaradi
+*add.hadis ... — yangi hadis qo‘shadi (hadis admini)
+*del.hadis buxoriy 1 — hadisni tasdiqlab o‘chiradi (hadis admini)
+*ad.hadis — reply qilingan odamga hadis qo‘shish huquqi beradi (Super Ega)
+*unad.hadis — hadis huquqini olib tashlaydi (Super Ega)
+*hadisadmins — hadis adminlarini ko‘rsatadi (Super Ega)
 
-TELEGRAM ADMIN (reply)
-*admin  *unadmin
+🛡 MODERATSIYA — reply orqali
+*warn — ogohlantirish beradi; 3 warn = ban
+*unwarn — bitta warnni kamaytiradi
+*warns — warn sonini ko‘rsatadi
+*clearwarns — barcha warnlarni tozalaydi
+*mute — yozishni taqiqlaydi
+*unmute — yozish huquqini qaytaradi
+*kick — guruhdan chiqaradi
+*ban — guruhdan bloklaydi
+*unban — bandan chiqaradi
+*del — reply qilingan xabarni o‘chiradi
 
-HIMOYA
-*links on/off
-*blacklist so‘z  *unblacklist so‘z  *blacklists
-*lock links/photo/video/sticker/animation/document/voice/audio
-*unlock turi  *locks
-*antiflood on/off  *flood 5
-*approve  *unapprove  *approved
-*report  *reports on/off
+👮 RUXSAT / ADMIN
+*ruxsat — reply qilingan odamni Veritas admin qiladi
+*ruxsatsiz — Veritas admin huquqini oladi
+*admin — Telegram admin huquqi beradi
+*unadmin — Telegram admin huquqini oladi
+*approve — a’zoni himoya ro‘yxatiga qo‘shadi
+*unapprove — himoyadan chiqaradi
+*approved — himoyalanganlar IDlarini ko‘rsatadi
 
-FILTER / NOTES
-*filter kalit javob  *filters  *stop kalit  *stopall
-*save nom matn  *get nom  *notes  *clear nom
+🔐 HIMOYA
+*links on/off — link himoyasini yoqadi/o‘chiradi
+*blacklist <so‘z> — taqiqlangan so‘z qo‘shadi
+*unblacklist <so‘z> — taqiqlangan so‘zni olib tashlaydi
+*blacklists — blacklistni ko‘rsatadi
+*lock <turi> — media/link turini qulflaydi
+*unlock <turi> — qulfni ochadi
+*locks — faol qulflarni ko‘rsatadi
+*antiflood on/off — flood himoyasini boshqaradi
+*flood 5 — flood chegarasini belgilaydi
+*report — reply qilingan xabarni adminlarga bildiradi
+*reports on/off — report funksiyasini boshqaradi
 
-SOZLAMA
-*welcome on/off  *goodbye on/off  *setrules matn
+💬 FILTER VA NOTES
+*filter <kalit> <javob> — avtomatik javob qo‘shadi
+*filters — filterlarni ko‘rsatadi
+*stop <kalit> — bitta filterni o‘chiradi
+*stopall — barcha filterlarni o‘chiradi
+*save <nom> <matn> — note saqlaydi
+*get <nom> — noteni chiqaradi
+*notes — notelarni ko‘rsatadi
+*clear <nom> — noteni o‘chiradi
 
-⭐ REAL STARS KREDITI
-*topup 100
+⚙️ GURUH SOZLAMALARI
+*welcome on/off — kutib olish xabarini boshqaradi
+*goodbye on/off — xayrlashuv xabarini boshqaradi
+*setrules <matn> — guruh qoidalarini saqlaydi
 
-🎁 REAL TELEGRAM GIFT
-Reply + *give
-*give 25 / 50 / 100
-
-💎 PREMIUM
-Reply + *premium 3 / 6 / 12
+⭐ STARS / SOVG‘A
+*topup 100 — Veritas Stars kreditini to‘ldiradi
+*stars 100 — replydagi odam uchun Telegram Stars Gift oynasini ochadi (Super Ega)
+*give <narx> — replydagi odamga real Telegram Gift yuboradi
+*premium 3/6/12 — replydagi odamga Telegram Premium sovg‘a qiladi
 
 🎉 GIVEAWAY
-*giveaway gift <narx> <daq> <g‘oliblar>
-*join
-"""
+*giveaway gift <narx> <daq> <g‘oliblar> — Gift konkursini ochadi
+*join — faol konkursga qo‘shiladi
+
+📜 Hadis qo‘shish namunasi:
+*add.hadis buxoriy 1 | arabcha matn | o‘zbekcha tarjima | qisqa sharh | manba"""
     await update.effective_message.reply_text ( text)
 
 async def cmd_super ( update,ctx ) :
@@ -759,6 +919,14 @@ async def star_text_router ( update,ctx ) :
         return await topup ( update,ctx,a)
     if cmd=="stars":
         return await stars_cmd ( update,ctx,args)
+    if cmd in {"ad.book","unad.book","bookadmins","ad.hadis","unad.hadis","hadisadmins"}:
+        return await content_admin_command ( update,ctx,cmd)
+    if cmd=="hadis":
+        return await hadith_command ( update,ctx,args)
+    if cmd=="add.hadis":
+        return await add_hadith_command ( update,ctx)
+    if cmd=="del.hadis":
+        return await delete_hadith_command ( update,ctx,args)
     if update.effective_chat.type not in ("group","supergroup" ) :
         return await msg.reply_text ( "Bu buyruq guruh uchun.")
     if cmd in {"warn","unwarn","clearwarns","mute","unmute","kick","ban","unban","del","ruxsat","ruxsatsiz","admin","unadmin","approve","unapprove"}:
@@ -894,10 +1062,48 @@ async def callback ( update,ctx ) :
         text= ( "ℹ️ VERITAS v8\n\n"
               "Veritas — guruh boshqaruvi, faollik, Stars/Gift/Premium va Vasatiya kutubxonasini bir joyga jamlaydigan Telegram bot.\n\n"
               "📚 Vasatiya kutubxonasi — PDF va audio kitoblar, tillar, kategoriyalar, qidiruv va sevimlilar.\n"
+              "📜 Sahih Hadislar — hadis bazasi, to‘plamlar va random hadis.\n"
               "🛡 Guruhlar — moderatsiya, blacklist, lock, antiflood, filter va notes.\n"
               "⭐ Kabinet — Stars krediti, Telegram Gift va Premium.\n\n"
               "Buyruqlar uchun: *help")
         return await q.edit_message_text ( text,reply_markup=back_markup (  ) )
+
+    if d=="hadith":
+        total=one ( "SELECT COUNT ( *) n FROM hadiths WHERE status='approved'" ) ["n"]
+        cols=all_ ( "SELECT collection,COUNT ( *) n FROM hadiths WHERE status='approved' GROUP BY collection ORDER BY collection")
+        kb=[[InlineKeyboardButton ( f"📚 {r['collection']} · {r['n']}",callback_data=f"hcol:{r['collection']}:0" ) ] for r in cols[:20]]
+        kb.append ( [InlineKeyboardButton ( "🎲 Random hadis",callback_data="hrandom" ) ])
+        kb.append ( [InlineKeyboardButton ( "⬅️ Orqaga",callback_data="home" ) ,InlineKeyboardButton ( "🏠 Bosh menyu",callback_data="home" ) ])
+        return await q.edit_message_text ( f"📜 SAHIH HADISLAR\n\nJami hadislar: {total}\nTo‘plamni tanlang yoki random hadis o‘qing.",reply_markup=InlineKeyboardMarkup ( kb ) )
+
+    if d=="hrandom":
+        r=one ( "SELECT * FROM hadiths WHERE status='approved' ORDER BY RANDOM ( ) LIMIT 1")
+        if not r: return await q.edit_message_text ( "📜 Hozircha hadis bazasi bo‘sh.",reply_markup=back_markup ( "home" ) )
+        return await q.edit_message_text ( hadith_text ( r ) ,reply_markup=hadith_markup ( r ) )
+
+    if d.startswith ( "hcol:" ) :
+        _,collection,spage=d.split ( ":",2 ) ; page=max ( 0,int ( spage )  ) ; per=10; off=page*per
+        total=one ( "SELECT COUNT ( *) n FROM hadiths WHERE collection=? AND status='approved'", ( collection, )  ) ["n"]
+        rows=all_ ( "SELECT id,number FROM hadiths WHERE collection=? AND status='approved' ORDER BY number LIMIT ? OFFSET ?", ( collection,per,off ) )
+        kb=[[InlineKeyboardButton ( f"📜 {collection} {r['number']}",callback_data=f"hshow:{r['id']}" ) ] for r in rows]
+        nav=[]
+        if page>0: nav.append ( InlineKeyboardButton ( "◀️",callback_data=f"hcol:{collection}:{page-1}" ) )
+        if off+per<total: nav.append ( InlineKeyboardButton ( "▶️",callback_data=f"hcol:{collection}:{page+1}" ) )
+        if nav: kb.append ( nav)
+        kb.append ( [InlineKeyboardButton ( "⬅️ Hadislar",callback_data="hadith" ) ])
+        return await q.edit_message_text ( f"📚 {collection} · {total} ta hadis",reply_markup=InlineKeyboardMarkup ( kb ) )
+
+    if d.startswith ( "hshow:" ) :
+        hid=int ( d.split ( ":" ) [1] ) ; r=one ( "SELECT * FROM hadiths WHERE id=? AND status='approved'", ( hid, ) )
+        if not r: return await q.edit_message_text ( "❌ Hadis topilmadi.",reply_markup=back_markup ( "hadith" ) )
+        return await q.edit_message_text ( hadith_text ( r ) ,reply_markup=hadith_markup ( r ) )
+
+    if d.startswith ( "hdel:" ) :
+        if not is_hadith_admin ( u.id ) : return await q.answer ( "Ruxsat yo‘q",show_alert=True)
+        hid=int ( d.split ( ":" ) [1] ) ; r=one ( "SELECT collection,number FROM hadiths WHERE id=? AND status='approved'", ( hid, ) )
+        if not r: return await q.edit_message_text ( "❌ Hadis topilmadi.",reply_markup=back_markup ( "hadith" ) )
+        execute ( "UPDATE hadiths SET status='deleted' WHERE id=?", ( hid, )  ) ; audit ( u.id,0,"hadith_delete",f"{r['collection']} {r['number']}")
+        return await q.edit_message_text ( f"✅ {r['collection']} {r['number']} o‘chirildi.",reply_markup=back_markup ( "hadith" ) )
 
     if d=="library":
         total=one ( "SELECT COUNT ( *) n FROM library_books WHERE status='approved'" ) ["n"]
