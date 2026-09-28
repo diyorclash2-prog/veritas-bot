@@ -306,6 +306,8 @@ def library_book_markup ( uid,book_id,back="library" ) :
     if r and r["pdf_file_id"]: row.append ( InlineKeyboardButton ( "📄 PDF",callback_data=f"libpdf:{book_id}" ) )
     if r and r["audio_file_id"]: row.append ( InlineKeyboardButton ( "🎧 Audio",callback_data=f"libaudio:{book_id}" ) )
     if row: kb.append ( row)
+    if r and r["pdf_file_id"]:
+        kb.append ( [InlineKeyboardButton ( "🧠 Test tuzish",callback_data=f"libquiz:{book_id}" ) ])
     kb.append ( [InlineKeyboardButton ( "💔 Sevimlidan olish" if fav else "❤️ Sevimliga",callback_data=f"libfavtoggle:{book_id}" ) ])
     if is_library_admin ( uid ) :
         kb.append ( [InlineKeyboardButton ( "✏️ Tahrirlash",callback_data=f"libedit:{book_id}" ) ,InlineKeyboardButton ( "🗑 O‘chirish",callback_data=f"libdelask:{book_id}" ) ])
@@ -1133,9 +1135,16 @@ def _openai_response_sync ( prompt ) :
     payload=json.dumps ( {
         "model":OPENAI_MODEL,
         "instructions":(
-            "Siz Veritas guruh yordamchisisiz. Foydalanuvchi qaysi tilda yozsa, asosan o‘sha tilda javob bering. "
-            "Javobni Telegram guruhiga mos, aniq va ortiqcha uzun bo‘lmagan shaklda yozing. "
-            "Bilmagan narsangizni uydirmang. Diniy, tibbiy, huquqiy yoki moliyaviy mavzularda noaniqlik bo‘lsa buni ochiq ayting."
+            "Siz Veritas Botsiz. O‘zingiz haqingizda so‘rashsa javobni tabiiy ravishda ‘Men Veritas Botman’ deb boshlang. "
+            "Veritas — Telegram uchun guruh boshqaruvi va AI yordamchi bot. Shaxsiy Veritas AI Premium 100 Stars va 30 kun ishlaydi. "
+            "Guruh Veritas AI obunasi 250 Stars/7 kun yoki 500 Stars/30 kun. Super Ega guruh AI sini bepul 1, 7 yoki 30 kunga yoqa oladi. "
+            "Shaxsiy AI Premium va guruh AI obunasi alohida. Veritasda Vasatiya kutubxonasi bor: PDF/audio kitoblar, qidiruv, kategoriya, tillar, sevimlilar va kitob tahriri. "
+            "Kutubxonadagi PDF kitobdan AI yordamida 5, 10 yoki 20 ta Telegram Quiz testi tuzib, foydalanuvchi admin bo‘lgan Veritas guruhiga yuborish mumkin. "
+            "Veritasda Sahih Hadislar bo‘limi, hadis qidirish/random hadis va hadis adminlari mavjud. Guruh boshqaruvida warn, mute, kick, ban, blacklist, links, lock, antiflood, report, welcome/goodbye, filter, notes, rules, faollik va TOP funksiyalari bor. "
+            "Kabinetda Stars krediti bor. Telegram Gift va Telegram Premium sovg‘a qilish funksiyalari Veritas AI Premiumdan boshqa xizmat. *help yordam markazini ochadi, *ai guruh AI holati/tariflarini ko‘rsatadi. "
+            "Mavjud bo‘lmagan Veritas funksiyasini uydirmang. Aniq bilmagan sozlama bo‘lsa *help yoki menyuni tekshirishni ayting. "
+            "Foydalanuvchi qaysi tilda yozsa, asosan o‘sha tilda javob bering. Javob Telegram uchun aniq va ortiqcha uzun bo‘lmasin. "
+            "Diniy, tibbiy, huquqiy yoki moliyaviy mavzularda noaniqlik bo‘lsa buni ochiq ayting."
         ),
         "input":prompt,
         "max_output_tokens":700
@@ -1156,6 +1165,133 @@ def _openai_response_sync ( prompt ) :
             if content.get ( "type" ) =="output_text" and content.get ( "text" ) :
                 parts.append ( content["text"])
     return "\n".join ( parts ) .strip ( )
+
+
+def _openai_upload_pdf_sync ( pdf_bytes,filename ) :
+    boundary="----VeritasBoundary"+str ( int ( time.time ( ) *1000 ) )
+    safe= ( filename or "book.pdf" ) .replace ( '"','' ) .replace ( "\r","" ) .replace ( "\n","")
+    chunks=[]
+    def add ( x ) : chunks.append ( x.encode ( "utf-8" ) if isinstance ( x,str ) else x )
+    add ( f"--{boundary}\r\nContent-Disposition: form-data; name=\"purpose\"\r\n\r\nuser_data\r\n" )
+    add ( f"--{boundary}\r\nContent-Disposition: form-data; name=\"file\"; filename=\"{safe}\"\r\nContent-Type: application/pdf\r\n\r\n" )
+    add ( pdf_bytes ) ; add ( f"\r\n--{boundary}--\r\n" )
+    req=urllib.request.Request ( "https://api.openai.com/v1/files",data=b"".join ( chunks ),headers={"Authorization":f"Bearer {OPENAI_API_KEY}","Content-Type":f"multipart/form-data; boundary={boundary}"},method="POST" )
+    with urllib.request.urlopen ( req,timeout=90 ) as resp: data=json.loads ( resp.read ( ).decode ( "utf-8" ) )
+    return data.get ( "id","" )
+
+def _openai_delete_file_sync ( file_id ) :
+    if not file_id: return
+    try:
+        req=urllib.request.Request ( f"https://api.openai.com/v1/files/{file_id}",headers={"Authorization":f"Bearer {OPENAI_API_KEY}"},method="DELETE" )
+        urllib.request.urlopen ( req,timeout=20 ).read ( )
+    except Exception: pass
+
+def _extract_response_text ( data ) :
+    if data.get ( "output_text" ): return str ( data["output_text"] ).strip ( )
+    parts=[]
+    for item in data.get ( "output",[] ):
+        for content in item.get ( "content",[] ):
+            if content.get ( "type" )=="output_text" and content.get ( "text" ): parts.append ( content["text"] )
+    return "\n".join ( parts ).strip ( )
+
+def _clean_json_text ( text ) :
+    t= ( text or "" ) .strip ( )
+    if t.startswith ( "```" ):
+        t=re.sub ( r"^``` ( ?:json ) ?\s*","",t,flags=re.I )
+        t=re.sub ( r"\s*```$","",t )
+    a=t.find ( "[" ) ; b=t.rfind ( "]" )
+    return t[a:b+1] if a>=0 and b>a else t
+
+def _openai_book_quiz_sync ( pdf_bytes,filename,title,count ) :
+    fid=""
+    try:
+        fid=_openai_upload_pdf_sync ( pdf_bytes,filename )
+        if not fid: raise RuntimeError ( "OpenAI fayl ID qaytarmadi" )
+        instruction=(
+          f"Ushbu PDF — ‘{title}’ kitobi. Faqat PDF ichidagi ma’lumotlarga tayangan holda {count} ta test tuzing. "
+          "Tashqi bilim qo‘shmang. Har savolda aynan 4 ta variant bo‘lsin va faqat bittasi to‘g‘ri bo‘lsin. "
+          "Savollar bir-birini takrorlamasin, mazmunli va kitobni tushunganini tekshirsin. "
+          "Faqat JSON massiv qaytaring. Har element: question (string ) , options (4 string ) , correct (0-3 integer ) , explanation (string, kitobga tayangan juda qisqa izoh ) . "
+          "Markdown yoki JSONdan tashqari matn yozmang."
+        )
+        payload=json.dumps ( {
+          "model":OPENAI_MODEL,
+          "input":[{"role":"user","content":[{"type":"input_file","file_id":fid},{"type":"input_text","text":instruction}]}],
+          "max_output_tokens":max ( 1800,count*280 )
+        },ensure_ascii=False ).encode ( "utf-8" )
+        req=urllib.request.Request ( "https://api.openai.com/v1/responses",data=payload,headers={"Authorization":f"Bearer {OPENAI_API_KEY}","Content-Type":"application/json"},method="POST" )
+        with urllib.request.urlopen ( req,timeout=150 ) as resp: data=json.loads ( resp.read ( ).decode ( "utf-8" ) )
+        raw=_clean_json_text ( _extract_response_text ( data ) )
+        items=json.loads ( raw )
+        if not isinstance ( items,list ): raise ValueError ( "AI JSON massiv qaytarmadi" )
+        out=[]
+        for x in items:
+            if not isinstance ( x,dict ): continue
+            q=str ( x.get ( "question","" ) ).strip ( )[:300]
+            opts=x.get ( "options",[] )
+            try: correct=int ( x.get ( "correct",-1 ) )
+            except Exception: correct=-1
+            exp=str ( x.get ( "explanation","" ) ).strip ( )[:200]
+            if q and isinstance ( opts,list ) and len ( opts )==4 and 0<=correct<4:
+                opts=[str ( z ).strip ( )[:100] for z in opts]
+                if all ( opts ): out.append ( {"question":q,"options":opts,"correct":correct,"explanation":exp} )
+        if len ( out ) < count: raise ValueError ( f"AI {len ( out ) } ta yaroqli test qaytardi" )
+        return out[:count]
+    finally:
+        _openai_delete_file_sync ( fid )
+
+async def _quiz_allowed_groups ( ctx,uid ) :
+    rows=all_ ( "SELECT chat_id,title FROM groups ORDER BY title" )
+    out=[]
+    for r in rows:
+        cid=int ( r["chat_id"] )
+        if uid in SUPER_OWNERS:
+            out.append ( (cid,r["title"] or str ( cid )) )
+            continue
+        try:
+            if await is_tg_admin ( ctx.bot,cid,uid ): out.append ( (cid,r["title"] or str ( cid )) )
+        except Exception: pass
+    return out[:40]
+
+async def _make_and_send_book_quiz ( q,ctx,bid,chat_id,count ) :
+    u=q.from_user
+    r=one ( "SELECT title,pdf_file_id FROM library_books WHERE id=? AND status='approved'", ( bid,) )
+    if not r or not r["pdf_file_id"]: return await q.edit_message_text ( "❌ Kitob PDF’i topilmadi.",reply_markup=back_markup ( "library" ) )
+    if count not in ( 5,10,20 ): return await q.answer ( "Test soni noto‘g‘ri.",show_alert=True )
+    if u.id not in SUPER_OWNERS and not await is_tg_admin ( ctx.bot,chat_id,u.id ):
+        return await q.answer ( "Bu guruhda admin emassiz.",show_alert=True )
+    if not OPENAI_API_KEY: return await q.edit_message_text ( "⚠️ Veritas AI kaliti sozlanmagan.",reply_markup=back_markup ( "library" ) )
+    await q.edit_message_text ( f"🧠 ‘{r['title']}’ kitobi o‘qilmoqda...\n\n{count} ta test tayyorlanadi. Biroz kuting." )
+    path=f"/tmp/veritas_book_{bid}_{u.id}.pdf"
+    try:
+        tgfile=await ctx.bot.get_file ( r["pdf_file_id"] )
+        fsize=int ( getattr ( tgfile,"file_size",0 ) or 0 )
+        if fsize and fsize>19*1024*1024:
+            return await q.edit_message_text ( "⚠️ Hozircha test tuzish uchun PDF 19 MB dan kichik bo‘lishi kerak.",reply_markup=back_markup ( "library" ) )
+        await tgfile.download_to_drive ( custom_path=path )
+        pdf_bytes=Path ( path ).read_bytes ( )
+        if len ( pdf_bytes )>19*1024*1024:
+            return await q.edit_message_text ( "⚠️ Hozircha test tuzish uchun PDF 19 MB dan kichik bo‘lishi kerak.",reply_markup=back_markup ( "library" ) )
+        quizzes=await asyncio.to_thread ( _openai_book_quiz_sync,pdf_bytes,f"book_{bid}.pdf",r["title"],count )
+        await ctx.bot.send_message ( chat_id,f"🧠 VASATIYA KITOB TESTI\n\n📖 {r['title']}\n📝 {len ( quizzes ) } ta savol\n\nTestni boshlaymiz 👇" )
+        sent=0
+        for i,x in enumerate ( quizzes,1 ):
+            await ctx.bot.send_poll ( chat_id=chat_id,question=f"{i}. {x['question']}"[:300],options=x["options"],type="quiz",correct_option_id=x["correct"],is_anonymous=False,explanation= ( x["explanation"] or None ) ,protect_content=False )
+            sent+=1
+            await asyncio.sleep ( 0.35 )
+        return await q.edit_message_text ( f"✅ Tayyor!\n\n📖 {r['title']}\n🧠 {sent} ta test guruhga yuborildi.",reply_markup=InlineKeyboardMarkup ( [[InlineKeyboardButton ( "📖 Kitobga qaytish",callback_data=f"libbook:{bid}" ) ]] ) )
+    except urllib.error.HTTPError as e:
+        detail=""
+        try: detail=e.read ( ).decode ( "utf-8" )[:1000]
+        except Exception: pass
+        log.error ( "Book quiz OpenAI HTTP %s %s",getattr ( e,"code","?" ),detail )
+        return await q.edit_message_text ( "⚠️ AI kitobdan test tuza olmadi. PDF o‘qilishi yoki API holatini tekshiring.",reply_markup=back_markup ( "library" ) )
+    except Exception:
+        log.exception ( "Book quiz error" )
+        return await q.edit_message_text ( "⚠️ Kitobdan test tuzishda xatolik bo‘ldi. PDF matnli/o‘qiladigan ekanini tekshiring.",reply_markup=back_markup ( "library" ) )
+    finally:
+        try: Path ( path ).unlink ( missing_ok=True )
+        except Exception: pass
 
 async def group_ai_reply ( update,ctx ) :
     msg=update.effective_message; chat=update.effective_chat; u=update.effective_user
@@ -1557,6 +1693,31 @@ async def callback ( update,ctx ) :
         if nav: kb.append ( nav)
         kb.append ( [InlineKeyboardButton ( "⬅️ Kategoriyalar",callback_data="libcats:0" ) ])
         return await q.edit_message_text ( f"🗂 {cr['name']} · {total} ta",reply_markup=InlineKeyboardMarkup ( kb ) )
+
+    if d.startswith ( "libquiz:" ) :
+        bid=int ( d.split ( ":" )[1] )
+        r=one ( "SELECT title,pdf_file_id FROM library_books WHERE id=? AND status='approved'", ( bid,) )
+        if not r or not r["pdf_file_id"]: return await q.answer ( "PDF mavjud emas",show_alert=True )
+        groups=await _quiz_allowed_groups ( ctx,u.id )
+        if not groups:
+            return await q.edit_message_text ( "👥 Test yuborish uchun Veritas ishlayotgan kamida bitta guruhda admin bo‘lishingiz kerak.",reply_markup=InlineKeyboardMarkup ( [[InlineKeyboardButton ( "⬅️ Kitob",callback_data=f"libbook:{bid}" ) ]] ) )
+        kb=[]
+        for cid,title in groups[:20]: kb.append ( [InlineKeyboardButton ( "👥 "+title[:35],callback_data=f"libqgrp:{bid}:{cid}" ) ] )
+        kb.append ( [InlineKeyboardButton ( "⬅️ Kitob",callback_data=f"libbook:{bid}" ) ] )
+        return await q.edit_message_text ( f"🧠 TEST TUZISH\n\n📖 {r['title']}\n\nTest qaysi guruhga yuborilsin?",reply_markup=InlineKeyboardMarkup ( kb ) )
+
+    if d.startswith ( "libqgrp:" ) :
+        _,sbid,schat=d.split ( ":" ); bid=int ( sbid ); chat_id=int ( schat )
+        if u.id not in SUPER_OWNERS and not await is_tg_admin ( ctx.bot,chat_id,u.id ):
+            return await q.answer ( "Bu guruhda admin emassiz.",show_alert=True )
+        gr=one ( "SELECT title FROM groups WHERE chat_id=?", ( chat_id,) ); book=one ( "SELECT title FROM library_books WHERE id=?", ( bid,) )
+        if not gr or not book: return await q.answer ( "Kitob yoki guruh topilmadi.",show_alert=True )
+        kb=InlineKeyboardMarkup ( [[InlineKeyboardButton ( "5 ta",callback_data=f"libqrun:{bid}:{chat_id}:5" ),InlineKeyboardButton ( "10 ta",callback_data=f"libqrun:{bid}:{chat_id}:10" ),InlineKeyboardButton ( "20 ta",callback_data=f"libqrun:{bid}:{chat_id}:20" )],[InlineKeyboardButton ( "⬅️ Guruhlar",callback_data=f"libquiz:{bid}" ) ]] )
+        return await q.edit_message_text ( f"🧠 TEST TUZISH\n\n📖 {book['title']}\n👥 {gr['title']}\n\nNechta test tuzilsin?",reply_markup=kb )
+
+    if d.startswith ( "libqrun:" ) :
+        _,sbid,schat,scount=d.split ( ":" )
+        return await _make_and_send_book_quiz ( q,ctx,int ( sbid ),int ( schat ),int ( scount ) )
 
     if d.startswith ( "libbook:" ) :
         return await library_show_book ( q,ctx,int ( d.split ( ":" ) [1] ) )
