@@ -1,4 +1,3 @@
-# Veritas V8 large PDF rebuild
 # VERITAS BOT v8 — Vasatiya Library build
 # Python 3.11+ | python-telegram-bot[job-queue]>=22.5,<23
 #
@@ -15,12 +14,18 @@ import os, re, sqlite3, time, random, logging, json, asyncio, base64
 import urllib.request
 import urllib.error
 from datetime import datetime, timezone, timedelta
+from pathlib import Path
 
 try:
     from telethon import TelegramClient
     from telethon.sessions import StringSession
 except ImportError:
     TelegramClient = StringSession = None
+
+try:
+    import fitz  # PyMuPDF
+except ImportError:
+    fitz = None
 
 from telegram import (
     Update, InlineKeyboardButton, InlineKeyboardMarkup, ChatPermissions,
@@ -1365,6 +1370,198 @@ def _openai_book_quiz_sync ( pdf_bytes,filename,title,count ) :
     return out[:count]
 
 
+def _openai_quiz_from_context_sync ( context, title, count ) :
+    """Extracted book context -> grounded Telegram quiz JSON."""
+    if not OPENAI_API_KEY:
+        raise RuntimeError ( "OPENAI_API_KEY sozlanmagan")
+    if not context or len ( context.strip (  ) ) < 300:
+        raise RuntimeError ( "PDFdan test uchun yetarli matn olinmadi")
+    instruction = (
+        f"Quyidagi material ‘{title}’ kitobidan olingan. FAQAT berilgan materialga tayangan holda "
+        f"aynan {count} ta test tuzing. Tashqi bilim qo‘shmang. "
+        "Har savolda aynan 4 ta variant va faqat bitta to‘g‘ri javob bo‘lsin. "
+        "Savollar takrorlanmasin. Savol va variantlar o‘zbek tilida bo‘lsin. "
+        "Faqat JSON massiv qaytaring. Har element: "
+        '{"question":"...","options":["...","...","...","..."],"correct":0,"explanation":"..."}. '
+        "correct 0,1,2,3 dan biri. explanation juda qisqa bo‘lsin.\n\n"
+        "KITOBDAN OLINGAN MATERIAL:\n" + context
+    )
+    payload = json.dumps ( {
+        "model": OPENAI_MODEL,
+        "input": instruction,
+        "max_output_tokens": max ( 2200, count * 320)
+    }, ensure_ascii=False ) .encode ( "utf-8")
+    req = urllib.request.Request(
+        "https://api.openai.com/v1/responses",
+        data=payload,
+        headers={"Authorization": f"Bearer {OPENAI_API_KEY}", "Content-Type": "application/json"},
+        method="POST"
+    )
+    try:
+        with urllib.request.urlopen ( req, timeout=180) as resp:
+            data = json.loads ( resp.read (  ) .decode ( "utf-8" ) )
+    except urllib.error.HTTPError as e:
+        detail = ""
+        try:
+            detail = e.read (  ) .decode ( "utf-8", "replace" ) [:3000]
+        except Exception:
+            pass
+        raise RuntimeError ( f"OpenAI HTTP {getattr ( e,'code','?' ) }: {detail[:600]}")
+    raw_text = _extract_response_text ( data)
+    raw = _clean_json_text ( raw_text)
+    try:
+        items = json.loads ( raw)
+    except Exception:
+        log.error ( "Large PDF quiz invalid JSON: %s", raw_text[:5000])
+        raise RuntimeError ( "AI testlarni JSON formatida qaytarmadi")
+    out = []
+    if isinstance ( items, list ) :
+        for x in items:
+            if not isinstance ( x, dict ) :
+                continue
+            question = str ( x.get ( "question", "" )  ) .strip (  ) [:300]
+            opts = x.get ( "options", [])
+            try:
+                correct = int ( x.get ( "correct", -1 ) )
+            except Exception:
+                correct = -1
+            explanation = str ( x.get ( "explanation", "" )  ) .strip (  ) [:190]
+            if question and isinstance ( opts, list) and len ( opts) == 4 and 0 <= correct < 4:
+                opts = [str ( z ) .strip (  ) [:100] for z in opts]
+                if all ( opts ) :
+                    out.append ( {
+                        "question": question,
+                        "options": opts,
+                        "correct": correct,
+                        "explanation": explanation
+                    })
+            if len ( out) >= count:
+                break
+    if len ( out) < count:
+        raise RuntimeError ( f"AI {len ( out ) } ta yaroqli test qaytardi, {count} ta kerak")
+    return out[:count]
+
+
+def _even_page_indexes ( total, wanted ) :
+    if total <= 0:
+        return []
+    wanted = max ( 1, min ( int ( wanted ) , total ) )
+    if wanted == total:
+        return list ( range ( total ) )
+    if wanted == 1:
+        return [total // 2]
+    return sorted ( set ( round ( i * (total - 1) / (wanted - 1 ) ) for i in range ( wanted )  ) )
+
+
+def _extract_large_pdf_context_sync ( path, title, count ) :
+    """
+    Large PDF is never loaded fully into RAM.
+    Text PDFs: read all pages, keep evenly distributed bounded excerpts.
+    Scanned PDFs: render evenly distributed pages and let Vision read them in small batches.
+    """
+    if fitz is None:
+        raise RuntimeError ( "PyMuPDF o‘rnatilmagan")
+    doc = fitz.open ( path)
+    try:
+        total = doc.page_count
+        if total < 1:
+            raise RuntimeError ( "PDF sahifalari topilmadi")
+
+        # First determine whether this is a text PDF.
+        probe_ids = _even_page_indexes ( total, min ( 12, total ) )
+        probe_chars = 0
+        for pno in probe_ids:
+            try:
+                probe_chars += len (  ( doc.load_page ( pno ) .get_text ( "text") or "" ) .strip (  ) )
+            except Exception:
+                pass
+
+        # TEXT PDF: extract across the whole book without keeping the whole PDF in memory.
+        if probe_chars >= max ( 800, len ( probe_ids) * 120 ) :
+            page_budget = 2200
+            max_chars = 110000 if count >= 20 else (85000 if count >= 10 else 60000)
+            pieces = []
+            used = 0
+            for pno in range ( total ) :
+                try:
+                    t = (doc.load_page ( pno ) .get_text ( "text") or "" ) .strip ( )
+                except Exception:
+                    t = ""
+                if not t:
+                    continue
+                # Keep a bounded excerpt from every page so coverage spans the whole book.
+                if len ( t) > page_budget:
+                    half = page_budget // 2
+                    t = t[:half] + "\n...\n" + t[-half:]
+                block = f"\n--- {pno+1}-sahifa / {total} ---\n{t}\n"
+                if used + len ( block) > max_chars:
+                    # Once budget is full, switch to evenly sampled remaining pages.
+                    break
+                pieces.append ( block)
+                used += len ( block)
+
+            # If early pages filled the budget, rebuild with even page coverage.
+            if len ( pieces) < total and used >= max_chars * 0.85:
+                pieces = []
+                used = 0
+                sample_n = min ( total, 48 if count >= 20 else (36 if count >= 10 else 28 ) )
+                for pno in _even_page_indexes ( total, sample_n ) :
+                    try:
+                        t = (doc.load_page ( pno ) .get_text ( "text") or "" ) .strip ( )
+                    except Exception:
+                        t = ""
+                    if not t:
+                        continue
+                    per = max ( 900, max_chars // max ( 1, sample_n ) )
+                    if len ( t) > per:
+                        half = per // 2
+                        t = t[:half] + "\n...\n" + t[-half:]
+                    block = f"\n--- {pno+1}-sahifa / {total} ---\n{t}\n"
+                    if used + len ( block) > max_chars:
+                        break
+                    pieces.append ( block)
+                    used += len ( block)
+
+            context = "".join ( pieces ) .strip ( )
+            if len ( context) < 500:
+                raise RuntimeError ( "PDF matni juda kam")
+            return context, total, "text"
+
+        # SCANNED PDF: Vision reads evenly distributed pages.
+        sample_n = min ( total, 18 if count >= 20 else (14 if count >= 10 else 10 ) )
+        page_ids = _even_page_indexes ( total, sample_n)
+        vision_notes = []
+        for idx, pno in enumerate ( page_ids, 1 ) :
+            page = doc.load_page ( pno)
+            pix = page.get_pixmap ( matrix=fitz.Matrix ( 1.35, 1.35 ) , alpha=False)
+            img = pix.tobytes ( "jpeg", jpg_quality=72)
+            prompt = (
+                f"Bu ‘{title}’ kitobining {pno+1}/{total}-sahifasi. "
+                "Sahifadagi TEST tuzishga yaroqli aniq faktlar, ta’riflar, voqealar, ism va tushunchalarni "
+                "o‘zbekcha ixcham konspekt qiling. Faqat ko‘rinayotgan sahifadagi ma’lumotni yozing; uydirmang."
+            )
+            note = _openai_image_response_sync ( img, "image/jpeg", prompt)
+            if note:
+                vision_notes.append ( f"\n--- {pno+1}-sahifa / {total} ---\n{note.strip (  ) }\n")
+        context = "".join ( vision_notes ) .strip ( )
+        if len ( context) < 500:
+            raise RuntimeError ( "Skan PDFdan yetarli mazmun o‘qilmadi")
+        return context, total, "scan"
+    finally:
+        doc.close ( )
+
+
+def _build_book_quiz_from_path_sync ( path, title, count ) :
+    size = Path ( path ) .stat (  ) .st_size
+    # Small PDFs keep the direct PDF path; large PDFs use streaming/chunk extraction.
+    if size <= 45 * 1024 * 1024:
+        pdf_bytes = Path ( path ) .read_bytes ( )
+        return _openai_book_quiz_sync ( pdf_bytes, Path ( path ) .name, title, count ) , None
+    context, pages, mode = _extract_large_pdf_context_sync ( path, title, count)
+    quizzes = _openai_quiz_from_context_sync ( context, title, count)
+    return quizzes, {"pages": pages, "mode": mode, "size": size}
+
+
 async def quiz_replace_message ( q, ctx, text, reply_markup=None ) :
     """Quiz menyusini rasmli yoki oddiy xabardan ishonchli ochadi."""
     msg = q.message
@@ -1460,20 +1657,18 @@ async def _make_and_send_book_quiz ( q,ctx,bid,chat_id,count ) :
             log.info ( "Bot API file too big; MTProto fallback boshlandi.")
             await _download_large_telegram_file ( ctx, r["pdf_file_id"], path)
 
-        pdf_bytes=Path ( path ) .read_bytes ( )
-        # OpenAI file input uchun 50 MB request chegarasidan xavfsiz pastda ushlaymiz.
-        if len ( pdf_bytes ) >45*1024*1024:
-            return await q.edit_message_text(
-                "⚠️ Telegramdan PDF olindi, lekin AIga yuborish uchun 45 MB dan katta. "
-                "Keyingi bosqichda katta kitobni bo‘lib o‘qish tizimini qo‘shamiz.",
-                reply_markup=back_markup ( "library")
-            )
-        if not pdf_bytes.startswith ( b"%PDF" ) :
-            raise RuntimeError ( "Telegramdan olingan fayl PDF emas")
+        with open ( path, "rb") as _fh:
+            if _fh.read ( 4) != b"%PDF":
+                raise RuntimeError ( "Telegramdan olingan fayl PDF emas")
 
-        quizzes=await asyncio.to_thread(
-            _openai_book_quiz_sync,pdf_bytes,f"book_{bid}.pdf",r["title"],count
+        quizzes, pdf_meta = await asyncio.to_thread(
+            _build_book_quiz_from_path_sync, path, r["title"], count
         )
+        if pdf_meta:
+            log.info(
+                "Large PDF processed: %.1f MB, %s pages, mode=%s",
+                pdf_meta["size"] / (1024 * 1024 ) , pdf_meta["pages"], pdf_meta["mode"]
+            )
 
         await ctx.bot.send_message(
             chat_id,
@@ -1507,8 +1702,10 @@ async def _make_and_send_book_quiz ( q,ctx,bid,chat_id,count ) :
             msg="⚠️ OpenAI kaliti qabul qilinmadi. Railway’dagi OPENAI_API_KEY ni tekshiring."
         elif "429" in s:
             msg="⚠️ OpenAI limiti yoki balans sabab test tuzilmadi. API balansini tekshiring."
-        elif "45 MB" in s:
-            msg="⚠️ PDF juda katta. Hozir test uchun 45 MB gacha PDF qabul qilinadi."
+        elif "PyMuPDF" in s:
+            msg="⚠️ Katta PDF moduli uchun PyMuPDF kutubxonasi o‘rnatilmagan."
+        elif "Skan PDF" in s or "PDF matni juda kam" in s:
+            msg="⚠️ PDF o‘qildi, lekin test tuzish uchun yetarli mazmun ajratilmadi."
         elif "JSON" in s or "yaroqli test" in s:
             msg="⚠️ AI kitobni o‘qidi, lekin test formatini to‘g‘ri qaytarmadi. Qayta urinib ko‘ring."
         elif "TG_STORAGE_CHAT_ID" in s:
