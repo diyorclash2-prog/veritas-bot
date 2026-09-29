@@ -110,6 +110,9 @@ def init_db (  ) :
     CREATE TABLE IF NOT EXISTS ai_group_subscriptions(
       chat_id INTEGER PRIMARY KEY, payer_id INTEGER DEFAULT 0, paid_until INTEGER DEFAULT 0,
       source TEXT DEFAULT 'paid', updated_at INTEGER DEFAULT 0 ) ;
+    -- V8: global Super Adminlar. Super Ega tayinlaydi/oladi.
+    CREATE TABLE IF NOT EXISTS super_admins(
+      user_id INTEGER PRIMARY KEY, added_by INTEGER NOT NULL, created_at INTEGER NOT NULL ) ;
     CREATE TABLE IF NOT EXISTS giveaways(
       id INTEGER PRIMARY KEY AUTOINCREMENT,chat_id INTEGER,creator_id INTEGER,kind TEXT,
       prize TEXT,winners INTEGER,end_at INTEGER,status TEXT DEFAULT 'open',created_at INTEGER ) ;
@@ -187,22 +190,44 @@ def wallet_change ( uid,delta,kind,target=None,ref=None,meta=None ) :
                   (uid,kind,delta,target,ref,now (  ) ,json.dumps ( meta or {},ensure_ascii=False )  ) )
     return True
 
+def is_super_admin ( uid ) :
+    return bool ( one ( "SELECT 1 FROM super_admins WHERE user_id=?", ( uid, )  ) )
+
+def is_super ( uid ) :
+    return uid in SUPER_OWNERS or is_super_admin ( uid )
+
+def super_role ( uid ) :
+    if uid in SUPER_OWNERS: return "👑 Super Ega"
+    if is_super_admin ( uid ): return "🛡 Super Admin"
+    return "A’zo"
+
+def ai_actor_context ( u ) :
+    if not u: return ""
+    # Asosiy yaratuvchilar Telegram ID orqali aniq taniladi.
+    creator_names={5859289233:"Sakranum",7056675943:"Vasatiya"}
+    if u.id in creator_names:
+        return f"\n\nTIZIM KONTEKSTI: Hozir yozayotgan foydalanuvchi {creator_names[u.id]} (Telegram ID {u.id} ) . U Veritasni yaratgan Super Egalardan biri."
+    if is_super_admin ( u.id ):
+        return f"\n\nTIZIM KONTEKSTI: Hozir yozayotgan foydalanuvchi Telegram ID {u.id}; u Veritas Super Admini. Super Admin bot boshqaruvida Super Ega vakolatlariga ega, lekin Super Admin tayinlash/olish huquqi Super Egalarda qoladi."
+    return f"\n\nTIZIM KONTEKSTI: Hozir yozayotgan foydalanuvchining Telegram IDsi {u.id}."
+
 async def is_tg_admin ( bot,chat_id,uid ) :
     try:
         m=await bot.get_chat_member ( chat_id,uid)
         return m.status in (ChatMemberStatus.OWNER,ChatMemberStatus.ADMINISTRATOR)
     except TelegramError: return False
 async def can_manage ( bot,chat_id,uid ) :
-    if uid in SUPER_OWNERS: return True
+    if is_super ( uid ): return True
     if await is_tg_admin ( bot,chat_id,uid ) : return True
     return bool ( one ( "SELECT 1 FROM vadmins WHERE chat_id=? AND user_id=?", ( chat_id,uid )  ) )
 async def protected ( bot,chat_id,uid ) :
-    return uid in SUPER_OWNERS or await is_tg_admin ( bot,chat_id,uid)
+    return is_super ( uid ) or await is_tg_admin ( bot,chat_id,uid)
 def replied ( update ) : return update.effective_message.reply_to_message if update.effective_message else None
 
 def level ( xp ) : return max ( 1, int (  ( xp/20 ) **0.5 ) +1)
 def title_for ( uid,custom="" ) :
     if uid in SUPER_OWNERS: return "👑 Super Ega"
+    if is_super_admin ( uid ): return "🛡 Super Admin"
     return custom or "A’zo"
 
 def main_menu_markup ( uid ) :
@@ -214,7 +239,7 @@ def main_menu_markup ( uid ) :
       [InlineKeyboardButton ( "📚 Vasatiya kutubxonasi",callback_data="library" ) ,InlineKeyboardButton ( "📜 Sahih Hadislar",callback_data="hadith" ) ],
       [InlineKeyboardButton ( "ℹ️ Veritas haqida",callback_data="about" ) ],
     ]
-    if uid in SUPER_OWNERS:
+    if is_super ( uid ):
         kb.append ( [InlineKeyboardButton ( "👑 Super Ega",callback_data="super" ) ])
     return InlineKeyboardMarkup ( kb)
 
@@ -242,7 +267,7 @@ def ai_user_until ( uid ) :
     return int ( r["paid_until"] ) if r else 0
 
 def ai_user_active ( uid ) :
-    return uid in SUPER_OWNERS or ai_user_until ( uid ) > now ( )
+    return is_super ( uid ) or ai_user_until ( uid ) > now ( )
 
 def ai_group_until ( chat_id ) :
     r=one ( "SELECT paid_until FROM ai_group_subscriptions WHERE chat_id=?", ( chat_id, ) )
@@ -270,7 +295,7 @@ def ai_group_menu ( chat_id,uid ) :
     kb=[
       [InlineKeyboardButton ( "⭐ 250 — 7 kun",callback_data=f"aigbuy:{chat_id}:7" ) ,InlineKeyboardButton ( "⭐ 500 — 30 kun",callback_data=f"aigbuy:{chat_id}:30" ) ]
     ]
-    if uid in SUPER_OWNERS:
+    if is_super ( uid ):
         kb += [
           [InlineKeyboardButton ( "👑 Bepul 1 kun",callback_data=f"aigfree:{chat_id}:1" ) ,InlineKeyboardButton ( "👑 7 kun",callback_data=f"aigfree:{chat_id}:7" ) ,InlineKeyboardButton ( "👑 30 kun",callback_data=f"aigfree:{chat_id}:30" ) ],
           [InlineKeyboardButton ( "⛔ AI ni o‘chirish",callback_data=f"aigoff:{chat_id}" ) ]
@@ -279,7 +304,7 @@ def ai_group_menu ( chat_id,uid ) :
 
 
 def is_library_admin ( uid ) :
-    return uid in SUPER_OWNERS or bool ( one ( "SELECT 1 FROM library_admins WHERE user_id=?", ( uid, )  ) )
+    return is_super ( uid ) or bool ( one ( "SELECT 1 FROM library_admins WHERE user_id=?", ( uid, )  ) )
 
 def lib_lang_name ( code ) :
     return {"uz":"🇺🇿 O‘zbekcha","ru":"🇷🇺 Русский","en":"🇬🇧 English"}.get ( code,code)
@@ -506,7 +531,7 @@ async def library_private_input ( update,ctx ) :
         return await msg.reply_text ( f"✅ Kitob Vasatiya kutubxonasiga qo‘shildi.\n📖 {data['title']}\nID: {bid}",reply_markup=library_home_markup ( uid ) )
 
 def is_hadith_admin ( uid ) :
-    return uid in SUPER_OWNERS or bool ( one ( "SELECT 1 FROM hadith_admins WHERE user_id=?", ( uid, )  ) )
+    return is_super ( uid ) or bool ( one ( "SELECT 1 FROM hadith_admins WHERE user_id=?", ( uid, )  ) )
 
 def hadith_collection_key ( name ) :
     x= ( name or "" ) .strip (  ) .casefold ( )
@@ -552,7 +577,7 @@ async def hadith_command ( update,ctx,args ) :
 
 async def content_admin_command ( update,ctx,cmd ) :
     msg=update.effective_message; uid=update.effective_user.id
-    if uid not in SUPER_OWNERS: return await msg.reply_text ( "⛔ Bu buyruq faqat Super Ega uchun.")
+    if not is_super ( uid ): return await msg.reply_text ( "⛔ Bu buyruq faqat Super Ega uchun.")
     t=replied ( update)
     if cmd in {"ad.book","unad.book","ad.hadis","unad.hadis"}:
         if not t or not t.from_user: return await msg.reply_text ( "↩️ Foydalanuvchi xabariga reply qiling.")
@@ -667,7 +692,7 @@ async def delete_hadith_command ( update,ctx,args ) :
 
 async def broadcast_command ( update,ctx,args ) :
     msg=update.effective_message; uid=update.effective_user.id
-    if uid not in SUPER_OWNERS:
+    if not is_super ( uid ):
         return await msg.reply_text ( "⛔ *post faqat Super Ega uchun.")
     targets=[]
     for r in all_ ( "SELECT user_id FROM users WHERE blocked=0" ) :
@@ -700,7 +725,7 @@ async def broadcast_command ( update,ctx,args ) :
 async def stars_cmd ( update, ctx, args ) :
     uid = update.effective_user.id
     msg = update.effective_message
-    if uid not in SUPER_OWNERS:
+    if not is_super ( uid ):
         return await msg.reply_text ( "⛔ *stars faqat Super Ega uchun.")
     t = replied ( update)
     if not t or not t.from_user:
@@ -743,7 +768,8 @@ async def cmd_id ( update,ctx ) :
 async def cmd_help ( update,ctx ) :
     kb=InlineKeyboardMarkup ( [
         [InlineKeyboardButton ( "📚 Vasatiya",callback_data="help:library" ) ,InlineKeyboardButton ( "📜 Hadislar",callback_data="help:hadith" ) ],
-        [InlineKeyboardButton ( "🛡 Adminlar",callback_data="help:admins" ) ,InlineKeyboardButton ( "👥 Moderatsiya",callback_data="help:moderation" ) ],
+        [InlineKeyboardButton ( "🛡 Adminlar",callback_data="help:admins" ) ,InlineKeyboardButton ( "👑 Super boshqaruv",callback_data="help:superadmins" ) ],
+        [InlineKeyboardButton ( "👥 Moderatsiya",callback_data="help:moderation" ) ],
         [InlineKeyboardButton ( "🔐 Himoya",callback_data="help:security" ) ,InlineKeyboardButton ( "💬 Filter / Notes",callback_data="help:filters" ) ],
         [InlineKeyboardButton ( "⚙️ Guruh sozlamalari",callback_data="help:settings" ) ],
         [InlineKeyboardButton ( "⭐ Stars / Gift",callback_data="help:stars" ) ,InlineKeyboardButton ( "🎉 Giveaway",callback_data="help:giveaway" ) ],
@@ -761,19 +787,20 @@ def help_text ( section ) :
       "library":"📚 VASATIYA KUTUBXONASI\n\nMenyudan kitob qidirish, kategoriya, yangi kitoblar va sevimlilar ishlaydi.\n\n*ad.book — replydagi odamga kutubxona adminligi\n*unad.book — huquqni olish\n*bookadmins — kutubxona adminlari\n\nKitob admini kitob qo‘shishi, ✏️ Tahrirlash orqali nom, muallif, til, kategoriya, tavsif, muqova, PDF va audioni yangilashi mumkin.",
       "hadith":"📜 SAHIH HADISLAR\n\n*hadis — random hadis\n*hadis buxoriy 1 — aniq hadis\n*add.hadis — private chatda hadis qo‘shish\n*del.hadis buxoriy 1 — o‘chirish\n*ad.hadis / *unad.hadis — hadis admini huquqi\n*hadisadmins — hadis adminlari\n\nMavjud hadis topilsa uni ✏️ Tahrirlash mumkin.",
       "admins":"🛡 ADMINLAR\n\n*ruxsat / *ruxsatsiz — Veritas admini\n*admin / *unadmin — Telegram admini\n*approve / *unapprove / *approved — himoyalangan a’zolar\n*ad.book / *unad.book — kutubxona admini\n*ad.hadis / *unad.hadis — hadis admini",
+      "superadmins":"👑 SUPER BOSHQARUV\n\n*superadmin — replydagi foydalanuvchini Super Admin qilish\n*unsuperadmin — replydagi Super Admin huquqini olish\n*superadmins — Super Ega va Super Adminlar ro‘yxati\n\nSuper Admin bot boshqaruvida Super Ega vakolatlariga ega. Super Admin qo‘shish/olish esa faqat Super Ega uchun.",
       "moderation":"👥 MODERATSIYA\n\nReply orqali: *warn, *unwarn, *warns, *clearwarns, *mute, *unmute, *kick, *ban, *unban, *del",
       "security":"🔐 HIMOYA\n\n*links on/off\n*blacklist <so‘z> / *unblacklist <so‘z> / *blacklists\n*lock <turi> / *unlock <turi> / *locks\n*antiflood on/off\n*flood 5\n*report / *reports on/off",
       "filters":"💬 FILTER VA NOTES\n\n*filter <kalit> <javob> / *filters / *stop <kalit> / *stopall\n*save <nom> <matn> / *get <nom> / *notes / *clear <nom>",
       "settings":"⚙️ GURUH SOZLAMALARI\n\n*welcome on/off\n*goodbye on/off\n*setrules <matn>",
       "stars":"⭐ STARS / SOVG‘A\n\n*topup 100 — kabinet krediti\n*stars 100 — Telegram Stars Gift oynasi (Super Ega ) \n*give <narx> — real Gift\n*premium 3/6/12 — Premium sovg‘asi",
       "giveaway":"🎉 GIVEAWAY\n\n*giveaway gift <narx> <daq> <g‘oliblar> — konkurs ochish\n*join — konkursga qo‘shilish",
-      "broadcast":"📢 XABARNOMA\n\n*post <matn> — barcha foydalanuvchi va guruhlarga matn\n*post — xabar/postga reply qilinsa o‘sha xabarni hammaga nusxalaydi\n\nFaqat Super Ega uchun."
+      "broadcast":"📢 XABARNOMA\n\n*post <matn> — barcha foydalanuvchi va guruhlarga matn\n*post — xabar/postga reply qilinsa o‘sha xabarni hammaga nusxalaydi\n\nSuper Ega yoki Super Admin uchun."
     }
     return data.get ( section,"Bo‘lim topilmadi." )
 
 async def cmd_super ( update,ctx ) :
     ensure_user ( update.effective_user)
-    if update.effective_user.id not in SUPER_OWNERS:
+    if not is_super ( update.effective_user.id ):
         return await update.effective_message.reply_text ( "⛔ Bu bo‘lim faqat Super Ega uchun.")
     uc=one ( "SELECT COUNT ( *) n FROM users" ) ["n"]; gc=one ( "SELECT COUNT ( *) n FROM groups" ) ["n"]
     try:
@@ -825,7 +852,7 @@ async def show_me ( update,ctx ) :
         txt=f"👤 {u.full_name}\n🆔 {u.id}\n🎖 {title_for ( u.id,custom ) }\n⭐ Kredit: {wallet ( u.id ) }\n📈 Level: {level ( xp ) } | XP: {xp}\n💬 Xabarlar: {msgs}\n🏆 Reyting: #{rank}"
     else:
         ai_until=ai_user_until ( u.id )
-        ai_status=( "👑 Cheksiz (Super Ega ) " if u.id in SUPER_OWNERS else ( "✅ FAOL — "+fmt_until ( ai_until ) if ai_until>now ( ) else "❌ YO‘Q" ) )
+        ai_status=( "👑 Cheksiz (Super boshqaruv ) " if is_super ( u.id ) else ( "✅ FAOL — "+fmt_until ( ai_until ) if ai_until>now ( ) else "❌ YO‘Q" ) )
         txt=f"👤 {u.full_name}\n🆔 {u.id}\n🎖 {title_for ( u.id ) }\n⭐ Kredit: {wallet ( u.id ) }\n🤖 AI Premium: {ai_status}"
     await update.effective_message.reply_text ( txt)
 
@@ -840,7 +867,7 @@ async def title_command ( update,ctx,cmd,args ) :
     if not target or not target.from_user:
         return await msg.reply_text ( "↩️ Foydalanuvchi xabariga reply qiling.")
     tu=target.from_user
-    if tu.id in SUPER_OWNERS:
+    if tis_super ( u.id ):
         return await msg.reply_text ( "👑 Super Ega unvonini o‘zgartirib bo‘lmaydi.")
     execute ( """INSERT OR IGNORE INTO members ( chat_id,user_id,xp,messages,daily,weekly,title)
                VALUES ( ?,?,0,0,0,0,'' ) """, ( chat.id,tu.id ) )
@@ -863,7 +890,7 @@ def display_name_row ( r ) :
     return name+username
 
 async def top10_menu ( update,ctx ) :
-    if update.effective_user.id not in SUPER_OWNERS:
+    if not is_super ( update.effective_user.id ):
         return await update.effective_message.reply_text ( "⛔ TOP mukofot paneli faqat Super Ega uchun.")
     kb=InlineKeyboardMarkup ( [[
         InlineKeyboardButton ( "🎁 Giftli",callback_data=f"topgift:{update.effective_chat.id}" ) ,
@@ -1078,6 +1105,41 @@ async def premium_send ( update,ctx,args ) :
         wallet_change ( sender,cost,"premium_rollback",target)
         await update.effective_message.reply_text ( f"❌ Premium yuborilmadi, kredit qaytarildi.\n{e}")
 
+async def superadmin_command ( update,ctx,cmd ) :
+    msg=update.effective_message; actor=update.effective_user
+    if not msg or not actor: return
+    if cmd=="superadmins":
+        rows=all_ ( "SELECT user_id,added_by,created_at FROM super_admins ORDER BY created_at" )
+        lines=["👑 SUPER EGALAR"]
+        creator_names={5859289233:"Sakranum",7056675943:"Vasatiya"}
+        for sid in sorted ( SUPER_OWNERS ): lines.append ( f"• {creator_names.get ( sid,'Super Ega' ) } — {sid}" )
+        lines.append ( "\n🛡 SUPER ADMINLAR" )
+        if not rows: lines.append ( "• Hozircha yo‘q" )
+        else:
+            for r in rows:
+                try:
+                    ch=await ctx.bot.get_chat ( r["user_id"] ); name=ch.full_name or ch.title or str ( r["user_id"])
+                except Exception: name=str ( r["user_id"] )
+                lines.append ( f"• {name} — {r['user_id']}" )
+        return await msg.reply_text ( "\n".join ( lines ) )
+    # Xavfsizlik: tayinlash va olib tashlash faqat haqiqiy Super Ega tomonidan.
+    if actor.id not in SUPER_OWNERS:
+        return await msg.reply_text ( "⛔ Super Admin qo‘shish yoki olish faqat Super Ega uchun." )
+    t=replied ( update )
+    if not t or not t.from_user:
+        return await msg.reply_text ( "↩️ Foydalanuvchining xabariga reply qiling.\nMisol: *superadmin" if cmd=="superadmin" else "↩️ Super Admin xabariga reply qilib *unsuperadmin yozing." )
+    target=t.from_user
+    ensure_user ( target )
+    if target.id in SUPER_OWNERS:
+        return await msg.reply_text ( "👑 Bu foydalanuvchi Super Ega. Uning huquqi bu buyruq bilan o‘zgarmaydi." )
+    if cmd=="superadmin":
+        execute ( "INSERT INTO super_admins ( user_id,added_by,created_at) VALUES ( ?,?,? ) ON CONFLICT ( user_id ) DO UPDATE SET added_by=excluded.added_by,created_at=excluded.created_at", ( target.id,actor.id,now ( ) ) )
+        audit ( actor.id,update.effective_chat.id,"superadmin_add",str ( target.id ) )
+        return await msg.reply_text ( f"🛡 {target.full_name} Super Admin qilindi.\n🆔 {target.id}" )
+    execute ( "DELETE FROM super_admins WHERE user_id=?", ( target.id, ) )
+    audit ( actor.id,update.effective_chat.id,"superadmin_remove",str ( target.id ) )
+    return await msg.reply_text ( f"✅ {target.full_name} Super Adminlikdan olindi.\n🆔 {target.id}" )
+
 async def star_text_router ( update,ctx ) :
     msg=update.effective_message
     if not msg or not msg.text or not msg.text.startswith ( "*" ) : return
@@ -1100,6 +1162,8 @@ async def star_text_router ( update,ctx ) :
         return await stars_cmd ( update,ctx,args)
     if cmd=="post":
         return await broadcast_command ( update,ctx,args)
+    if cmd in {"superadmin","unsuperadmin","superadmins"}:
+        return await superadmin_command ( update,ctx,cmd)
     if cmd in {"ad.book","unad.book","bookadmins","ad.hadis","unad.hadis","hadisadmins"}:
         return await content_admin_command ( update,ctx,cmd)
     if cmd=="hadis":
@@ -1152,6 +1216,8 @@ def _openai_response_sync ( prompt ) :
         "model":OPENAI_MODEL,
         "instructions":(
             "Siz Veritas Botsiz. O‘zingiz haqingizda so‘rashsa javobni tabiiy ravishda ‘Men Veritas Botman’ deb boshlang. "
+            "Veritasni yaratgan Super Egalar: Sakranum (Telegram ID 5859289233) va Vasatiya (Telegram ID 7056675943 ) . Kim yaratgan, egasi yoki Super Egalari kim deb so‘ralsa shu ikki nomni ayting. "
+            "Telegram ID 5859289233 dan yozayotgan odamni Sakranum, 7056675943 dan yozayotgan odamni Vasatiya deb taning. Super Adminlar ham global boshqaruv vakolatiga ega, ammo Super Admin tayinlash/olish faqat Super Egalarga tegishli. "
             "Veritas — Telegram uchun guruh boshqaruvi va AI yordamchi bot. Shaxsiy Veritas AI Premium 100 Stars va 30 kun ishlaydi. "
             "Guruh Veritas AI obunasi 250 Stars/7 kun yoki 500 Stars/30 kun. Super Ega guruh AI sini bepul 1, 7 yoki 30 kunga yoqa oladi. "
             "Shaxsiy AI Premium va guruh AI obunasi alohida. Veritasda Vasatiya kutubxonasi bor: PDF/audio kitoblar, qidiruv, kategoriya, tillar, sevimlilar va kitob tahriri. "
@@ -1193,6 +1259,7 @@ def _openai_image_response_sync ( image_bytes, mime_type, user_text ) :
         "model":OPENAI_MODEL,
         "instructions":(
             "Siz Veritas Botsiz. O‘zingiz haqingizda so‘rashsa ‘Men Veritas Botman’ deb boshlang. "
+            "Veritasni yaratgan Super Egalar Sakranum (5859289233) va Vasatiya (7056675943 ) . Kim yaratgan deb so‘ralsa shu ikki nomni ayting. "
             "Foydalanuvchi yuborgan rasmni diqqat bilan ko‘ring. Undagi matn, jadval, diagramma, kitob sahifasi "
             "yoki boshqa ko‘rinadigan ma’lumotni tahlil qiling. Ko‘rinmagan narsani uydirmang. "
             "Foydalanuvchi qaysi tilda yozsa o‘sha tilda javob bering."
@@ -1583,7 +1650,7 @@ async def _quiz_allowed_groups ( ctx,uid ) :
     out=[]
     for r in rows:
         cid=int ( r["chat_id"] )
-        if uid in SUPER_OWNERS:
+        if is_super ( uid ):
             out.append ( (cid,r["title"] or str ( cid )) )
             continue
         try:
@@ -1637,7 +1704,7 @@ async def _make_and_send_book_quiz ( q,ctx,bid,chat_id,count ) :
         return await q.edit_message_text ( "❌ Kitob PDF’i topilmadi.",reply_markup=back_markup ( "library" ) )
     if count not in (5,10,20 ) :
         return await q.answer ( "Test soni noto‘g‘ri.",show_alert=True)
-    if u.id not in SUPER_OWNERS and not await is_tg_admin ( ctx.bot,chat_id,u.id ) :
+    if not is_super ( u.id ) and not await is_tg_admin ( ctx.bot,chat_id,u.id ) :
         return await q.answer ( "Bu guruhda admin emassiz.",show_alert=True)
     if not OPENAI_API_KEY:
         return await q.edit_message_text ( "⚠️ Veritas AI kaliti sozlanmagan.",reply_markup=back_markup ( "library" ) )
@@ -1742,7 +1809,7 @@ async def group_ai_reply ( update,ctx ) :
     try:
         await ctx.bot.send_chat_action ( chat.id,"typing")
         previous= ( replied_msg.text or replied_msg.caption or "" ) .strip ( )
-        prompt= ( f"Oldingi Veritas xabari:\n{previous[:2500]}\n\n" if previous else "") + f"Foydalanuvchi savoli:\n{question[:4000]}"
+        prompt= ( f"Oldingi Veritas xabari:\n{previous[:2500]}\n\n" if previous else "") + f"Foydalanuvchi savoli:\n{question[:4000]}" + ai_actor_context ( u )
         answer=await asyncio.to_thread ( _openai_response_sync,prompt)
         if not answer: answer="Hozir javob hosil bo‘lmadi. Qayta urinib ko‘ring."
         for i in range ( 0,len ( answer ) ,4000 ) : await msg.reply_text ( answer[i:i+4000])
@@ -1775,7 +1842,7 @@ async def private_ai_reply ( update,ctx ) :
         previous=""
         if msg.reply_to_message and msg.reply_to_message.from_user and msg.reply_to_message.from_user.id==ctx.bot.id:
             previous= ( msg.reply_to_message.text or msg.reply_to_message.caption or "" ) [:2500]
-        prompt= ( f"Oldingi Veritas javobi:\n{previous}\n\n" if previous else "" ) +f"Foydalanuvchi:\n{text[:4000]}"
+        prompt= ( f"Oldingi Veritas javobi:\n{previous}\n\n" if previous else "" ) +f"Foydalanuvchi:\n{text[:4000]}"+ai_actor_context ( u )
         answer=await asyncio.to_thread ( _openai_response_sync,prompt )
         if not answer: answer="Hozir javob hosil bo‘lmadi. Qayta urinib ko‘ring."
         for i in range ( 0,len ( answer ),4000 ): await msg.reply_text ( answer[i:i+4000] )
@@ -1849,7 +1916,8 @@ async def callback ( update,ctx ) :
     if d=="help:home":
         kb=InlineKeyboardMarkup ( [
             [InlineKeyboardButton ( "📚 Vasatiya",callback_data="help:library" ) ,InlineKeyboardButton ( "📜 Hadislar",callback_data="help:hadith" ) ],
-            [InlineKeyboardButton ( "🛡 Adminlar",callback_data="help:admins" ) ,InlineKeyboardButton ( "👥 Moderatsiya",callback_data="help:moderation" ) ],
+            [InlineKeyboardButton ( "🛡 Adminlar",callback_data="help:admins" ) ,InlineKeyboardButton ( "👑 Super boshqaruv",callback_data="help:superadmins" ) ],
+        [InlineKeyboardButton ( "👥 Moderatsiya",callback_data="help:moderation" ) ],
             [InlineKeyboardButton ( "🔐 Himoya",callback_data="help:security" ) ,InlineKeyboardButton ( "💬 Filter / Notes",callback_data="help:filters" ) ],
             [InlineKeyboardButton ( "⚙️ Guruh sozlamalari",callback_data="help:settings" ) ],
             [InlineKeyboardButton ( "⭐ Stars / Gift",callback_data="help:stars" ) ,InlineKeyboardButton ( "🎉 Giveaway",callback_data="help:giveaway" ) ],
@@ -1871,7 +1939,7 @@ async def callback ( update,ctx ) :
             return await ctx.bot.send_message ( q.message.chat.id,"🪶 VERITAS v8\n\nShaxsiy kabinet",reply_markup=main_menu_markup ( u.id ) )
 
     if d.startswith ( "topgift:") or d.startswith ( "topplain:" ) :
-        if u.id not in SUPER_OWNERS: return
+        if not is_super ( u.id ): return
         chat_id=int ( d.split ( ":",1 ) [1] ) ; with_gifts=d.startswith ( "topgift:")
         await q.edit_message_text ( "⏳ TOP-10 hisoblanmoqda..." if not with_gifts else "⏳ TOP-10 va TOP-3 Giftlar tayyorlanmoqda...")
         return await top10_result ( ctx.bot,chat_id,with_gifts,u.id)
@@ -1880,19 +1948,19 @@ async def callback ( update,ctx ) :
         xp,msgs=user_total_stats ( u.id)
         r=one ( "SELECT wallet FROM users WHERE user_id=?", ( u.id, ) )
         ai_until=ai_user_until ( u.id )
-        ai_status=( "👑 Cheksiz (Super Ega ) " if u.id in SUPER_OWNERS else ( "✅ FAOL — "+fmt_until ( ai_until ) if ai_until>now ( ) else "❌ YO‘Q" ) )
+        ai_status=( "👑 Cheksiz (Super boshqaruv ) " if is_super ( u.id ) else ( "✅ FAOL — "+fmt_until ( ai_until ) if ai_until>now ( ) else "❌ YO‘Q" ) )
         return await q.edit_message_text ( f"👤 {u.full_name}\n🆔 {u.id}\n🎖 {title_for ( u.id ) }\n⭐ Kredit: {r['wallet'] if r else 0}\n✨ XP: {xp}\n💬 Xabarlar: {msgs}\n\n🤖 AI Premium: {ai_status}",reply_markup=back_markup (  ) )
 
     if d=="ai_private":
         until=ai_user_until ( u.id )
-        if u.id in SUPER_OWNERS: status="👑 FAOL — Super Ega"
+        if is_super ( u.id ): status="👑 FAOL — "+super_role ( u.id )
         elif until>now ( ): status="✅ FAOL\n📅 "+fmt_until ( until )
         else: status="❌ FAOL EMAS"
         kb=InlineKeyboardMarkup ( [[InlineKeyboardButton ( "💎 100 ⭐ — 30 kun",callback_data="aipbuy" ) ],[InlineKeyboardButton ( "⬅️ Orqaga",callback_data="home" ) ]] )
         return await q.edit_message_text ( f"🤖 VERITAS AI — SHAXSIY YORDAMCHI\n\n{status}\n\nPremium narxi: 100 ⭐ / 30 kun.\nFaol bo‘lsa botga oddiy xabar yozishingiz kifoya.",reply_markup=kb )
 
     if d=="aipbuy":
-        if u.id in SUPER_OWNERS: return await q.answer ( "Super Ega uchun AI allaqachon faol.",show_alert=True )
+        if is_super ( u.id ): return await q.answer ( "Super boshqaruv uchun AI allaqachon faol.",show_alert=True )
         if wallet ( u.id ) <AI_PRIVATE_PRICE: return await q.answer ( "Kredit yetarli emas. Hisobni Stars bilan to‘ldiring.",show_alert=True )
         if not wallet_change ( u.id,-AI_PRIVATE_PRICE,"ai_private_30d",u.id ): return
         until=extend_ai_user ( u.id,AI_PRIVATE_DAYS )
@@ -1907,14 +1975,14 @@ async def callback ( update,ctx ) :
         return await q.edit_message_text ( f"✅ Veritas AI guruh uchun yoqildi.\n⭐ {price}\n📅 {fmt_until ( until )} gacha",reply_markup=ai_group_menu ( chat_id,u.id ) )
 
     if d.startswith ( "aigfree:" ) :
-        if u.id not in SUPER_OWNERS: return await q.answer ( "Faqat Super Ega.",show_alert=True )
+        if not is_super ( u.id ): return await q.answer ( "Faqat Super Ega.",show_alert=True )
         _,schat,sdays=d.split ( ":" ); chat_id=int ( schat ); days=int ( sdays )
         if days not in ( 1,7,30 ): return
         until=extend_ai_group ( chat_id,days,u.id,"super_free" )
         return await q.edit_message_text ( f"👑 Guruhga Veritas AI bepul yoqildi.\n📅 {days} kun — {fmt_until ( until )} gacha",reply_markup=ai_group_menu ( chat_id,u.id ) )
 
     if d.startswith ( "aigoff:" ) :
-        if u.id not in SUPER_OWNERS: return await q.answer ( "Faqat Super Ega.",show_alert=True )
+        if not is_super ( u.id ): return await q.answer ( "Faqat Super Ega.",show_alert=True )
         chat_id=int ( d.split ( ":" )[1] ); execute ( "UPDATE ai_group_subscriptions SET paid_until=0,updated_at=? WHERE chat_id=?", ( now ( ),chat_id ) )
         return await q.edit_message_text ( "⛔ Bu guruh uchun Veritas AI o‘chirildi.",reply_markup=ai_group_menu ( chat_id,u.id ) )
 
@@ -2137,7 +2205,7 @@ async def callback ( update,ctx ) :
 
     if d.startswith ( "libqgrp:" ) :
         _,sbid,schat=d.split ( ":" ); bid=int ( sbid ); chat_id=int ( schat )
-        if u.id not in SUPER_OWNERS and not await is_tg_admin ( ctx.bot,chat_id,u.id ):
+        if not is_super ( u.id ) and not await is_tg_admin ( ctx.bot,chat_id,u.id ):
             return await q.answer ( "Bu guruhda admin emassiz.",show_alert=True )
         gr=one ( "SELECT title FROM groups WHERE chat_id=?", ( chat_id,) ); book=one ( "SELECT title FROM library_books WHERE id=?", ( bid,) )
         if not gr or not book: return await q.answer ( "Kitob yoki guruh topilmadi.",show_alert=True )
@@ -2223,12 +2291,12 @@ async def callback ( update,ctx ) :
         return await q.edit_message_text ( "✅ Kitob kutubxonadan olib tashlandi.",reply_markup=library_home_markup ( u.id ) )
 
     if d=="super":
-        if u.id not in SUPER_OWNERS: return await q.edit_message_text ( "⛔ Ruxsat yo‘q.")
+        if not is_super ( u.id ): return await q.edit_message_text ( "⛔ Ruxsat yo‘q.")
         uc=one ( "SELECT COUNT ( *) n FROM users" ) ["n"]; gc=one ( "SELECT COUNT ( *) n FROM groups" ) ["n"]
-        return await q.edit_message_text ( f"👑 SUPER EGA\nFoydalanuvchilar: {uc}\nGuruhlar: {gc}",reply_markup=super_menu_markup (  ) )
+        return await q.edit_message_text ( f"👑 SUPER BOSHQARUV\n🎖 {super_role ( u.id )}\nFoydalanuvchilar: {uc}\nGuruhlar: {gc}",reply_markup=super_menu_markup (  ) )
 
     if d.startswith ( "alladmins:" ) :
-        if u.id not in SUPER_OWNERS: return
+        if not is_super ( u.id ): return
         page=max ( 0,int ( d.split ( ":" ) [1] )  ) ; per=8
         entries=[]
         for sid in sorted ( SUPER_OWNERS ) :
@@ -2236,6 +2304,9 @@ async def callback ( update,ctx ) :
             nm= ( ur["first_name"] if ur and ur["first_name"] else str ( sid ) )
             if ur and ur["username"]: nm += " @"+ur["username"]
             entries.append (  ( "👑 Super Ega",sid,nm,"" ) )
+        for r in all_ ( "SELECT a.user_id,u.first_name,u.username FROM super_admins a LEFT JOIN users u ON u.user_id=a.user_id ORDER BY a.created_at DESC" ) :
+            nm=( r["first_name"] or str ( r["user_id"] ) ) + ( ( " @"+r["username"] ) if r["username"] else "" )
+            entries.append ( ( "🛡 Super Admin",int ( r["user_id"] ),nm,"" ) )
         for r in all_ ( "SELECT a.user_id,u.first_name,u.username FROM library_admins a LEFT JOIN users u ON u.user_id=a.user_id ORDER BY a.created_at DESC" ) :
             nm= ( r["first_name"] or str ( r["user_id"] ) ) + ( ( " @"+r["username"]) if r["username"] else "")
             entries.append (  ( "📚 Kitob admini",int ( r["user_id"] ) ,nm,"" ) )
@@ -2262,7 +2333,7 @@ async def callback ( update,ctx ) :
         return await q.edit_message_text ( "\n\n".join ( lines ) ,reply_markup=InlineKeyboardMarkup ( kb ) )
 
     if d.startswith ( "botgroups:" ) :
-        if u.id not in SUPER_OWNERS: return
+        if not is_super ( u.id ): return
         page=max ( 0,int ( d.split ( ":" ) [1] )  ) ; per=8; off=page*per
         rows=all_ ( "SELECT chat_id,title,owner_id,created_at,demo_until,paid_until,free FROM groups ORDER BY created_at DESC,chat_id DESC LIMIT ? OFFSET ?", ( per,off ) )
         total=one ( "SELECT COUNT ( *) n FROM groups" ) ["n"]
@@ -2280,7 +2351,7 @@ async def callback ( update,ctx ) :
         return await q.edit_message_text ( "\n\n".join ( lines ) ,reply_markup=InlineKeyboardMarkup ( kb ) )
 
     if d.startswith ( "cabs:" ) :
-        if u.id not in SUPER_OWNERS: return
+        if not is_super ( u.id ): return
         page=max ( 0,int ( d.split ( ":" ) [1] )  ) ; per=8; off=page*per
         rows=all_ ( "SELECT user_id,username,first_name,wallet FROM users ORDER BY created_at DESC,user_id DESC LIMIT ? OFFSET ?", ( per,off ) )
         total=one ( "SELECT COUNT ( *) n FROM users" ) ["n"]
@@ -2296,7 +2367,7 @@ async def callback ( update,ctx ) :
         return await q.edit_message_text ( f"👥 SHAXSIY KABINETLAR\nJami: {total} | Sahifa: {page+1}",reply_markup=InlineKeyboardMarkup ( kb ) )
 
     if d.startswith ( "cab:" ) :
-        if u.id not in SUPER_OWNERS: return
+        if not is_super ( u.id ): return
         _,sid,spage=d.split ( ":" ) ; uid=int ( sid ) ; page=int ( spage)
         r=one ( "SELECT * FROM users WHERE user_id=?", ( uid, ) )
         if not r: return await q.edit_message_text ( "Foydalanuvchi topilmadi.",reply_markup=back_markup ( "super" ) )
