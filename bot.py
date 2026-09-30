@@ -1911,7 +1911,10 @@ async def left_member ( update,ctx ) :
 
 async def callback ( update,ctx ) :
     q=update.callback_query; d=q.data; u=q.from_user; ensure_user ( u)
-    await q.answer ( )
+    # aipbuy o‘z natijasini alohida q.answer ( ) bilan ko‘rsatadi.
+    # CallbackQuery bir marta javoblanishi kerak; aks holda Telegram ikkinchi alertni rad etishi mumkin.
+    if d != "aipbuy":
+        await q.answer ( )
 
     if d=="help:home":
         kb=InlineKeyboardMarkup ( [
@@ -1960,11 +1963,34 @@ async def callback ( update,ctx ) :
         return await q.edit_message_text ( f"🤖 VERITAS AI — SHAXSIY YORDAMCHI\n\n{status}\n\nPremium narxi: 100 ⭐ / 30 kun.\nFaol bo‘lsa botga oddiy xabar yozishingiz kifoya.",reply_markup=kb )
 
     if d=="aipbuy":
-        if is_super ( u.id ): return await q.answer ( "Super boshqaruv uchun AI allaqachon faol.",show_alert=True )
-        if wallet ( u.id ) <AI_PRIVATE_PRICE: return await q.answer ( "Kredit yetarli emas. Hisobni Stars bilan to‘ldiring.",show_alert=True )
-        if not wallet_change ( u.id,-AI_PRIVATE_PRICE,"ai_private_30d",u.id ): return
-        until=extend_ai_user ( u.id,AI_PRIVATE_DAYS )
-        return await q.edit_message_text ( f"✅ Shaxsiy Veritas AI Premium yoqildi.\n💎 {AI_PRIVATE_PRICE} ⭐\n📅 {fmt_until ( until )} gacha",reply_markup=back_markup ( "home" ) )
+        # Shaxsiy AI Premium Veritas kabinetidagi kreditdan sotib olinadi.
+        # Super boshqaruv uchun AI bepul/cheksiz, shuning uchun ulardan kredit yechilmaydi.
+        if is_super ( u.id ):             return await q.answer ( "👑 Sizda Veritas AI allaqachon cheksiz faol.",show_alert=True )
+
+        balance=wallet ( u.id )
+        if balance < AI_PRIVATE_PRICE:
+            return await q.answer ( f"❌ Kredit yetarli emas. Balans: {balance} ⭐, kerak: {AI_PRIVATE_PRICE} ⭐.",show_alert=True )
+
+        if not wallet_change ( u.id,-AI_PRIVATE_PRICE,"ai_private_30d",u.id,meta={"days":AI_PRIVATE_DAYS} ) :
+            return await q.answer ( "❌ To‘lov bajarilmadi. Balansni tekshirib qayta urinib ko‘ring.",show_alert=True )
+
+        try:
+            until=extend_ai_user ( u.id,AI_PRIVATE_DAYS )
+        except Exception:
+            # Obuna yozilmasa kreditni avtomatik qaytaramiz.
+            wallet_change ( u.id,AI_PRIVATE_PRICE,"ai_private_rollback",u.id,meta={"reason":"subscription_error"} )
+            log.exception ( "AI Premium subscription activation failed for user %s",u.id )
+            return await q.answer ( "❌ AI Premiumni yoqishda xato bo‘ldi. 100 ⭐ kredit qaytarildi.",show_alert=True )
+
+        new_balance=wallet ( u.id )
+        await q.answer ( "✅ Veritas AI Premium 30 kunga faollashtirildi!",show_alert=True )
+        return await q.edit_message_text (
+            f"✅ SHAXSIY VERITAS AI PREMIUM FAOL\n\n"
+            f"💎 To‘lov: {AI_PRIVATE_PRICE} ⭐\n"
+            f"⭐ Qolgan kredit: {new_balance} ⭐\n"
+            f"📅 Amal qiladi: {fmt_until ( until )} gacha\n\n"
+            "Endi botga oddiy xabar yoki rasm yuborishingiz mumkin.",
+            reply_markup=back_markup ( "home" ) )
 
     if d.startswith ( "aigbuy:" ) :
         _,schat,sdays=d.split ( ":" ); chat_id=int ( schat ); days=int ( sdays ); price=AI_GROUP_PLANS.get ( days )
