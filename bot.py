@@ -1450,9 +1450,9 @@ async def _start_group_rebus_flow ( update,ctx ) :
         return False
     if not msg.reply_to_message or not msg.reply_to_message.from_user or msg.reply_to_message.from_user.id!=ctx.bot.id:
         return False
+    # Rebus faqat Veritas xabariga reply qilib aynan *rebus yozilganda boshlanadi.
     text= ( msg.text or "" ) .strip (  ) .lower ( )
-    normalized=re.sub ( r"[^a-z0-9ʻ’' ]+"," ",text)
-    if not ("rebus" in normalized and ("tayyorla" in normalized or "tayyorlab" in normalized or normalized.strip (  ) =="rebus" )  ) :
+    if text!="*rebus":
         return False
     if not is_super ( u.id ) :
         await msg.reply_text ( "⛔ AI Rebus yaratish hozircha Super Ega yoki Super Admin uchun.")
