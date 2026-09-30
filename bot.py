@@ -792,7 +792,7 @@ def help_text ( section ) :
       "security":"🔐 HIMOYA\n\n*links on/off\n*blacklist <so‘z> / *unblacklist <so‘z> / *blacklists\n*lock <turi> / *unlock <turi> / *locks\n*antiflood on/off\n*flood 5\n*report / *reports on/off",
       "filters":"💬 FILTER VA NOTES\n\n*filter <kalit> <javob> / *filters / *stop <kalit> / *stopall\n*save <nom> <matn> / *get <nom> / *notes / *clear <nom>",
       "settings":"⚙️ GURUH SOZLAMALARI\n\n*welcome on/off\n*goodbye on/off\n*setrules <matn>",
-      "stars":"⭐ STARS / SOVG‘A\n\n*topup 100 — kabinet krediti\n*stars 100 — Telegram Stars Gift oynasi (Super Ega ) \n*give <narx> — real Gift\n*premium 3/6/12 — Premium sovg‘asi",
+      "stars":"⭐ STARS / SOVG‘A\n\n*topup 100 — kabinet krediti\n*ai.p — replydagi a’zoga 30 kunlik Veritas AI Premium sovg‘a qilish (100 ⭐ kredit ) \n*stars 100 — Telegram Stars Gift oynasi (Super Ega ) \n*give <narx> — real Gift\n*premium 3/6/12 — Telegram Premium sovg‘asi",
       "giveaway":"🎉 GIVEAWAY\n\n*giveaway gift <narx> <daq> <g‘oliblar> — konkurs ochish\n*join — konkursga qo‘shilish",
       "broadcast":"📢 XABARNOMA\n\n*post <matn> — barcha foydalanuvchi va guruhlarga matn\n*post — xabar/postga reply qilinsa o‘sha xabarni hammaga nusxalaydi\n\nSuper Ega yoki Super Admin uchun."
     }
@@ -1105,6 +1105,42 @@ async def premium_send ( update,ctx,args ) :
         wallet_change ( sender,cost,"premium_rollback",target)
         await update.effective_message.reply_text ( f"❌ Premium yuborilmadi, kredit qaytarildi.\n{e}")
 
+async def ai_premium_gift ( update,ctx ) :
+    """Reply qilingan foydalanuvchiga 100 Veritas Stars krediti evaziga 30 kun AI Premium sovg‘a qiladi."""
+    msg=update.effective_message; sender=update.effective_user
+    if not msg or not sender: return
+    t=replied ( update )
+    if not t or not t.from_user or t.from_user.is_bot:
+        return await msg.reply_text ( "↩️ AI Premium oladigan a’zoning xabariga reply qilib *ai.p yozing.\n\n💎 Narxi: 100 ⭐ kredit / 30 kun" )
+    target=t.from_user
+    ensure_user ( sender ); ensure_user ( target )
+    if wallet ( sender.id ) < AI_PRIVATE_PRICE:
+        return await msg.reply_text ( f"❌ Kredit yetarli emas.\n💎 Kerak: {AI_PRIVATE_PRICE} ⭐\n⭐ Sizda: {wallet ( sender.id )}" )
+    if not wallet_change ( sender.id,-AI_PRIVATE_PRICE,"ai_premium_gift_pending",target.id,meta={"days":AI_PRIVATE_DAYS} ) :
+        return await msg.reply_text ( "❌ Kredit yechilmadi. Hisobingizni tekshiring." )
+    try:
+        until=extend_ai_user ( target.id,AI_PRIVATE_DAYS )
+        execute ( "UPDATE tx SET kind='ai_premium_gift' WHERE id= ( SELECT MAX ( id) FROM tx WHERE user_id=? ) ", ( sender.id, ) )
+        audit ( sender.id,update.effective_chat.id,"ai_premium_gift",f"target={target.id},days={AI_PRIVATE_DAYS}" )
+        await msg.reply_text (
+            f"🎁 {target.full_name}ga Veritas AI Premium sovg‘a qilindi!\n\n"
+            f"💎 {AI_PRIVATE_PRICE} ⭐ kredit\n"
+            f"📅 {AI_PRIVATE_DAYS} kun\n"
+            f"⏳ {fmt_until ( until )} gacha\n"
+            f"⭐ Sizning qolgan kreditingiz: {wallet ( sender.id )}"
+        )
+        try:
+            if target.id != sender.id:
+                await ctx.bot.send_message ( target.id,
+                    f"🎁 Sizga {sender.full_name} tomonidan Veritas AI Premium sovg‘a qilindi!\n\n"
+                    f"💎 30 kunlik AI Premium\n📅 {fmt_until ( until )} gacha" )
+        except TelegramError:
+            pass
+    except Exception:
+        log.exception ( "AI Premium gift error" )
+        wallet_change ( sender.id,AI_PRIVATE_PRICE,"ai_premium_gift_rollback",target.id )
+        await msg.reply_text ( "❌ AI Premium sovg‘asi faollashmadi. 100 ⭐ kredit hisobingizga qaytarildi." )
+
 async def superadmin_command ( update,ctx,cmd ) :
     msg=update.effective_message; actor=update.effective_user
     if not msg or not actor: return
@@ -1162,6 +1198,8 @@ async def star_text_router ( update,ctx ) :
         return await stars_cmd ( update,ctx,args)
     if cmd=="post":
         return await broadcast_command ( update,ctx,args)
+    if cmd=="ai.p":
+        return await ai_premium_gift ( update,ctx )
     if cmd in {"superadmin","unsuperadmin","superadmins"}:
         return await superadmin_command ( update,ctx,cmd)
     if cmd in {"ad.book","unad.book","bookadmins","ad.hadis","unad.hadis","hadisadmins"}:
@@ -1226,6 +1264,10 @@ def _openai_response_sync ( prompt ) :
             "Kabinetda Stars krediti bor. Telegram Gift va Telegram Premium sovg‘a qilish funksiyalari Veritas AI Premiumdan boshqa xizmat. *help yordam markazini ochadi, *ai guruh AI holati/tariflarini ko‘rsatadi. "
             "Mavjud bo‘lmagan Veritas funksiyasini uydirmang. Aniq bilmagan sozlama bo‘lsa *help yoki menyuni tekshirishni ayting. "
             "Foydalanuvchi qaysi tilda yozsa, asosan o‘sha tilda javob bering. Javob Telegram uchun aniq va ortiqcha uzun bo‘lmasin. "
+            "Veritasning xarakteri vaziyatga mos bo‘lsin: foydalanuvchi hurmat bilan yozsa hurmat bilan, hazillashsa hazil bilan javob bering. "
+            "Agar foydalanuvchi aynan Veritasning o‘zini masxara qilsa, ustidan kulsa yoki qo‘pol gapirsa, Veritas ham o‘tkir, topqir, kinoyali va kulgili javob qaytarsin; kerak bo‘lsa so‘z bilan kuchli roast qilsin. "
+            "Biroq real tahdid qilmang, zo‘ravonlikka undamang, himoyalangan belgilarga asoslangan nafrat/kamsitish ishlatmang, jinsiy tahqirlashga o‘tmang va boshqa odamni nishonga olib bezorilikka qo‘shilmang. "
+            "Faqat Veritasga qaratilgan gapga mos javob bering; foydalanuvchi odobga qaytsa, Veritas ham odatiy hurmatli ohangga qaytsin. "
             "Diniy, tibbiy, huquqiy yoki moliyaviy mavzularda noaniqlik bo‘lsa buni ochiq ayting."
         ),
         "input":prompt,
@@ -1911,10 +1953,7 @@ async def left_member ( update,ctx ) :
 
 async def callback ( update,ctx ) :
     q=update.callback_query; d=q.data; u=q.from_user; ensure_user ( u)
-    # aipbuy o‘z natijasini alohida q.answer ( ) bilan ko‘rsatadi.
-    # CallbackQuery bir marta javoblanishi kerak; aks holda Telegram ikkinchi alertni rad etishi mumkin.
-    if d != "aipbuy":
-        await q.answer ( )
+    await q.answer ( )
 
     if d=="help:home":
         kb=InlineKeyboardMarkup ( [
@@ -1963,34 +2002,18 @@ async def callback ( update,ctx ) :
         return await q.edit_message_text ( f"🤖 VERITAS AI — SHAXSIY YORDAMCHI\n\n{status}\n\nPremium narxi: 100 ⭐ / 30 kun.\nFaol bo‘lsa botga oddiy xabar yozishingiz kifoya.",reply_markup=kb )
 
     if d=="aipbuy":
-        # Shaxsiy AI Premium Veritas kabinetidagi kreditdan sotib olinadi.
-        # Super boshqaruv uchun AI bepul/cheksiz, shuning uchun ulardan kredit yechilmaydi.
-        if is_super ( u.id ):             return await q.answer ( "👑 Sizda Veritas AI allaqachon cheksiz faol.",show_alert=True )
-
-        balance=wallet ( u.id )
-        if balance < AI_PRIVATE_PRICE:
-            return await q.answer ( f"❌ Kredit yetarli emas. Balans: {balance} ⭐, kerak: {AI_PRIVATE_PRICE} ⭐.",show_alert=True )
-
-        if not wallet_change ( u.id,-AI_PRIVATE_PRICE,"ai_private_30d",u.id,meta={"days":AI_PRIVATE_DAYS} ) :
-            return await q.answer ( "❌ To‘lov bajarilmadi. Balansni tekshirib qayta urinib ko‘ring.",show_alert=True )
-
+        if is_super ( u.id ): return await q.answer ( "Super boshqaruv uchun AI allaqachon faol.",show_alert=True )
+        if wallet ( u.id ) <AI_PRIVATE_PRICE: return await q.answer ( "Kredit yetarli emas. Hisobni Stars bilan to‘ldiring.",show_alert=True )
+        if not wallet_change ( u.id,-AI_PRIVATE_PRICE,"ai_private_30d_pending",u.id ):
+            return await q.answer ( "Kredit yechilmadi. Qayta urinib ko‘ring.",show_alert=True )
         try:
             until=extend_ai_user ( u.id,AI_PRIVATE_DAYS )
+            execute ( "UPDATE tx SET kind='ai_private_30d' WHERE id= ( SELECT MAX ( id) FROM tx WHERE user_id=? ) ", ( u.id, ) )
         except Exception:
-            # Obuna yozilmasa kreditni avtomatik qaytaramiz.
-            wallet_change ( u.id,AI_PRIVATE_PRICE,"ai_private_rollback",u.id,meta={"reason":"subscription_error"} )
-            log.exception ( "AI Premium subscription activation failed for user %s",u.id )
-            return await q.answer ( "❌ AI Premiumni yoqishda xato bo‘ldi. 100 ⭐ kredit qaytarildi.",show_alert=True )
-
-        new_balance=wallet ( u.id )
-        await q.answer ( "✅ Veritas AI Premium 30 kunga faollashtirildi!",show_alert=True )
-        return await q.edit_message_text (
-            f"✅ SHAXSIY VERITAS AI PREMIUM FAOL\n\n"
-            f"💎 To‘lov: {AI_PRIVATE_PRICE} ⭐\n"
-            f"⭐ Qolgan kredit: {new_balance} ⭐\n"
-            f"📅 Amal qiladi: {fmt_until ( until )} gacha\n\n"
-            "Endi botga oddiy xabar yoki rasm yuborishingiz mumkin.",
-            reply_markup=back_markup ( "home" ) )
+            log.exception ( "AI Premium purchase error" )
+            wallet_change ( u.id,AI_PRIVATE_PRICE,"ai_private_rollback",u.id )
+            return await q.edit_message_text ( "❌ AI Premium faollashmadi. 100 ⭐ kredit qaytarildi.",reply_markup=back_markup ( "home" ) )
+        return await q.edit_message_text ( f"✅ Shaxsiy Veritas AI Premium yoqildi.\n💎 {AI_PRIVATE_PRICE} ⭐\n📅 {fmt_until ( until )} gacha\n⭐ Qolgan kredit: {wallet ( u.id )}",reply_markup=back_markup ( "home" ) )
 
     if d.startswith ( "aigbuy:" ) :
         _,schat,sdays=d.split ( ":" ); chat_id=int ( schat ); days=int ( sdays ); price=AI_GROUP_PLANS.get ( days )
