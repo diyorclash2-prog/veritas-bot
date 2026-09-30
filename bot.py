@@ -110,6 +110,11 @@ def init_db (  ) :
     CREATE TABLE IF NOT EXISTS ai_group_subscriptions(
       chat_id INTEGER PRIMARY KEY, payer_id INTEGER DEFAULT 0, paid_until INTEGER DEFAULT 0,
       source TEXT DEFAULT 'paid', updated_at INTEGER DEFAULT 0 ) ;
+    CREATE TABLE IF NOT EXISTS ai_book_translations(
+      id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER NOT NULL, book_id INTEGER NOT NULL,
+      target_lang TEXT NOT NULL, status TEXT DEFAULT 'running', started_at INTEGER NOT NULL,
+      completed_at INTEGER DEFAULT 0 ) ;
+    CREATE INDEX IF NOT EXISTS idx_ai_book_translation_user_done ON ai_book_translations ( user_id,completed_at ) ;
     -- V8: global Super Adminlar. Super Ega tayinlaydi/oladi.
     CREATE TABLE IF NOT EXISTS super_admins(
       user_id INTEGER PRIMARY KEY, added_by INTEGER NOT NULL, created_at INTEGER NOT NULL ) ;
@@ -349,6 +354,7 @@ def library_book_markup ( uid,book_id,back="library" ) :
     if row: kb.append ( row)
     if r and r["pdf_file_id"]:
         kb.append ( [InlineKeyboardButton ( "🧠 Test tuzish",callback_data=f"libquiz:{book_id}" ) ])
+        kb.append ( [InlineKeyboardButton ( "🌐 AI Tarjima",callback_data=f"libtranslate:{book_id}" ) ])
     kb.append ( [InlineKeyboardButton ( "💔 Sevimlidan olish" if fav else "❤️ Sevimliga",callback_data=f"libfavtoggle:{book_id}" ) ])
     if is_library_admin ( uid ) :
         kb.append ( [InlineKeyboardButton ( "✏️ Tahrirlash",callback_data=f"libedit:{book_id}" ) ,InlineKeyboardButton ( "🗑 O‘chirish",callback_data=f"libdelask:{book_id}" ) ])
@@ -792,7 +798,7 @@ def help_text ( section ) :
       "security":"🔐 HIMOYA\n\n*links on/off\n*blacklist <so‘z> / *unblacklist <so‘z> / *blacklists\n*lock <turi> / *unlock <turi> / *locks\n*antiflood on/off\n*flood 5\n*report / *reports on/off",
       "filters":"💬 FILTER VA NOTES\n\n*filter <kalit> <javob> / *filters / *stop <kalit> / *stopall\n*save <nom> <matn> / *get <nom> / *notes / *clear <nom>",
       "settings":"⚙️ GURUH SOZLAMALARI\n\n*welcome on/off\n*goodbye on/off\n*setrules <matn>",
-      "stars":"⭐ STARS / SOVG‘A\n\n*topup 100 — kabinet krediti\n*ai.p — replydagi a’zoga 30 kunlik Veritas AI Premium sovg‘a qilish (100 ⭐ kredit ) \n*stars 100 — Telegram Stars Gift oynasi (Super Ega ) \n*give <narx> — real Gift\n*premium 3/6/12 — Telegram Premium sovg‘asi",
+      "stars":"⭐ STARS / SOVG‘A\n\n*topup 100 — kabinet krediti\n*stars 100 — Telegram Stars Gift oynasi (Super Ega ) \n*give <narx> — real Gift\n*premium 3/6/12 — Premium sovg‘asi",
       "giveaway":"🎉 GIVEAWAY\n\n*giveaway gift <narx> <daq> <g‘oliblar> — konkurs ochish\n*join — konkursga qo‘shilish",
       "broadcast":"📢 XABARNOMA\n\n*post <matn> — barcha foydalanuvchi va guruhlarga matn\n*post — xabar/postga reply qilinsa o‘sha xabarni hammaga nusxalaydi\n\nSuper Ega yoki Super Admin uchun."
     }
@@ -1105,42 +1111,6 @@ async def premium_send ( update,ctx,args ) :
         wallet_change ( sender,cost,"premium_rollback",target)
         await update.effective_message.reply_text ( f"❌ Premium yuborilmadi, kredit qaytarildi.\n{e}")
 
-async def ai_premium_gift ( update,ctx ) :
-    """Reply qilingan foydalanuvchiga 100 Veritas Stars krediti evaziga 30 kun AI Premium sovg‘a qiladi."""
-    msg=update.effective_message; sender=update.effective_user
-    if not msg or not sender: return
-    t=replied ( update )
-    if not t or not t.from_user or t.from_user.is_bot:
-        return await msg.reply_text ( "↩️ AI Premium oladigan a’zoning xabariga reply qilib *ai.p yozing.\n\n💎 Narxi: 100 ⭐ kredit / 30 kun" )
-    target=t.from_user
-    ensure_user ( sender ); ensure_user ( target )
-    if wallet ( sender.id ) < AI_PRIVATE_PRICE:
-        return await msg.reply_text ( f"❌ Kredit yetarli emas.\n💎 Kerak: {AI_PRIVATE_PRICE} ⭐\n⭐ Sizda: {wallet ( sender.id )}" )
-    if not wallet_change ( sender.id,-AI_PRIVATE_PRICE,"ai_premium_gift_pending",target.id,meta={"days":AI_PRIVATE_DAYS} ) :
-        return await msg.reply_text ( "❌ Kredit yechilmadi. Hisobingizni tekshiring." )
-    try:
-        until=extend_ai_user ( target.id,AI_PRIVATE_DAYS )
-        execute ( "UPDATE tx SET kind='ai_premium_gift' WHERE id= ( SELECT MAX ( id) FROM tx WHERE user_id=? ) ", ( sender.id, ) )
-        audit ( sender.id,update.effective_chat.id,"ai_premium_gift",f"target={target.id},days={AI_PRIVATE_DAYS}" )
-        await msg.reply_text (
-            f"🎁 {target.full_name}ga Veritas AI Premium sovg‘a qilindi!\n\n"
-            f"💎 {AI_PRIVATE_PRICE} ⭐ kredit\n"
-            f"📅 {AI_PRIVATE_DAYS} kun\n"
-            f"⏳ {fmt_until ( until )} gacha\n"
-            f"⭐ Sizning qolgan kreditingiz: {wallet ( sender.id )}"
-        )
-        try:
-            if target.id != sender.id:
-                await ctx.bot.send_message ( target.id,
-                    f"🎁 Sizga {sender.full_name} tomonidan Veritas AI Premium sovg‘a qilindi!\n\n"
-                    f"💎 30 kunlik AI Premium\n📅 {fmt_until ( until )} gacha" )
-        except TelegramError:
-            pass
-    except Exception:
-        log.exception ( "AI Premium gift error" )
-        wallet_change ( sender.id,AI_PRIVATE_PRICE,"ai_premium_gift_rollback",target.id )
-        await msg.reply_text ( "❌ AI Premium sovg‘asi faollashmadi. 100 ⭐ kredit hisobingizga qaytarildi." )
-
 async def superadmin_command ( update,ctx,cmd ) :
     msg=update.effective_message; actor=update.effective_user
     if not msg or not actor: return
@@ -1198,8 +1168,6 @@ async def star_text_router ( update,ctx ) :
         return await stars_cmd ( update,ctx,args)
     if cmd=="post":
         return await broadcast_command ( update,ctx,args)
-    if cmd=="ai.p":
-        return await ai_premium_gift ( update,ctx )
     if cmd in {"superadmin","unsuperadmin","superadmins"}:
         return await superadmin_command ( update,ctx,cmd)
     if cmd in {"ad.book","unad.book","bookadmins","ad.hadis","unad.hadis","hadisadmins"}:
@@ -1264,10 +1232,6 @@ def _openai_response_sync ( prompt ) :
             "Kabinetda Stars krediti bor. Telegram Gift va Telegram Premium sovg‘a qilish funksiyalari Veritas AI Premiumdan boshqa xizmat. *help yordam markazini ochadi, *ai guruh AI holati/tariflarini ko‘rsatadi. "
             "Mavjud bo‘lmagan Veritas funksiyasini uydirmang. Aniq bilmagan sozlama bo‘lsa *help yoki menyuni tekshirishni ayting. "
             "Foydalanuvchi qaysi tilda yozsa, asosan o‘sha tilda javob bering. Javob Telegram uchun aniq va ortiqcha uzun bo‘lmasin. "
-            "Veritasning xarakteri vaziyatga mos bo‘lsin: foydalanuvchi hurmat bilan yozsa hurmat bilan, hazillashsa hazil bilan javob bering. "
-            "Agar foydalanuvchi aynan Veritasning o‘zini masxara qilsa, ustidan kulsa yoki qo‘pol gapirsa, Veritas ham o‘tkir, topqir, kinoyali va kulgili javob qaytarsin; kerak bo‘lsa so‘z bilan kuchli roast qilsin. "
-            "Biroq real tahdid qilmang, zo‘ravonlikka undamang, himoyalangan belgilarga asoslangan nafrat/kamsitish ishlatmang, jinsiy tahqirlashga o‘tmang va boshqa odamni nishonga olib bezorilikka qo‘shilmang. "
-            "Faqat Veritasga qaratilgan gapga mos javob bering; foydalanuvchi odobga qaytsa, Veritas ham odatiy hurmatli ohangga qaytsin. "
             "Diniy, tibbiy, huquqiy yoki moliyaviy mavzularda noaniqlik bo‘lsa buni ochiq ayting."
         ),
         "input":prompt,
@@ -1831,6 +1795,114 @@ async def _make_and_send_book_quiz ( q,ctx,bid,chat_id,count ) :
         except Exception: pass
 
 
+def _translation_last_completed ( uid ) :
+    r=one ( "SELECT MAX ( completed_at) AS t FROM ai_book_translations WHERE user_id=? AND status='done'", (uid, ) )
+    return int ( r["t"] or 0) if r else 0
+
+def _translation_wait_seconds ( uid ) :
+    last=_translation_last_completed ( uid)
+    return max ( 0, last + 86400 - now (  ) ) if last else 0
+
+def _translation_running ( uid ) :
+    return bool ( one ( "SELECT 1 FROM ai_book_translations WHERE user_id=? AND status='running' LIMIT 1", (uid, )  ) )
+
+def _translate_text_sync ( text, target_lang, title, part_no, total_parts ) :
+    names={"uz":"O‘zbekcha","ru":"Ruscha","en":"English"}; lang=names.get ( target_lang,target_lang)
+    payload=json.dumps ( {"model":OPENAI_MODEL,"instructions":f"Berilgan kitob matnini {lang} tiliga to‘liq va sodiq tarjima qiling. Qisqartirmang, sharh va yangi ma’lumot qo‘shmang. Tuzilma va raqamlarni saqlang. Faqat tarjimani qaytaring.","input":f"Kitob: {title}\nQism: {part_no}/{total_parts}\n\n{text}","max_output_tokens":7000},ensure_ascii=False ) .encode ( "utf-8")
+    req=urllib.request.Request ( "https://api.openai.com/v1/responses",data=payload,headers={"Authorization":f"Bearer {OPENAI_API_KEY}","Content-Type":"application/json"},method="POST")
+    with urllib.request.urlopen ( req,timeout=180) as resp: data=json.loads ( resp.read (  ) .decode ( "utf-8" ) )
+    out=_extract_response_text ( data)
+    if not out.strip (  ) : raise RuntimeError ( "AI tarjima qaytarmadi")
+    return out.strip ( )
+
+def _split_translation_text ( text,max_chars=9000 ) :
+    chunks=[]; cur=""
+    for para in re.split ( r"\n\s*\n", ( text or "" ) .strip (  )  ) :
+        para=para.strip ( )
+        if not para: continue
+        for piece in [para[i:i+max_chars] for i in range ( 0,len ( para ) ,max_chars ) ]:
+            cand= ( cur+"\n\n"+piece ) .strip ( ) if cur else piece
+            if len ( cand ) >max_chars and cur: chunks.append ( cur ) ; cur=piece
+            else: cur=cand
+    if cur: chunks.append ( cur)
+    return chunks
+
+def _find_unicode_font (  ) :
+    for x in ["/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf","/usr/share/fonts/truetype/noto/NotoSans-Regular.ttf","/usr/share/fonts/opentype/noto/NotoSans-Regular.ttf","/usr/share/fonts/truetype/liberation2/LiberationSans-Regular.ttf"]:
+        if Path ( x ) .exists (  ) : return x
+    return None
+
+def _write_translation_pdf_sync ( out_path,title,target_lang,parts ) :
+    if fitz is None: raise RuntimeError ( "PyMuPDF o‘rnatilmagan")
+    doc=fitz.open (  ) ; fontfile=_find_unicode_font (  ) ; fontname="veritasfont" if fontfile else "helv"
+    def page_new (  ) :
+        p=doc.new_page ( width=595,height=842)
+        if fontfile: p.insert_font ( fontname=fontname,fontfile=fontfile)
+        return p
+    page=page_new (  ) ; y=55; text=f"{title}\nAI tarjima · {target_lang}\n\n"+"\n\n".join ( parts)
+    lines=[]
+    for para in text.splitlines (  ) :
+        if not para: lines.append ( "" ) ; continue
+        line=""
+        for w in para.split (  ) :
+            c= ( line+" "+w ) .strip ( )
+            if len ( c ) >88 and line: lines.append ( line ) ; line=w
+            else: line=c
+        if line: lines.append ( line)
+    for line in lines:
+        if y>790: page=page_new (  ) ; y=55
+        if not line: y+=9; continue
+        try: page.insert_text (  ( 45,y ) ,line,fontsize=10.5,fontname=fontname)
+        except Exception: page.insert_text (  ( 45,y ) ,line.encode ( "latin-1","replace" ) .decode ( "latin-1" ) ,fontsize=10.5,fontname="helv")
+        y+=14
+    doc.save ( out_path,garbage=3,deflate=True ) ; doc.close ( )
+
+def _translate_pdf_path_sync ( path,out_path,title,target_lang ) :
+    if fitz is None: raise RuntimeError ( "PyMuPDF o‘rnatilmagan")
+    doc=fitz.open ( path ) ; pages=[]; chars=0
+    try:
+        for pno in range ( doc.page_count ) :
+            t= ( doc.load_page ( pno ) .get_text ( "text") or "" ) .strip ( )
+            if t: pages.append ( f"--- {pno+1}-sahifa ---\n{t}" ) ; chars+=len ( t)
+    finally: doc.close ( )
+    if chars<500: raise RuntimeError ( "SCAN_TRANSLATION_NOT_READY")
+    chunks=_split_translation_text ( "\n\n".join ( pages ) )
+    translated=[_translate_text_sync ( ch,target_lang,title,i,len ( chunks ) ) for i,ch in enumerate ( chunks,1 ) ]
+    _write_translation_pdf_sync ( out_path,title,target_lang,translated)
+    return len ( chunks)
+
+async def _run_book_translation ( q,ctx,bid,target_lang ) :
+    u=q.from_user
+    if not ai_user_active ( u.id ) : return await q.answer ( "🔒 AI Premium kerak: 100 ⭐ / 30 kun",show_alert=True)
+    if _translation_running ( u.id ) : return await q.answer ( "⏳ Sizda boshqa tarjima davom etmoqda.",show_alert=True)
+    wait=_translation_wait_seconds ( u.id)
+    if wait>0: return await q.answer ( f"⏳ Kunlik limit ishlatilgan. Taxminan { ( wait+3599 ) //3600} soat qoldi.",show_alert=True)
+    if target_lang not in {"uz","ru","en"}: return await q.answer ( "Til noto‘g‘ri",show_alert=True)
+    r=one ( "SELECT title,pdf_file_id FROM library_books WHERE id=? AND status='approved'", ( bid, ) )
+    if not r or not r["pdf_file_id"]: return await q.answer ( "PDF mavjud emas",show_alert=True)
+    cur=execute ( "INSERT INTO ai_book_translations ( user_id,book_id,target_lang,status,started_at) VALUES ( ?,?,?,?,? ) ", ( u.id,bid,target_lang,"running",now (  )  )  ) ; job_id=cur.lastrowid
+    names={"uz":"🇺🇿 O‘zbekcha","ru":"🇷🇺 Ruscha","en":"🇬🇧 English"}
+    await quiz_replace_message ( q,ctx,f"🌐 AI TARJIMA\n\n📖 {r['title']}\n➡️ {names[target_lang]}\n\nTarjima qilinmoqda. Katta kitob vaqt olishi mumkin...")
+    src=f"/tmp/veritas_translate_{bid}_{u.id}.pdf"; out=f"/tmp/veritas_translated_{bid}_{u.id}_{target_lang}.pdf"
+    try:
+        try:
+            tgfile=await ctx.bot.get_file ( r["pdf_file_id"] ) ; await tgfile.download_to_drive ( custom_path=src)
+        except TelegramError as e:
+            if "File is too big" not in str ( e ) : raise
+            await _download_large_telegram_file ( ctx,r["pdf_file_id"],src)
+        parts=await asyncio.to_thread ( _translate_pdf_path_sync,src,out,r["title"],target_lang)
+        execute ( "UPDATE ai_book_translations SET status='done',completed_at=? WHERE id=?", ( now (  ) ,job_id ) )
+        with open ( out,"rb") as fh:
+            await ctx.bot.send_document ( u.id,document=fh,filename=f"translated_{bid}_{target_lang}.pdf",caption=f"✅ AI tarjima tayyor\n📖 {r['title']}\n🌐 {names[target_lang]}\n🧩 {parts} qism.\n\nKeyingi kitob: 24 soatdan keyin.")
+    except Exception as e:
+        log.exception ( "Book translation error: %s",e ) ; execute ( "UPDATE ai_book_translations SET status='failed' WHERE id=?", ( job_id, ) )
+        msg="⚠️ Tarjima tugamadi. Kunlik limitingiz sarflanmadi."
+        if "SCAN_TRANSLATION_NOT_READY" in str ( e ) : msg="⚠️ Bu PDF skaner/rasm ko‘rinishida. Hozirgi bosqich matnli PDFlarni tarjima qiladi. Kunlik limitingiz sarflanmadi."
+        await ctx.bot.send_message ( u.id,msg)
+    finally:
+        Path ( src ) .unlink ( missing_ok=True ) ; Path ( out ) .unlink ( missing_ok=True)
+
+
 async def group_ai_reply ( update,ctx ) :
     msg=update.effective_message; chat=update.effective_chat; u=update.effective_user
     if not msg or not u or chat.type not in ("group","supergroup") : return False
@@ -2004,16 +2076,9 @@ async def callback ( update,ctx ) :
     if d=="aipbuy":
         if is_super ( u.id ): return await q.answer ( "Super boshqaruv uchun AI allaqachon faol.",show_alert=True )
         if wallet ( u.id ) <AI_PRIVATE_PRICE: return await q.answer ( "Kredit yetarli emas. Hisobni Stars bilan to‘ldiring.",show_alert=True )
-        if not wallet_change ( u.id,-AI_PRIVATE_PRICE,"ai_private_30d_pending",u.id ):
-            return await q.answer ( "Kredit yechilmadi. Qayta urinib ko‘ring.",show_alert=True )
-        try:
-            until=extend_ai_user ( u.id,AI_PRIVATE_DAYS )
-            execute ( "UPDATE tx SET kind='ai_private_30d' WHERE id= ( SELECT MAX ( id) FROM tx WHERE user_id=? ) ", ( u.id, ) )
-        except Exception:
-            log.exception ( "AI Premium purchase error" )
-            wallet_change ( u.id,AI_PRIVATE_PRICE,"ai_private_rollback",u.id )
-            return await q.edit_message_text ( "❌ AI Premium faollashmadi. 100 ⭐ kredit qaytarildi.",reply_markup=back_markup ( "home" ) )
-        return await q.edit_message_text ( f"✅ Shaxsiy Veritas AI Premium yoqildi.\n💎 {AI_PRIVATE_PRICE} ⭐\n📅 {fmt_until ( until )} gacha\n⭐ Qolgan kredit: {wallet ( u.id )}",reply_markup=back_markup ( "home" ) )
+        if not wallet_change ( u.id,-AI_PRIVATE_PRICE,"ai_private_30d",u.id ): return
+        until=extend_ai_user ( u.id,AI_PRIVATE_DAYS )
+        return await q.edit_message_text ( f"✅ Shaxsiy Veritas AI Premium yoqildi.\n💎 {AI_PRIVATE_PRICE} ⭐\n📅 {fmt_until ( until )} gacha",reply_markup=back_markup ( "home" ) )
 
     if d.startswith ( "aigbuy:" ) :
         _,schat,sdays=d.split ( ":" ); chat_id=int ( schat ); days=int ( sdays ); price=AI_GROUP_PLANS.get ( days )
@@ -2239,6 +2304,20 @@ async def callback ( update,ctx ) :
         if nav: kb.append ( nav)
         kb.append ( [InlineKeyboardButton ( "⬅️ Kategoriyalar",callback_data="libcats:0" ) ])
         return await q.edit_message_text ( f"🗂 {cr['name']} · {total} ta",reply_markup=InlineKeyboardMarkup ( kb ) )
+
+    if d.startswith ( "libtranslate:" ) :
+        bid=int ( d.split ( ":" ) [1])
+        if not ai_user_active ( u.id ) :
+            kb=InlineKeyboardMarkup ( [[InlineKeyboardButton ( "💎 100 ⭐ — 30 kun",callback_data="aipbuy" ) ],[InlineKeyboardButton ( "⬅️ Kitob",callback_data=f"libbook:{bid}" ) ]])
+            return await quiz_replace_message ( q,ctx,"🔒 AI KITOB TARJIMASI — Premium funksiya.\n\n💎 100 ⭐ / 30 kun\nPremium a’zo 24 soatda 1 ta kitob tarjima qila oladi.",reply_markup=kb)
+        wait=_translation_wait_seconds ( u.id)
+        if wait>0: return await q.answer ( f"⏳ Kunlik limit ishlatilgan. Taxminan { ( wait+3599 ) //3600} soat qoldi.",show_alert=True)
+        kb=InlineKeyboardMarkup ( [[InlineKeyboardButton ( "🇺🇿 O‘zbekcha",callback_data=f"libtrun:{bid}:uz" ) ],[InlineKeyboardButton ( "🇷🇺 Ruscha",callback_data=f"libtrun:{bid}:ru" ) ,InlineKeyboardButton ( "🇬🇧 English",callback_data=f"libtrun:{bid}:en" ) ],[InlineKeyboardButton ( "⬅️ Kitob",callback_data=f"libbook:{bid}" ) ]])
+        return await quiz_replace_message ( q,ctx,"🌐 AI KITOB TARJIMASI\n\nTarjima tilini tanlang.\nPremium: 24 soatda 1 ta muvaffaqiyatli kitob tarjimasi.",reply_markup=kb)
+
+    if d.startswith ( "libtrun:" ) :
+        _,sbid,lang=d.split ( ":")
+        return await _run_book_translation ( q,ctx,int ( sbid ) ,lang)
 
     if d.startswith ( "libquiz:" ) :
         bid=int ( d.split ( ":" )[1] )
