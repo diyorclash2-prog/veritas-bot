@@ -1087,10 +1087,11 @@ async def gift_send ( update,ctx,args ) :
         return await update.effective_message.reply_text ( "🎁 Mavjud narxlar: "+", ".join ( map ( str,prices[:30] )  ) )
     g=candidates[0]; cost=int ( g.star_count)
     if wallet ( sender ) <cost: return await update.effective_message.reply_text ( f"⭐ Kredit yetarli emas. Kerak: {cost}, sizda: {wallet ( sender ) }")
-    if not wallet_change ( sender,-cost,"gift_pending",target,meta={"gift_id":str ( g.id ) } ) : return
+    tx_ref=f"gift:{sender}:{target}:{now (  ) }:{random.randint ( 100000,999999 ) }"
+    if not wallet_change ( sender,-cost,"gift_pending",target,ref=tx_ref,meta={"gift_id":str ( g.id ) } ) : return
     try:
         await ctx.bot.send_gift ( user_id=target,gift_id=g.id,text=f"🎁 Veritas orqali {update.effective_user.first_name}dan sovg‘a")
-        execute ( "UPDATE tx SET kind='gift' WHERE id= ( SELECT MAX ( id) FROM tx WHERE user_id=? ) ", ( sender, ) )
+        execute ( "UPDATE tx SET kind='gift' WHERE user_id=? AND ref=? AND kind='gift_pending'", ( sender,tx_ref ) )
         await update.effective_message.reply_text ( f"✅ Haqiqiy Telegram Gift yuborildi: {cost} ⭐")
     except Exception as e:
         wallet_change ( sender,cost,"gift_rollback",target)
@@ -1103,10 +1104,11 @@ async def premium_send ( update,ctx,args ) :
     if m not in PREMIUM: return await update.effective_message.reply_text ( "*premium 3 / 6 / 12")
     cost=PREMIUM[m]; sender=update.effective_user.id; target=t.from_user.id
     if wallet ( sender ) <cost: return await update.effective_message.reply_text ( f"⭐ Kredit yetarli emas. Kerak: {cost}")
-    if not wallet_change ( sender,-cost,"premium_pending",target ) : return
+    tx_ref=f"premium:{sender}:{target}:{now (  ) }:{random.randint ( 100000,999999 ) }"
+    if not wallet_change ( sender,-cost,"premium_pending",target,ref=tx_ref ) : return
     try:
         await ctx.bot.gift_premium_subscription ( user_id=target,month_count=m,star_count=cost,text="💎 Veritas orqali Premium sovg‘a")
-        execute ( "UPDATE tx SET kind='premium' WHERE id= ( SELECT MAX ( id) FROM tx WHERE user_id=? ) ", ( sender, ) )
+        execute ( "UPDATE tx SET kind='premium' WHERE user_id=? AND ref=? AND kind='premium_pending'", ( sender,tx_ref ) )
         await update.effective_message.reply_text ( f"✅ {m} oylik Telegram Premium yuborildi.")
     except Exception as e:
         wallet_change ( sender,cost,"premium_rollback",target)
@@ -1156,6 +1158,10 @@ async def ai_premium_gift_command ( update, ctx ) :
     if not t or not t.from_user:
         return await msg.reply_text ( "↩️ AI Premium oluvchining xabariga reply qilib *ai.p yozing.")
     target = t.from_user
+    if target.is_bot:
+        return await msg.reply_text ( "❌ Botga AI Premium sovg‘a qilib bo‘lmaydi.")
+    if target.id == actor.id:
+        return await msg.reply_text ( "❌ AI Premiumni o‘zingizga *ai.p orqali sovg‘a qilib bo‘lmaydi.")
     ensure_user ( target)
     # Super boshqaruv AI'dan allaqachon cheksiz foydalanadi.
     if is_super ( target.id ) :
@@ -2357,15 +2363,15 @@ async def callback ( update,ctx ) :
 
     if d.startswith ( "libtrun:" ) :
         _,sbid,lang=d.split ( ":")
-        task = asyncio.create_task ( _run_book_translation ( q,ctx,int ( sbid ) ,lang ) )
-        def _translation_done ( t ) :
+        task=asyncio.create_task ( _run_book_translation ( q,ctx,int ( sbid ) ,lang ) )
+        def _translation_task_done ( t ) :
             try:
                 t.result ( )
             except asyncio.CancelledError:
                 pass
             except Exception:
-                log.exception ( "Background translation task failed")
-        task.add_done_callback ( _translation_done)
+                log.exception ( "Background book translation task failed")
+        task.add_done_callback ( _translation_task_done)
         return
 
     if d.startswith ( "libquiz:" ) :
