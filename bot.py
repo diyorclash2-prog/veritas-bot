@@ -127,6 +127,19 @@ def init_db (  ) :
       hint TEXT DEFAULT '', channel_message_id INTEGER DEFAULT 0, status TEXT DEFAULT 'active',
       winner_id INTEGER DEFAULT 0, created_at INTEGER NOT NULL, solved_at INTEGER DEFAULT 0 ) ;
     CREATE INDEX IF NOT EXISTS idx_rebus_active_group ON rebuses ( answer_group_id,status,id ) ;
+    CREATE TABLE IF NOT EXISTS rebus_sessions(
+      id INTEGER PRIMARY KEY AUTOINCREMENT, creator_id INTEGER NOT NULL,
+      group_id INTEGER NOT NULL, target_chat_id INTEGER NOT NULL,
+      total INTEGER NOT NULL, current_no INTEGER DEFAULT 0,
+      status TEXT DEFAULT 'active', created_at INTEGER NOT NULL ) ;
+    CREATE TABLE IF NOT EXISTS rebus_session_items(
+      session_id INTEGER NOT NULL, item_no INTEGER NOT NULL, answer TEXT NOT NULL,
+      rebus_id INTEGER DEFAULT 0, status TEXT DEFAULT 'waiting',
+      PRIMARY KEY ( session_id,item_no) ) ;
+    CREATE TABLE IF NOT EXISTS rebus_session_scores(
+      session_id INTEGER NOT NULL, user_id INTEGER NOT NULL, first_name TEXT DEFAULT '',
+      wins INTEGER DEFAULT 0, PRIMARY KEY ( session_id,user_id) ) ;
+    CREATE INDEX IF NOT EXISTS idx_rebus_session_group ON rebus_sessions ( group_id,status,id ) ;
     CREATE TABLE IF NOT EXISTS rebus_group_channels(
       group_id INTEGER PRIMARY KEY, channel_id INTEGER NOT NULL,
       channel_title TEXT DEFAULT '', updated_at INTEGER NOT NULL ) ;
@@ -414,22 +427,56 @@ async def library_private_input ( update,ctx ) :
         if not msg.text:
             return await msg.reply_text ( "Matn ko‘rinishida yuboring.")
         value=msg.text.strip ( )
-        if mode=="rebus_group_answer":
+        if mode=="rebus_group_count":
+            if not value.isdigit (  ) :
+                return await msg.reply_text ( "❌ Son yozing. Masalan: 5 yoki 10")
+            count=int ( value)
+            if count<1 or count>20:
+                return await msg.reply_text ( "❌ 1 dan 20 tagacha rebus tanlang.")
+            st["count"]=count
+            st["answers"]=[]
+            st["mode"]="rebus_group_answers"
+            return await msg.reply_text(
+                f"✅ {count} ta rebus.\n\n1/{count}-rebusning JAVOBINI yozing.\nMasalan: OLMA"
+            )
+
+        if mode=="rebus_group_answers":
             if len ( value ) >120:
-                return await msg.reply_text ( "❌ Rebus javobi juda uzun. 120 belgidan qisqa yozing.")
-            channel_id=int ( st["channel_id"] ) ; group_id=int ( st["group_id"])
+                return await msg.reply_text ( "❌ Javob juda uzun. 120 belgidan qisqa yozing.")
+            answers=st.setdefault ( "answers",[])
+            answers.append ( value)
+            count=int ( st["count"])
+            if len ( answers ) <count:
+                return await msg.reply_text(
+                    f"✅ Qabul qilindi.\n\n{len ( answers ) +1}/{count}-rebusning JAVOBINI yozing."
+                )
+
+            group_id=int ( st["group_id"])
+            target_chat_id=int ( st["target_chat_id"])
+            answers=list ( answers)
+            with db ( ) as c:
+                cur=c.execute(
+                    "INSERT INTO rebus_sessions ( creator_id,group_id,target_chat_id,total,current_no,status,created_at) "
+                    "VALUES ( ?,?,?,?,0,'active',? ) ",
+                    (uid,group_id,target_chat_id,count,now (  ) )
+                )
+                session_id=cur.lastrowid
+                for n,ans in enumerate ( answers,1 ) :
+                    c.execute(
+                        "INSERT INTO rebus_session_items ( session_id,item_no,answer,status) VALUES ( ?,?,?,'waiting' ) ",
+                        (session_id,n,ans)
+                    )
             STATE.pop ( uid,None)
             await msg.reply_text(
-                f"🎨 Javob: {value}\n\nAI rasmli rebus tayyorlayapti. Tayyor bo‘lgach kanalga joylayman."
+                f"✅ {count} ta javob qabul qilindi.\n\n🎨 1/{count}-rebus tayyorlanmoqda. "
+                "Birinchisi topilgach, keyingisi avtomatik chiqadi."
             )
-            task=asyncio.create_task(
-                _create_and_post_rebus ( ctx,uid,channel_id,group_id,value,msg.chat.id)
-            )
-            def _rebus_group_done ( t ) :
+            task=asyncio.create_task ( _launch_session_item ( ctx,session_id,1 ) )
+            def _first_rebus_done ( t ) :
                 try: t.result ( )
                 except asyncio.CancelledError: pass
-                except Exception: log.exception ( "Group rebus background task failed")
-            task.add_done_callback ( _rebus_group_done)
+                except Exception: log.exception ( "First rebus task failed")
+            task.add_done_callback ( _first_rebus_done)
             return
         if mode=="rebus_channel":
             try:
@@ -1450,70 +1497,102 @@ async def _start_group_rebus_flow ( update,ctx ) :
         return False
     if not msg.reply_to_message or not msg.reply_to_message.from_user or msg.reply_to_message.from_user.id!=ctx.bot.id:
         return False
-    # Rebus faqat Veritas xabariga reply qilib aynan *rebus yozilganda boshlanadi.
-    text= ( msg.text or "" ) .strip (  ) .lower ( )
-    if text!="*rebus":
+    if (msg.text or "" ) .strip (  ) .lower (  ) !="*rebus":
         return False
     if not is_super ( u.id ) :
         await msg.reply_text ( "⛔ AI Rebus yaratish hozircha Super Ega yoki Super Admin uchun.")
         return True
+
+    # Kanal bog‘langan va Veritas u yerda admin bo‘lsa — kanalga.
+    # Aks holda — rebus bevosita shu guruhga joylanadi.
     channel_id=await _remember_rebus_channel_from_group ( ctx,chat.id)
-    if not channel_id:
-        await msg.reply_text(
-            "❌ Bu guruhga bog‘langan kanal topilmadi yoki Veritas kanalda admin emas.\n"
-            "Telegramda kanal → Discussion/Muhokama orqali shu guruhni bog‘lang va Veritasni kanalga admin qiling."
-        )
-        return True
+    target_chat_id=int ( channel_id or chat.id)
     STATE[u.id]={
-        "mode":"rebus_group_answer",
+        "mode":"rebus_group_count",
         "group_id":chat.id,
         "group_title":chat.title or str ( chat.id ) ,
-        "channel_id":channel_id
+        "target_chat_id":target_chat_id,
+        "answers":[]
     }
     try:
+        place="bog‘langan kanalga" if channel_id else "shu guruhning o‘ziga"
         await ctx.bot.send_message(
             u.id,
-            f"🧩 AI REBUS\n\n👥 Guruh: {chat.title or chat.id}\n"
-            "Rebusning javobini yuboring.\n\nMasalan: OLMA"
+            f"🧩 AI REBUS MUSOBAQASI\n\n👥 Guruh: {chat.title or chat.id}\n"
+            f"📍 Rebuslar: {place}\n\n"
+            "Nechta rebus o‘tkazilsin?\nMasalan: 5 yoki 10"
         )
-        await msg.reply_text ( "📩 Shaxsiy chatga yubordim. Rebus javobini Veritasga private yozing.")
+        await msg.reply_text ( "📩 Shaxsiy chatga yubordim. Rebuslar sonini o‘sha yerda yozing.")
     except TelegramError:
         STATE.pop ( u.id,None)
-        await msg.reply_text(
-            "📩 Sizga shaxsiy xabar yubora olmadim. Avval Veritas botning shaxsiy chatiga kirib /start bosing, keyin qayta urinib ko‘ring."
-        )
+        await msg.reply_text ( "📩 Avval Veritasning shaxsiy chatiga kirib /start bosing, keyin *rebus ni qayta yuboring.")
     return True
 
-async def _create_and_post_rebus ( ctx,uid,channel_id,group_id,answer_text,progress_chat_id ) :
+async def _create_and_post_rebus ( ctx,uid,target_chat_id,group_id,answer_text,progress_chat_id,session_id=0,item_no=0 ) :
     try:
         answer,hint,image_prompt=await asyncio.to_thread ( _rebus_plan_sync,answer_text)
         image_bytes=await asyncio.to_thread ( _rebus_image_sync,image_prompt)
         with db ( ) as c:
             cur=c.execute(
                 "INSERT INTO rebuses (creator_id,channel_id,answer_group_id,answer,answer_norm,hint,created_at) VALUES (?,?,?,?,?,?,? ) ",
-                (uid,channel_id,group_id,answer,_norm_rebus_answer ( answer ) ,hint,now (  ) )
+                (uid,target_chat_id,group_id,answer,_norm_rebus_answer ( answer ) ,hint,now (  ) )
             )
             rid=cur.lastrowid
+            if session_id and item_no:
+                c.execute(
+                    "UPDATE rebus_session_items SET rebus_id=?,status='active' WHERE session_id=? AND item_no=?",
+                    (rid,session_id,item_no)
+                )
+                c.execute ( "UPDATE rebus_sessions SET current_no=? WHERE id=?", ( item_no,session_id ) )
         caption=(
-            f"🧩 VERITAS REBUS #{rid}\n\n"
-            "Rasmga qarab yashiringan so‘z yoki iborani toping!\n"
-            "💬 Javobni guruhimizga yozing."
+            f"🧩 VERITAS REBUS #{rid}"
+            + (f" — {item_no}" if session_id else "") +
+            "\n\nRasmga qarab yashiringan so‘z yoki iborani toping!\n"
+            "💬 Javobni guruhga yozing."
         )
         if hint:
             caption+=f"\n\n💡 Ishora: {hint}"
         sent=await ctx.bot.send_photo(
-            chat_id=channel_id,
-            photo=io.BytesIO ( image_bytes ) ,
-            caption=caption
+            chat_id=target_chat_id, photo=io.BytesIO ( image_bytes ) , caption=caption
         )
         execute ( "UPDATE rebuses SET channel_message_id=? WHERE id=?", ( sent.message_id,rid ) )
-        await ctx.bot.send_message(
-            progress_chat_id,
-            f"✅ Rebus kanalga joylandi.\n🧩 Rebus #{rid}\n👥 Javoblar guruhda avtomatik tekshiriladi."
-        )
+        if progress_chat_id:
+            where="kanalga" if target_chat_id!=group_id else "guruhga"
+            await ctx.bot.send_message(
+                progress_chat_id,
+                f"✅ {item_no if item_no else ''}-rebus {where} joylandi. Javob guruhda tekshiriladi."
+            )
+        return rid
     except Exception:
         log.exception ( "AI rebus yaratish xatosi")
-        await ctx.bot.send_message ( progress_chat_id,"⚠️ Rebus yaratishda xato bo‘ldi. Qayta urinib ko‘ring.")
+        if session_id and item_no:
+            execute ( "UPDATE rebus_session_items SET status='error' WHERE session_id=? AND item_no=?", ( session_id,item_no ) )
+        if progress_chat_id:
+            await ctx.bot.send_message ( progress_chat_id,"⚠️ Rebus yaratishda xato bo‘ldi. Qayta urinib ko‘ring.")
+        return 0
+
+async def _launch_session_item ( ctx,session_id,item_no ) :
+    ses=one ( "SELECT * FROM rebus_sessions WHERE id=? AND status='active'", ( session_id, ) )
+    item=one ( "SELECT * FROM rebus_session_items WHERE session_id=? AND item_no=?", ( session_id,item_no ) )
+    if not ses or not item: return
+    await _create_and_post_rebus(
+        ctx,int ( ses["creator_id"] ) ,int ( ses["target_chat_id"] ) ,int ( ses["group_id"] ) ,
+        item["answer"],int ( ses["creator_id"] ) ,session_id,item_no
+    )
+
+async def _finish_rebus_session ( ctx,session_id,group_id ) :
+    execute ( "UPDATE rebus_sessions SET status='done' WHERE id=?", ( session_id, ) )
+    scores=all_(
+        "SELECT first_name,wins FROM rebus_session_scores WHERE session_id=? ORDER BY wins DESC, first_name COLLATE NOCASE",
+        (session_id,)
+    )
+    if scores:
+        lines=["🏁 REBUS MUSOBAQASI YAKUNLANDI",""]
+        for i,r in enumerate ( scores,1 ) :
+            lines.append ( f"{i}. {r['first_name'] or 'Ishtirokchi'} — {r['wins']} ta")
+        await ctx.bot.send_message ( group_id,"\n".join ( lines ) )
+    else:
+        await ctx.bot.send_message ( group_id,"🏁 Rebus musobaqasi yakunlandi.")
 
 async def _check_rebus_answer ( update,ctx ) :
     msg=update.effective_message; u=update.effective_user; chat=update.effective_chat
@@ -1527,6 +1606,7 @@ async def _check_rebus_answer ( update,ctx ) :
     guess=_norm_rebus_answer ( msg.text)
     if not guess or guess!=r["answer_norm"]:
         return False
+
     with db ( ) as c:
         cur=c.execute(
             "UPDATE rebuses SET status='solved',winner_id=?,solved_at=? WHERE id=? AND status='active'",
@@ -1538,16 +1618,47 @@ async def _check_rebus_answer ( update,ctx ) :
             "ON CONFLICT ( chat_id,user_id) DO UPDATE SET xp=xp+10",
             (chat.id,u.id)
         )
+        item=c.execute(
+            "SELECT session_id,item_no FROM rebus_session_items WHERE rebus_id=?", ( r["id"],)
+        ).fetchone ( )
+        if item:
+            c.execute(
+                "UPDATE rebus_session_items SET status='solved' WHERE session_id=? AND item_no=?",
+                (item["session_id"],item["item_no"])
+            )
+            c.execute(
+                "INSERT INTO rebus_session_scores ( session_id,user_id,first_name,wins) VALUES ( ?,?,?,1) "
+                "ON CONFLICT ( session_id,user_id) DO UPDATE SET wins=wins+1,first_name=excluded.first_name",
+                (item["session_id"],u.id,u.first_name or "")
+            )
+
     await msg.reply_text(
-        f"🎉 TO‘G‘RI!\n\n🧩 Rebus #{r['id']}\n✅ Javob: {r['answer']}\n🏆 {u.first_name} birinchi topdi!\n✨ +10 XP"
+        f"🎉 TO‘G‘RI!\n\n✅ Javob: {r['answer']}\n🏆 {u.first_name} birinchi topdi!\n✨ +10 XP"
     )
-    try:
-        await ctx.bot.send_message(
-            r["channel_id"],
-            f"✅ VERITAS REBUS #{r['id']} topildi!\n🏆 G‘olib: {u.first_name}\n💡 Javob: {r['answer']}"
-        )
-    except TelegramError:
-        pass
+
+    # Javobi topilgan eski rebus endi kerak emas — o‘chiriladi.
+    if int ( r["channel_message_id"] or 0 ) :
+        try:
+            await ctx.bot.delete_message ( int ( r["channel_id"] ) ,int ( r["channel_message_id"] ) )
+        except TelegramError:
+            log.warning ( "Topilgan rebus xabarini o‘chirib bo‘lmadi: %s",r["id"])
+
+    if item:
+        session_id=int ( item["session_id"] ) ; current_no=int ( item["item_no"])
+        ses=one ( "SELECT * FROM rebus_sessions WHERE id=?", ( session_id, ) )
+        if ses and ses["status"]=="active":
+            total=int ( ses["total"])
+            if current_no < total:
+                next_no=current_no+1
+                await msg.reply_text ( f"⏳ {next_no}/{total}-rebus tayyorlanmoqda...")
+                task=asyncio.create_task ( _launch_session_item ( ctx,session_id,next_no ) )
+                def _next_rebus_done ( t ) :
+                    try: t.result ( )
+                    except asyncio.CancelledError: pass
+                    except Exception: log.exception ( "Next rebus task failed")
+                task.add_done_callback ( _next_rebus_done)
+            else:
+                await _finish_rebus_session ( ctx,session_id,chat.id)
     return True
 
 def media_type ( msg ) :
@@ -2398,12 +2509,12 @@ async def callback ( update,ctx ) :
         return await q.edit_message_text(
             "🧩 AI REBUS\n\n"
             "1️⃣ Veritas ishlayotgan muhokama guruhiga kiring.\n"
-            "2️⃣ Veritasning xabariga reply qilib: «Rebus tayyorla» deb yozing.\n"
-            "3️⃣ Veritas sizga shaxsiy chatda rebus javobini so‘raydi.\n"
-            "4️⃣ Masalan: OLMA deb yuboring.\n"
-            "5️⃣ AI rasmli rebusni guruhga bog‘langan kanalga joylaydi.\n"
-            "6️⃣ Javoblar aynan shu guruhda avtomatik tekshiriladi.\n\n"
-            "⚠️ Kanal shu guruhga Discussion/Muhokama orqali bog‘langan va Veritas kanalda admin bo‘lishi kerak.",
+            "2️⃣ Veritasning xabariga reply qilib: *rebus deb yozing.\n"
+            "3️⃣ Shaxsiy chatda nechta rebus kerakligini yozing: masalan 5 yoki 10.\n"
+            "4️⃣ Veritas javoblarni birma-bir so‘raydi.\n"
+            "5️⃣ 1-rebus chiqadi; topilgach o‘chadi va 2-rebus chiqadi.\n"
+            "6️⃣ Kanal bog‘langan bo‘lsa kanalga, bo‘lmasa guruhning o‘ziga joylanadi.\n"
+            "7️⃣ Oxirida umumiy natija chiqadi.",
             reply_markup=back_markup ( "home")
         )
 
