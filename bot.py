@@ -10,7 +10,7 @@
 # *stars now opens Telegram's official Stars Gift section.
 # Recipient/amount are displayed by Veritas, but must be selected/confirmed in Telegram.
 
-import os, re, sqlite3, time, random, logging, json, asyncio, base64
+import os, re, sqlite3, time, random, logging, json, asyncio, base64, io
 import urllib.request
 import urllib.error
 from datetime import datetime, timezone, timedelta
@@ -44,6 +44,7 @@ SUPER_OWNERS = {int ( x) for x in os.getenv ( "SUPER_OWNER_IDS","" ) .split ( ",
 VERSION = "8.0"
 OPENAI_API_KEY = os.getenv ( "OPENAI_API_KEY", "" ) .strip ( )
 OPENAI_MODEL = os.getenv ( "OPENAI_MODEL", "gpt-5.6-luna" ) .strip ( ) or "gpt-5.6-luna"
+REBUS_IMAGE_MODEL = os.getenv ( "REBUS_IMAGE_MODEL", "gpt-image-2" ) .strip ( ) or "gpt-image-2"
 TG_API_ID = int ( os.getenv ( "TG_API_ID", "0") or 0)
 TG_API_HASH = os.getenv ( "TG_API_HASH", "" ) .strip ( )
 TG_SESSION = os.getenv ( "TG_SESSION", "" ) .strip ( )
@@ -116,6 +117,16 @@ def init_db (  ) :
       target_lang TEXT NOT NULL, status TEXT DEFAULT 'running', started_at INTEGER NOT NULL,
       completed_at INTEGER DEFAULT 0 ) ;
     CREATE INDEX IF NOT EXISTS idx_ai_book_translation_user_done ON ai_book_translations ( user_id,completed_at ) ;
+    -- V8: AI rasmli rebus. Kanalga post qilinadi, javob bog‘langan guruhda tekshiriladi.
+    CREATE TABLE IF NOT EXISTS rebus_channels(
+      owner_id INTEGER PRIMARY KEY, channel_id INTEGER NOT NULL, channel_title TEXT DEFAULT '',
+      answer_group_id INTEGER NOT NULL, answer_group_title TEXT DEFAULT '', updated_at INTEGER NOT NULL ) ;
+    CREATE TABLE IF NOT EXISTS rebuses(
+      id INTEGER PRIMARY KEY AUTOINCREMENT, creator_id INTEGER NOT NULL, channel_id INTEGER NOT NULL,
+      answer_group_id INTEGER NOT NULL, answer TEXT NOT NULL, answer_norm TEXT NOT NULL,
+      hint TEXT DEFAULT '', channel_message_id INTEGER DEFAULT 0, status TEXT DEFAULT 'active',
+      winner_id INTEGER DEFAULT 0, created_at INTEGER NOT NULL, solved_at INTEGER DEFAULT 0 ) ;
+    CREATE INDEX IF NOT EXISTS idx_rebus_active_group ON rebuses ( answer_group_id,status,id ) ;
     -- V8: global Super Adminlar. Super Ega tayinlaydi/oladi.
     CREATE TABLE IF NOT EXISTS super_admins(
       user_id INTEGER PRIMARY KEY, added_by INTEGER NOT NULL, created_at INTEGER NOT NULL ) ;
@@ -242,6 +253,7 @@ def main_menu_markup ( uid ) :
       [InlineKeyboardButton ( "🎁 Gift",callback_data="gifts" ) ,InlineKeyboardButton ( "💎 Premium",callback_data="premium" ) ],
       [InlineKeyboardButton ( "🏘 Guruhlarim",callback_data="mygroups" ) ],
       [InlineKeyboardButton ( "🤖 Veritas AI",callback_data="ai_private" ) ],
+      [InlineKeyboardButton ( "🧩 AI Rebus",callback_data="rebus:start" ) ],
       [InlineKeyboardButton ( "📚 Vasatiya kutubxonasi",callback_data="library" ) ,InlineKeyboardButton ( "📜 Sahih Hadislar",callback_data="hadith" ) ],
       [InlineKeyboardButton ( "ℹ️ Veritas haqida",callback_data="about" ) ],
     ]
@@ -393,6 +405,81 @@ async def library_private_input ( update,ctx ) :
     if st: ctx.user_data["workflow_message_id"]=update.effective_message.message_id
     if st and str ( st.get ( "mode","" )  ) .startswith ( "had_" ) :
         return await hadith_private_input ( update,ctx)
+    if st and str ( st.get ( "mode","" )  ) .startswith ( "rebus_" ) :
+        msg=update.effective_message
+        mode=st["mode"]
+        if not msg.text:
+            return await msg.reply_text ( "Matn ko‘rinishida yuboring.")
+        value=msg.text.strip ( )
+        if mode=="rebus_channel":
+            try:
+                target=int ( value) if re.fullmatch ( r"-?\d+",value) else value
+                ch=await ctx.bot.get_chat ( target)
+                if ch.type!="channel":
+                    return await msg.reply_text ( "❌ Bu kanal emas. Kanal @username yoki -100... ID yuboring.")
+                me=await ctx.bot.get_chat_member ( ch.id,ctx.bot.id)
+                if me.status not in (ChatMemberStatus.ADMINISTRATOR,ChatMemberStatus.OWNER ) :
+                    return await msg.reply_text ( "❌ Veritas bu kanalda admin emas. Avval botni kanalga admin qiling.")
+                linked=getattr ( ch,"linked_chat_id",None)
+                st["channel_id"]=ch.id
+                st["channel_title"]=ch.title or str ( ch.id)
+                if linked:
+                    try:
+                        gr=await ctx.bot.get_chat ( linked)
+                        st["group_id"]=gr.id
+                        st["group_title"]=gr.title or str ( gr.id)
+                        st["mode"]="rebus_topic"
+                        return await msg.reply_text(
+                            f"✅ Kanal: {st['channel_title']}\n👥 Javob guruhi: {st['group_title']}\n\n"
+                            "Endi rebus javobi bo‘ladigan so‘z/ibora yoki mavzuni yozing.\n"
+                            "Masalan: KITOB yoki Islom tarixi"
+                        )
+                    except TelegramError:
+                        pass
+                st["mode"]="rebus_group"
+                return await msg.reply_text(
+                    "✅ Kanal qabul qilindi.\n\nBu kanalga bog‘langan muhokama guruhini topmadim.\n"
+                    "Javob tekshiriladigan guruhning @username yoki -100... ID sini yuboring."
+                )
+            except TelegramError:
+                return await msg.reply_text ( "❌ Kanal topilmadi yoki bot kanal ma’lumotini o‘qiy olmadi.")
+        if mode=="rebus_group":
+            try:
+                target=int ( value) if re.fullmatch ( r"-?\d+",value) else value
+                gr=await ctx.bot.get_chat ( target)
+                if gr.type not in ("group","supergroup" ) :
+                    return await msg.reply_text ( "❌ Bu guruh emas.")
+                member=await ctx.bot.get_chat_member ( gr.id,ctx.bot.id)
+                if member.status not in (ChatMemberStatus.ADMINISTRATOR,ChatMemberStatus.OWNER ) :
+                    return await msg.reply_text ( "❌ Veritas bu guruhda ishlamayapti.")
+                st["group_id"]=gr.id
+                st["group_title"]=gr.title or str ( gr.id)
+                st["mode"]="rebus_topic"
+                return await msg.reply_text(
+                    f"👥 Javob guruhi: {st['group_title']}\n\n"
+                    "Endi rebus javobi bo‘ladigan so‘z/ibora yoki mavzuni yozing."
+                )
+            except TelegramError:
+                return await msg.reply_text ( "❌ Guruh topilmadi. Veritas guruhda bo‘lishi kerak.")
+        if mode=="rebus_topic":
+            channel_id=st["channel_id"]; group_id=st["group_id"]
+            execute(
+                "INSERT INTO rebus_channels ( owner_id,channel_id,channel_title,answer_group_id,answer_group_title,updated_at) "
+                "VALUES ( ?,?,?,?,?,?) ON CONFLICT ( owner_id) DO UPDATE SET channel_id=excluded.channel_id,"
+                "channel_title=excluded.channel_title,answer_group_id=excluded.answer_group_id,"
+                "answer_group_title=excluded.answer_group_title,updated_at=excluded.updated_at",
+                (uid,channel_id,st.get ( "channel_title","" ) ,group_id,st.get ( "group_title","" ) ,now (  ) )
+            )
+            STATE.pop ( uid,None)
+            await msg.reply_text ( "🎨 AI rebus tayyorlayapti...\nBotdan foydalanishda davom etishingiz mumkin.")
+            task=asyncio.create_task ( _create_and_post_rebus ( ctx,uid,channel_id,group_id,value,msg.chat.id ) )
+            def _rebus_done ( t ) :
+                try: t.result ( )
+                except asyncio.CancelledError: pass
+                except Exception: log.exception ( "Rebus background task failed")
+            task.add_done_callback ( _rebus_done)
+            return
+        return
     if not st or not str ( st.get ( "mode","" )  ) .startswith ( "lib_" ) : return
     msg=update.effective_message
     mode=st["mode"]
@@ -1252,6 +1339,129 @@ async def star_text_router ( update,ctx ) :
                 (update.effective_chat.id,update.effective_user.id,"gift",str ( price ) ,wins,now (  ) +mins*60,now (  )  ) )
         return await msg.reply_text ( f"🎉 Konkurs ochildi: {price} ⭐ Gift | {wins} g‘olib | {mins} daqiqa\n*join bilan qatnashing.")
 
+
+def _norm_rebus_answer ( text ) :
+    text= ( text or "" ) .lower (  ) .strip ( )
+    text=text.replace ( "ʻ","'" ) .replace ( "’","'" ) .replace ( "`","'")
+    return re.sub ( r"[^a-z0-9а-яёқғҳў' ]+","",text,flags=re.I ) .strip ( )
+
+def _rebus_plan_sync ( user_request ) :
+    prompt=(
+        "Telegram uchun bitta chiroyli rasmli rebus tuzing. "
+        "Foydalanuvchi bergan so‘z/ibora aniq javob bo‘lsa o‘shani javob qiling; mavzu bo‘lsa mavzuga mos bitta javob tanlang. "
+        "Faqat JSON qaytaring: "
+        '{"answer":"...", "hint":"...", "image_prompt":"..."}. '
+        "image_prompt rasm generatoriga mo‘ljallangan bo‘lsin: 1:1 kvadrat, kitobiy va toza dizayn, "
+        "rebusni rasmlar/simvollar/harflar orqali ifodalasin, JAVOBNING O‘ZINI rasmga yozmasin, "
+        "yuqorida faqat 'VERITAS REBUS' yozuvi bo‘lishi mumkin. "
+        f"Talab: {user_request[:1200]}"
+    )
+    raw=_openai_response_sync ( prompt ) .strip ( )
+    raw=re.sub ( r"^``` ( ?:json ) ?\s*|\s*```$","",raw,flags=re.I|re.S)
+    try:
+        data=json.loads ( raw)
+    except Exception:
+        m=re.search ( r"\{.*\}",raw,re.S)
+        if not m: raise RuntimeError ( "AI rebus rejasini JSON ko‘rinishda qaytarmadi")
+        data=json.loads ( m.group ( 0 ) )
+    answer=str ( data.get ( "answer","" )  ) .strip ( )
+    hint=str ( data.get ( "hint","" )  ) .strip ( )
+    image_prompt=str ( data.get ( "image_prompt","" )  ) .strip ( )
+    if not answer or not image_prompt:
+        raise RuntimeError ( "AI rebus rejasi to‘liq emas")
+    return answer,hint,image_prompt
+
+def _rebus_image_sync ( image_prompt ) :
+    if not OPENAI_API_KEY:
+        raise RuntimeError ( "OPENAI_API_KEY sozlanmagan")
+    payload=json.dumps ( {
+        "model":REBUS_IMAGE_MODEL,
+        "prompt":image_prompt,
+        "size":"1024x1024",
+        "quality":"medium"
+    },ensure_ascii=False ) .encode ( "utf-8")
+    req=urllib.request.Request(
+        "https://api.openai.com/v1/images/generations",
+        data=payload,
+        headers={"Authorization":f"Bearer {OPENAI_API_KEY}","Content-Type":"application/json"},
+        method="POST"
+    )
+    with urllib.request.urlopen ( req,timeout=180) as resp:
+        data=json.loads ( resp.read (  ) .decode ( "utf-8" ) )
+    item= ( data.get ( "data") or [{}] ) [0]
+    if item.get ( "b64_json" ) :
+        return base64.b64decode ( item["b64_json"])
+    if item.get ( "url" ) :
+        with urllib.request.urlopen ( item["url"],timeout=120) as resp:
+            return resp.read ( )
+    raise RuntimeError ( "Rasm generatori rasm qaytarmadi")
+
+async def _create_and_post_rebus ( ctx,uid,channel_id,group_id,user_request,progress_chat_id ) :
+    try:
+        answer,hint,image_prompt=await asyncio.to_thread ( _rebus_plan_sync,user_request)
+        image_bytes=await asyncio.to_thread ( _rebus_image_sync,image_prompt)
+        with db ( ) as c:
+            cur=c.execute(
+                "INSERT INTO rebuses (creator_id,channel_id,answer_group_id,answer,answer_norm,hint,created_at) VALUES (?,?,?,?,?,?,? ) ",
+                (uid,channel_id,group_id,answer,_norm_rebus_answer ( answer ) ,hint,now (  ) )
+            )
+            rid=cur.lastrowid
+        caption=(
+            f"🧩 VERITAS REBUS #{rid}\n\n"
+            "Rasmga qarab yashiringan so‘z yoki iborani toping!\n"
+            "💬 Javobni guruhimizga yozing."
+        )
+        if hint:
+            caption+=f"\n\n💡 Ishora: {hint}"
+        sent=await ctx.bot.send_photo(
+            chat_id=channel_id,
+            photo=io.BytesIO ( image_bytes ) ,
+            caption=caption
+        )
+        execute ( "UPDATE rebuses SET channel_message_id=? WHERE id=?", ( sent.message_id,rid ) )
+        await ctx.bot.send_message(
+            progress_chat_id,
+            f"✅ Rebus kanalga joylandi.\n🧩 Rebus #{rid}\n👥 Javoblar guruhda avtomatik tekshiriladi."
+        )
+    except Exception:
+        log.exception ( "AI rebus yaratish xatosi")
+        await ctx.bot.send_message ( progress_chat_id,"⚠️ Rebus yaratishda xato bo‘ldi. Qayta urinib ko‘ring.")
+
+async def _check_rebus_answer ( update,ctx ) :
+    msg=update.effective_message; u=update.effective_user; chat=update.effective_chat
+    if not msg or not u or u.is_bot or not msg.text or chat.type not in ("group","supergroup" ) :
+        return False
+    r=one(
+        "SELECT * FROM rebuses WHERE answer_group_id=? AND status='active' ORDER BY id DESC LIMIT 1",
+        (chat.id,)
+    )
+    if not r: return False
+    guess=_norm_rebus_answer ( msg.text)
+    if not guess or guess!=r["answer_norm"]:
+        return False
+    with db ( ) as c:
+        cur=c.execute(
+            "UPDATE rebuses SET status='solved',winner_id=?,solved_at=? WHERE id=? AND status='active'",
+            (u.id,now (  ) ,r["id"])
+        )
+        if cur.rowcount!=1: return False
+        c.execute(
+            "INSERT INTO members (chat_id,user_id,xp,messages,daily,weekly,last_day,last_week) VALUES (?,?,10,0,0,0,'','') "
+            "ON CONFLICT ( chat_id,user_id) DO UPDATE SET xp=xp+10",
+            (chat.id,u.id)
+        )
+    await msg.reply_text(
+        f"🎉 TO‘G‘RI!\n\n🧩 Rebus #{r['id']}\n✅ Javob: {r['answer']}\n🏆 {u.first_name} birinchi topdi!\n✨ +10 XP"
+    )
+    try:
+        await ctx.bot.send_message(
+            r["channel_id"],
+            f"✅ VERITAS REBUS #{r['id']} topildi!\n🏆 G‘olib: {u.first_name}\n💡 Javob: {r['answer']}"
+        )
+    except TelegramError:
+        pass
+    return True
+
 def media_type ( msg ) :
     if msg.photo:return "photo"
     if msg.video:return "video"
@@ -2022,6 +2232,7 @@ async def passive ( update,ctx ) :
         else:
             daily= ( r["daily"] if r["last_day"]==day else 0 ) +1; weekly= ( r["weekly"] if r["last_week"]==week else 0 ) +1
             c.execute ( "UPDATE members SET xp=xp+1,messages=messages+1,daily=?,weekly=?,last_day=?,last_week=? WHERE chat_id=? AND user_id=?", ( daily,weekly,day,week,chat.id,u.id ) )
+    if await _check_rebus_answer ( update,ctx ) : return
     if await group_ai_reply ( update,ctx ) : return
     if await protected ( ctx.bot,chat.id,u.id) or one ( "SELECT 1 FROM approved WHERE chat_id=? AND user_id=?", ( chat.id,u.id )  ) : return
     g=one ( "SELECT * FROM groups WHERE chat_id=?", ( chat.id, ) )
@@ -2088,6 +2299,21 @@ async def callback ( update,ctx ) :
 
     if d.startswith ( "help:" ) :
         return await q.edit_message_text ( help_text ( d.split ( ":",1 )[1] ),reply_markup=help_menu_markup ( ) )
+
+    if d=="rebus:start":
+        if not is_super ( u.id ) :
+            return await q.edit_message_text(
+                "⛔ Kanalga AI Rebus joylash Super Ega yoki Super Admin boshqaruvida.",
+                reply_markup=back_markup ( "home")
+            )
+        STATE[u.id]={"mode":"rebus_channel"}
+        return await q.edit_message_text(
+            "🧩 AI REBUS\n\n"
+            "Rebus qaysi kanalga joylansin?\n\n"
+            "Kanalning @username sini yoki -100... ID sini yuboring.\n"
+            "⚠️ Veritas bot o‘sha kanalda admin bo‘lishi kerak.",
+            reply_markup=back_markup ( "home")
+        )
 
     if d=="home":
         try:
