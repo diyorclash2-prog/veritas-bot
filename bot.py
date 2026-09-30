@@ -1152,15 +1152,10 @@ async def ai_premium_gift_command ( update, ctx ) :
     actor = update.effective_user
     if not actor:
         return
-    ensure_user ( actor)
     t = replied ( update)
     if not t or not t.from_user:
         return await msg.reply_text ( "↩️ AI Premium oluvchining xabariga reply qilib *ai.p yozing.")
     target = t.from_user
-    if target.is_bot:
-        return await msg.reply_text ( "❌ Botga AI Premium sovg‘a qilib bo‘lmaydi.")
-    if target.id == actor.id:
-        return await msg.reply_text ( "❌ *ai.p boshqa foydalanuvchiga sovg‘a qilish uchun. O‘zingizga AI Premiumni 🤖 Veritas AI menyusidan yoqing.")
     ensure_user ( target)
     # Super boshqaruv AI'dan allaqachon cheksiz foydalanadi.
     if is_super ( target.id ) :
@@ -2362,7 +2357,16 @@ async def callback ( update,ctx ) :
 
     if d.startswith ( "libtrun:" ) :
         _,sbid,lang=d.split ( ":")
-        return await _run_book_translation ( q,ctx,int ( sbid ) ,lang)
+        task = asyncio.create_task ( _run_book_translation ( q,ctx,int ( sbid ) ,lang ) )
+        def _translation_done ( t ) :
+            try:
+                t.result ( )
+            except asyncio.CancelledError:
+                pass
+            except Exception:
+                log.exception ( "Background translation task failed")
+        task.add_done_callback ( _translation_done)
+        return
 
     if d.startswith ( "libquiz:" ) :
         bid=int ( d.split ( ":" )[1] )
