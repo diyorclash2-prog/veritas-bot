@@ -56,9 +56,7 @@ AI_PRIVATE_PRICE = 100
 AI_PRIVATE_DAYS = 30
 AI_GROUP_PLANS = {7:250, 30:500}
 AI_RATE_CACHE = {}
-TRANSLATION_CONCURRENCY = max ( 1, int ( os.getenv ( "TRANSLATION_CONCURRENCY", "2") or 2 ) )
-TRANSLATION_SEMAPHORE = asyncio.Semaphore ( TRANSLATION_CONCURRENCY)
-TRANSLATION_TASKS = set ( )
+TRANSLATION_SEMAPHORE = asyncio.Semaphore ( 2)
 FLOOD_CACHE = {}
 STATE = {}
 URL_RE = re.compile ( r" ( https?://|www\.|t\.me/|telegram\.me/|@\w+ ) ", re.I)
@@ -796,7 +794,7 @@ def help_text ( section ) :
       "library":"📚 VASATIYA KUTUBXONASI\n\nMenyudan kitob qidirish, kategoriya, yangi kitoblar va sevimlilar ishlaydi.\n\n*ad.book — replydagi odamga kutubxona adminligi\n*unad.book — huquqni olish\n*bookadmins — kutubxona adminlari\n\nKitob admini kitob qo‘shishi, ✏️ Tahrirlash orqali nom, muallif, til, kategoriya, tavsif, muqova, PDF va audioni yangilashi mumkin.",
       "hadith":"📜 SAHIH HADISLAR\n\n*hadis — random hadis\n*hadis buxoriy 1 — aniq hadis\n*add.hadis — private chatda hadis qo‘shish\n*del.hadis buxoriy 1 — o‘chirish\n*ad.hadis / *unad.hadis — hadis admini huquqi\n*hadisadmins — hadis adminlari\n\nMavjud hadis topilsa uni ✏️ Tahrirlash mumkin.",
       "admins":"🛡 ADMINLAR\n\n*ruxsat / *ruxsatsiz — Veritas admini\n*admin / *unadmin — Telegram admini\n*approve / *unapprove / *approved — himoyalangan a’zolar\n*ad.book / *unad.book — kutubxona admini\n*ad.hadis / *unad.hadis — hadis admini",
-      "superadmins":"👑 SUPER BOSHQARUV\n\n*superadmin — replydagi foydalanuvchini Super Admin qilish\n*unsuperadmin — replydagi Super Admin huquqini olish\n*superadmins — Super Ega va Super Adminlar ro‘yxati\n\nSuper Admin bot boshqaruvida Super Ega vakolatlariga ega. Super Admin qo‘shish/olish esa faqat Super Ega uchun.",
+      "superadmins":"👑 SUPER BOSHQARUV\n\n*superadmin — replydagi foydalanuvchini Super Admin qilish\n*unsuperadmin — replydagi Super Admin huquqini olish\n*superadmins — Super Ega va Super Adminlar ro‘yxati\n*ai.p — replydagi foydalanuvchiga 100 ⭐ evaziga 30 kun AI Premium berish\n\nSuper Admin bot boshqaruvida Super Ega vakolatlariga ega. Super Admin qo‘shish/olish esa faqat Super Ega uchun.",
       "moderation":"👥 MODERATSIYA\n\nReply orqali: *warn, *unwarn, *warns, *clearwarns, *mute, *unmute, *kick, *ban, *unban, *del",
       "security":"🔐 HIMOYA\n\n*links on/off\n*blacklist <so‘z> / *unblacklist <so‘z> / *blacklists\n*lock <turi> / *unlock <turi> / *locks\n*antiflood on/off\n*flood 5\n*report / *reports on/off",
       "filters":"💬 FILTER VA NOTES\n\n*filter <kalit> <javob> / *filters / *stop <kalit> / *stopall\n*save <nom> <matn> / *get <nom> / *notes / *clear <nom>",
@@ -1149,6 +1147,47 @@ async def superadmin_command ( update,ctx,cmd ) :
     audit ( actor.id,update.effective_chat.id,"superadmin_remove",str ( target.id ) )
     return await msg.reply_text ( f"✅ {target.full_name} Super Adminlikdan olindi.\n🆔 {target.id}" )
 
+async def ai_premium_gift_command ( update, ctx ) :
+    msg = update.effective_message
+    actor = update.effective_user
+    if not actor:
+        return
+    ensure_user ( actor)
+    t = replied ( update)
+    if not t or not t.from_user:
+        return await msg.reply_text ( "↩️ AI Premium oluvchining xabariga reply qilib *ai.p yozing.")
+    target = t.from_user
+    if target.is_bot:
+        return await msg.reply_text ( "❌ Botga AI Premium sovg‘a qilib bo‘lmaydi.")
+    if target.id == actor.id:
+        return await msg.reply_text ( "❌ *ai.p boshqa foydalanuvchiga sovg‘a qilish uchun. O‘zingizga AI Premiumni 🤖 Veritas AI menyusidan yoqing.")
+    ensure_user ( target)
+    # Super boshqaruv AI'dan allaqachon cheksiz foydalanadi.
+    if is_super ( target.id ) :
+        return await msg.reply_text ( f"👑 {target.full_name} uchun AI allaqachon cheksiz faol.")
+    ts = now ( )
+    with db ( ) as c:
+        r = c.execute ( "SELECT wallet FROM users WHERE user_id=?", (actor.id, )  ) .fetchone ( )
+        bal = int ( r["wallet"]) if r else 0
+        if bal < AI_PRIVATE_PRICE:
+            return await msg.reply_text ( f"❌ Kredit yetarli emas. Kerak: {AI_PRIVATE_PRICE} ⭐\nBalans: {bal} ⭐")
+        old = c.execute ( "SELECT paid_until FROM ai_user_subscriptions WHERE user_id=?", (target.id, )  ) .fetchone ( )
+        old_until = int ( old["paid_until"]) if old else 0
+        until = max ( ts, old_until) + AI_PRIVATE_DAYS * 86400
+        c.execute ( "UPDATE users SET wallet=wallet-? WHERE user_id=?", (AI_PRIVATE_PRICE, actor.id ) )
+        c.execute ( "INSERT INTO tx ( user_id,kind,amount,target_id,ref,created_at,meta) VALUES ( ?,?,?,?,?,?,? ) ",
+                  (actor.id, "ai_private_gift_30d", -AI_PRIVATE_PRICE, target.id, None, ts, json.dumps ( {"days": AI_PRIVATE_DAYS}, ensure_ascii=False )  ) )
+        c.execute ( "INSERT INTO ai_user_subscriptions ( user_id,paid_until,updated_at) VALUES ( ?,?,?) "
+                  "ON CONFLICT ( user_id) DO UPDATE SET paid_until=excluded.paid_until,updated_at=excluded.updated_at",
+                  (target.id, until, ts ) )
+    audit ( actor.id, update.effective_chat.id, "ai_private_gift", f"target={target.id},days={AI_PRIVATE_DAYS}")
+    return await msg.reply_text(
+        f"🎁 {target.full_name}ga Veritas AI Premium berildi.\n"
+        f"💎 {AI_PRIVATE_PRICE} ⭐ yechildi\n"
+        f"📅 {AI_PRIVATE_DAYS} kun — {fmt_until ( until ) } gacha\n"
+        f"⭐ Qolgan balans: {wallet ( actor.id ) } ⭐"
+    )
+
 async def star_text_router ( update,ctx ) :
     msg=update.effective_message
     if not msg or not msg.text or not msg.text.startswith ( "*" ) : return
@@ -1171,6 +1210,8 @@ async def star_text_router ( update,ctx ) :
         return await stars_cmd ( update,ctx,args)
     if cmd=="post":
         return await broadcast_command ( update,ctx,args)
+    if cmd=="ai.p":
+        return await ai_premium_gift_command ( update,ctx)
     if cmd in {"superadmin","unsuperadmin","superadmins"}:
         return await superadmin_command ( update,ctx,cmd)
     if cmd in {"ad.book","unad.book","bookadmins","ad.hadis","unad.hadis","hadisadmins"}:
@@ -1807,12 +1848,7 @@ def _translation_wait_seconds ( uid ) :
     return max ( 0, last + 86400 - now (  ) ) if last else 0
 
 def _translation_running ( uid ) :
-    return bool ( one ( "SELECT 1 FROM ai_book_translations WHERE user_id=? AND status IN ('queued','running') LIMIT 1", (uid, )  ) )
-
-def _translation_queue_position ( job_id ) :
-    r=one ( """SELECT COUNT ( *) AS n FROM ai_book_translations
-             WHERE status='queued' AND id<=?""", (job_id, ) )
-    return int ( r["n"] or 1) if r else 1
+    return bool ( one ( "SELECT 1 FROM ai_book_translations WHERE user_id=? AND status='running' LIMIT 1", (uid, )  ) )
 
 def _translate_text_sync ( text, target_lang, title, part_no, total_parts ) :
     names={"uz":"O‘zbekcha","ru":"Ruscha","en":"English"}; lang=names.get ( target_lang,target_lang)
@@ -1879,126 +1915,37 @@ def _translate_pdf_path_sync ( path,out_path,title,target_lang ) :
     _write_translation_pdf_sync ( out_path,title,target_lang,translated)
     return len ( chunks)
 
-async def _translation_worker ( ctx,job_id,uid,bid,target_lang ) :
-    """Heavy PDF work runs outside the callback handler and is concurrency-limited."""
-    names={"uz":"🇺🇿 O‘zbekcha","ru":"🇷🇺 Ruscha","en":"🇬🇧 English"}
-    r=one ( "SELECT title,pdf_file_id FROM library_books WHERE id=? AND status='approved'", ( bid, ) )
-    if not r or not r["pdf_file_id"]:
-        execute ( "UPDATE ai_book_translations SET status='failed' WHERE id=?", ( job_id, ) )
-        return await ctx.bot.send_message ( uid,"❌ Kitob PDF’i topilmadi.")
-
-    src=f"/tmp/veritas_translate_{bid}_{uid}_{job_id}.pdf"
-    out=f"/tmp/veritas_translated_{bid}_{uid}_{job_id}_{target_lang}.pdf"
-
-    try:
-        async with TRANSLATION_SEMAPHORE:
-            execute ( "UPDATE ai_book_translations SET status='running',started_at=? WHERE id=?", ( now (  ) ,job_id ) )
-            await ctx.bot.send_message(
-                uid,
-                f"🌐 Tarjima boshlandi.\n📖 {r['title']}\n➡️ {names[target_lang]}\n\n"
-                "Veritasning boshqa xizmatlaridan foydalanishda davom etishingiz mumkin."
-            )
-
-            try:
-                tgfile=await ctx.bot.get_file ( r["pdf_file_id"])
-                await tgfile.download_to_drive ( custom_path=src)
-            except TelegramError as e:
-                if "File is too big" not in str ( e ) :
-                    raise
-                await _download_large_telegram_file ( ctx,r["pdf_file_id"],src)
-
-            # PDF extraction + OpenAI translation + PDF generation are blocking work:
-            # keep all of it off the Telegram event loop.
-            parts=await asyncio.to_thread(
-                _translate_pdf_path_sync,src,out,r["title"],target_lang
-            )
-
-            # Daily limit is consumed only after the finished PDF exists.
-            execute(
-                "UPDATE ai_book_translations SET status='done',completed_at=? WHERE id=?",
-                (now (  ) ,job_id)
-            )
-            with open ( out,"rb") as fh:
-                await ctx.bot.send_document(
-                    uid,
-                    document=fh,
-                    filename=f"translated_{bid}_{target_lang}.pdf",
-                    caption=(
-                        f"✅ AI tarjima tayyor\n📖 {r['title']}\n"
-                        f"🌐 {names[target_lang]}\n🧩 {parts} qism.\n\n"
-                        "Keyingi kitob: 24 soatdan keyin."
-                    )
-                )
-    except Exception as e:
-        log.exception ( "Book translation error: %s",e)
-        execute ( "UPDATE ai_book_translations SET status='failed' WHERE id=?", ( job_id, ) )
-        msg="⚠️ Tarjima tugamadi. Kunlik limitingiz sarflanmadi."
-        if "SCAN_TRANSLATION_NOT_READY" in str ( e ) :
-            msg= ( "⚠️ Bu PDF skaner/rasm ko‘rinishida. Hozirgi bosqich matnli "
-                 "PDFlarni tarjima qiladi. Kunlik limitingiz sarflanmadi.")
-        try:
-            await ctx.bot.send_message ( uid,msg)
-        except Exception:
-            pass
-    finally:
-        Path ( src ) .unlink ( missing_ok=True)
-        Path ( out ) .unlink ( missing_ok=True)
-
-
-def _translation_task_done ( task ) :
-    TRANSLATION_TASKS.discard ( task)
-    try:
-        task.result ( )
-    except asyncio.CancelledError:
-        pass
-    except Exception:
-        log.exception ( "Background translation task failed")
-
-
 async def _run_book_translation ( q,ctx,bid,target_lang ) :
     u=q.from_user
-    if not ai_user_active ( u.id ) :
-        return await q.answer ( "🔒 AI Premium kerak: 100 ⭐ / 30 kun",show_alert=True)
-    if _translation_running ( u.id ) :
-        return await q.answer ( "⏳ Sizda tarjima navbatda yoki davom etmoqda.",show_alert=True)
+    if not ai_user_active ( u.id ) : return await q.answer ( "🔒 AI Premium kerak: 100 ⭐ / 30 kun",show_alert=True)
+    if _translation_running ( u.id ) : return await q.answer ( "⏳ Sizda boshqa tarjima davom etmoqda.",show_alert=True)
     wait=_translation_wait_seconds ( u.id)
-    if wait>0:
-        return await q.answer(
-            f"⏳ Kunlik limit ishlatilgan. Taxminan { ( wait+3599 ) //3600} soat qoldi.",
-            show_alert=True
-        )
-    if target_lang not in {"uz","ru","en"}:
-        return await q.answer ( "Til noto‘g‘ri",show_alert=True)
-
+    if wait>0: return await q.answer ( f"⏳ Kunlik limit ishlatilgan. Taxminan { ( wait+3599 ) //3600} soat qoldi.",show_alert=True)
+    if target_lang not in {"uz","ru","en"}: return await q.answer ( "Til noto‘g‘ri",show_alert=True)
     r=one ( "SELECT title,pdf_file_id FROM library_books WHERE id=? AND status='approved'", ( bid, ) )
-    if not r or not r["pdf_file_id"]:
-        return await q.answer ( "PDF mavjud emas",show_alert=True)
-
-    with db ( ) as c:
-        cur=c.execute(
-            """INSERT INTO ai_book_translations
-               (user_id,book_id,target_lang,status,started_at)
-               VALUES ( ?,?,?,?,? ) """,
-            (u.id,bid,target_lang,"queued",now (  ) )
-        )
-        job_id=cur.lastrowid
-
+    if not r or not r["pdf_file_id"]: return await q.answer ( "PDF mavjud emas",show_alert=True)
+    cur=execute ( "INSERT INTO ai_book_translations ( user_id,book_id,target_lang,status,started_at) VALUES ( ?,?,?,?,? ) ", ( u.id,bid,target_lang,"running",now (  )  )  ) ; job_id=cur.lastrowid
     names={"uz":"🇺🇿 O‘zbekcha","ru":"🇷🇺 Ruscha","en":"🇬🇧 English"}
-    pos=_translation_queue_position ( job_id)
-
-    await quiz_replace_message(
-        q,ctx,
-        f"🌐 AI TARJIMA NAVBATGA QO‘SHILDI\n\n"
-        f"📖 {r['title']}\n➡️ {names[target_lang]}\n"
-        f"👥 Navbatdagi o‘rningiz: {pos}\n\n"
-        "Botning boshqa xizmatlaridan foydalanishda davom etishingiz mumkin."
-    )
-
-    # Critical: do NOT await the long translation here.
-    task=asyncio.create_task ( _translation_worker ( ctx,job_id,u.id,bid,target_lang ) )
-    TRANSLATION_TASKS.add ( task)
-    task.add_done_callback ( _translation_task_done)
-    return
+    await quiz_replace_message ( q,ctx,f"🌐 AI TARJIMA\n\n📖 {r['title']}\n➡️ {names[target_lang]}\n\nTarjima qilinmoqda. Katta kitob vaqt olishi mumkin...")
+    src=f"/tmp/veritas_translate_{bid}_{u.id}.pdf"; out=f"/tmp/veritas_translated_{bid}_{u.id}_{target_lang}.pdf"
+    try:
+        async with TRANSLATION_SEMAPHORE:
+            try:
+                tgfile=await ctx.bot.get_file ( r["pdf_file_id"] ) ; await tgfile.download_to_drive ( custom_path=src)
+            except TelegramError as e:
+                if "File is too big" not in str ( e ) : raise
+                await _download_large_telegram_file ( ctx,r["pdf_file_id"],src)
+            parts=await asyncio.to_thread ( _translate_pdf_path_sync,src,out,r["title"],target_lang)
+        execute ( "UPDATE ai_book_translations SET status='done',completed_at=? WHERE id=?", ( now (  ) ,job_id ) )
+        with open ( out,"rb") as fh:
+            await ctx.bot.send_document ( u.id,document=fh,filename=f"translated_{bid}_{target_lang}.pdf",caption=f"✅ AI tarjima tayyor\n📖 {r['title']}\n🌐 {names[target_lang]}\n🧩 {parts} qism.\n\nKeyingi kitob: 24 soatdan keyin.")
+    except Exception as e:
+        log.exception ( "Book translation error: %s",e ) ; execute ( "UPDATE ai_book_translations SET status='failed' WHERE id=?", ( job_id, ) )
+        msg="⚠️ Tarjima tugamadi. Kunlik limitingiz sarflanmadi."
+        if "SCAN_TRANSLATION_NOT_READY" in str ( e ) : msg="⚠️ Bu PDF skaner/rasm ko‘rinishida. Hozirgi bosqich matnli PDFlarni tarjima qiladi. Kunlik limitingiz sarflanmadi."
+        await ctx.bot.send_message ( u.id,msg)
+    finally:
+        Path ( src ) .unlink ( missing_ok=True ) ; Path ( out ) .unlink ( missing_ok=True)
 
 
 async def group_ai_reply ( update,ctx ) :
