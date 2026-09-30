@@ -413,7 +413,15 @@ async def library_private_input ( update,ctx ) :
         value=msg.text.strip ( )
         if mode=="rebus_channel":
             try:
-                target=int ( value) if re.fullmatch ( r"-?\d+",value) else value
+                raw=value.strip ( )
+                # t.me/kanal_nomi, https://t.me/kanal_nomi yoki @kanal_nomi qabul qilinadi.
+                m=re.fullmatch ( r" ( ?:https?:// ) ? ( ?:www\. ) ?t\.me/ ( [A-Za-z0-9_]{5,} )  ( ?:/ ) ? ( ?:\?.* ) ?",raw,re.I)
+                if m:
+                    target="@"+m.group ( 1)
+                elif re.fullmatch ( r"-?\d+",raw ) :
+                    target=int ( raw)
+                else:
+                    target=raw if raw.startswith ( "@") else "@"+raw.lstrip ( "@")
                 ch=await ctx.bot.get_chat ( target)
                 if ch.type!="channel":
                     return await msg.reply_text ( "❌ Bu kanal emas. Kanal @username yoki -100... ID yuboring.")
@@ -442,7 +450,7 @@ async def library_private_input ( update,ctx ) :
                     "Javob tekshiriladigan guruhning @username yoki -100... ID sini yuboring."
                 )
             except TelegramError:
-                return await msg.reply_text ( "❌ Kanal topilmadi yoki bot kanal ma’lumotini o‘qiy olmadi.")
+                return await msg.reply_text ( "❌ Kanal topilmadi. Kanal linkini tekshiring va Veritas botni kanalga admin qiling.")
         if mode=="rebus_group":
             try:
                 target=int ( value) if re.fullmatch ( r"-?\d+",value) else value
@@ -2310,7 +2318,8 @@ async def callback ( update,ctx ) :
         return await q.edit_message_text(
             "🧩 AI REBUS\n\n"
             "Rebus qaysi kanalga joylansin?\n\n"
-            "Kanalning @username sini yoki -100... ID sini yuboring.\n"
+            "Kanal linkini yuboring.\n"
+            "Masalan: https://t.me/kitob_sahifasi1\n\n"
             "⚠️ Veritas bot o‘sha kanalda admin bo‘lishi kerak.",
             reply_markup=back_markup ( "home")
         )
