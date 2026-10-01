@@ -55,7 +55,7 @@ PREMIUM = {3:1000, 6:1500, 12:2500}
 TOPUPS = (25,50,100,250,500,1000,2500)
 AI_PRIVATE_PRICE = 100
 AI_PRIVATE_DAYS = 30
-AI_GROUP_PLANS = {7:250, 30:500}
+AI_GROUP_PLANS = {7:100}
 AI_RATE_CACHE = {}
 TRANSLATION_SEMAPHORE = asyncio.Semaphore ( 2)
 FLOOD_CACHE = {}
@@ -95,6 +95,11 @@ def init_db (  ) :
       daily INTEGER DEFAULT 0,weekly INTEGER DEFAULT 0,last_day TEXT,last_week TEXT,
       title TEXT DEFAULT '', PRIMARY KEY ( chat_id,user_id )  ) ;
     CREATE TABLE IF NOT EXISTS vadmins ( chat_id INTEGER,user_id INTEGER,PRIMARY KEY ( chat_id,user_id )  ) ;
+    CREATE TABLE IF NOT EXISTS group_message_history(
+      chat_id INTEGER NOT NULL,user_id INTEGER NOT NULL,message_id INTEGER NOT NULL,
+      created_at INTEGER NOT NULL,PRIMARY KEY ( chat_id,message_id) ) ;
+    CREATE INDEX IF NOT EXISTS idx_group_message_history_user
+      ON group_message_history ( chat_id,user_id,message_id ) ;
     CREATE TABLE IF NOT EXISTS approved ( chat_id INTEGER,user_id INTEGER,PRIMARY KEY ( chat_id,user_id )  ) ;
     CREATE TABLE IF NOT EXISTS warns ( chat_id INTEGER,user_id INTEGER,count INTEGER DEFAULT 0,PRIMARY KEY ( chat_id,user_id )  ) ;
     CREATE TABLE IF NOT EXISTS blacklist ( chat_id INTEGER,word TEXT,PRIMARY KEY ( chat_id,word )  ) ;
@@ -327,7 +332,7 @@ def ai_rate_ok ( scope_id,uid,seconds=5 ) :
 
 def ai_group_menu ( chat_id,uid ) :
     kb=[
-      [InlineKeyboardButton ( "⭐ 250 — 7 kun",callback_data=f"aigbuy:{chat_id}:7" ) ,InlineKeyboardButton ( "⭐ 500 — 30 kun",callback_data=f"aigbuy:{chat_id}:30" ) ]
+      [InlineKeyboardButton ( "⭐ 100 — 7 kun",callback_data=f"aigbuy:{chat_id}:7" ) ]
     ]
     if is_super ( uid ):
         kb += [
@@ -1390,7 +1395,7 @@ async def star_text_router ( update,ctx ) :
             return await msg.reply_text ( "🤖 Shaxsiy Veritas AI uchun bosh menyudagi «Veritas AI» tugmasidan foydalaning." )
         until=ai_group_until ( update.effective_chat.id )
         status=( "✅ FAOL\n📅 "+fmt_until ( until ) ) if until>now ( ) else "❌ FAOL EMAS"
-        return await msg.reply_text ( f"🤖 VERITAS AI — GURUH\n\n{status}\n\n250 ⭐ — 7 kun\n500 ⭐ — 30 kun",reply_markup=ai_group_menu ( update.effective_chat.id,update.effective_user.id ) )
+        return await msg.reply_text ( f"🤖 VERITAS AI — GURUH\n\n{status}\n\n100 ⭐ — 7 kun",reply_markup=ai_group_menu ( update.effective_chat.id,update.effective_user.id ) )
     if update.effective_chat.type not in ("group","supergroup" ) :
         return await msg.reply_text ( "Bu buyruq guruh uchun.")
     if cmd in {"warn","unwarn","clearwarns","mute","unmute","kick","ban","unban","del","ruxsat","ruxsatsiz","admin","unadmin","approve","unapprove"}:
@@ -1679,7 +1684,7 @@ def _openai_response_sync ( prompt ) :
             "Veritasni yaratgan Super Egalar: Sakranum (Telegram ID 5859289233) va Vasatiya (Telegram ID 7056675943 ) . Kim yaratgan, egasi yoki Super Egalari kim deb so‘ralsa shu ikki nomni ayting. "
             "Telegram ID 5859289233 dan yozayotgan odamni Sakranum, 7056675943 dan yozayotgan odamni Vasatiya deb taning. Super Adminlar ham global boshqaruv vakolatiga ega, ammo Super Admin tayinlash/olish faqat Super Egalarga tegishli. "
             "Veritas — Telegram uchun guruh boshqaruvi va AI yordamchi bot. Shaxsiy Veritas AI Premium 100 Stars va 30 kun ishlaydi. "
-            "Guruh Veritas AI obunasi 250 Stars/7 kun yoki 500 Stars/30 kun. Super Ega guruh AI sini bepul 1, 7 yoki 30 kunga yoqa oladi. "
+            "Guruh Veritas AI obunasi 100 Stars/7 kun. Super Ega guruh AI sini bepul 1, 7 yoki 30 kunga yoqa oladi. "
             "Shaxsiy AI Premium va guruh AI obunasi alohida. Veritasda Vasatiya kutubxonasi bor: PDF/audio kitoblar, qidiruv, kategoriya, tillar, sevimlilar va kitob tahriri. "
             "Kutubxonadagi PDF kitobdan AI yordamida 5, 10 yoki 20 ta Telegram Quiz testi tuzib, foydalanuvchi admin bo‘lgan Veritas guruhiga yuborish mumkin. "
             "Veritasda Sahih Hadislar bo‘limi, hadis qidirish/random hadis va hadis adminlari mavjud. Guruh boshqaruvida warn, mute, kick, ban, blacklist, links, lock, antiflood, report, welcome/goodbye, filter, notes, rules, faollik va TOP funksiyalari bor. "
@@ -2358,6 +2363,21 @@ async def _run_book_translation ( q,ctx,bid,target_lang ) :
         Path ( src ) .unlink ( missing_ok=True ) ; Path ( out ) .unlink ( missing_ok=True)
 
 
+def ai_cabinet_name_context ( uid ) :
+    r=one ( "SELECT first_name,username FROM users WHERE user_id=?", ( uid, ) )
+    if not r:
+        return ""
+    nick= ( r["first_name"] or "" ) .strip ( )
+    if not nick and r["username"]:
+        nick="@"+r["username"]
+    if not nick:
+        return ""
+    return (
+        f"\n\nVERITAS KABINET KONTEKSTI: Bu foydalanuvchining kabinetdagi niki/ismi: {nick}. "
+        f"Suhbatda uni tabiiy ravishda {nick} deb taning va kerak bo‘lganda shu nom bilan murojaat qiling. "
+        "Boshqa foydalanuvchining nomi bilan adashtirmang."
+    )
+
 async def group_ai_reply ( update,ctx ) :
     msg=update.effective_message; chat=update.effective_chat; u=update.effective_user
     if not msg or not u or chat.type not in ("group","supergroup") : return False
@@ -2367,7 +2387,7 @@ async def group_ai_reply ( update,ctx ) :
     question=msg.text.strip ( )
     if not question or question.startswith ( "*" ) : return False
     if not ai_group_active ( chat.id ) :
-        await msg.reply_text ( "🔒 Bu guruhda Veritas AI obunasi faol emas.\n\n*ai yozib tariflarni oching: 250 ⭐ / 7 kun yoki 500 ⭐ / 30 kun." )
+        await msg.reply_text ( "🔒 Bu guruhda Veritas AI obunasi faol emas.\n\n*ai yozib tariflarni oching: 100 ⭐ / 7 kun." )
         return True
     if not ai_rate_ok ( chat.id,u.id,5 ) :
         await msg.reply_text ( "⏳ Juda tez so‘rov yuborildi. 5 soniyadan keyin qayta yozing." )
@@ -2378,7 +2398,7 @@ async def group_ai_reply ( update,ctx ) :
     try:
         await ctx.bot.send_chat_action ( chat.id,"typing")
         previous= ( replied_msg.text or replied_msg.caption or "" ) .strip ( )
-        prompt= ( f"Oldingi Veritas xabari:\n{previous[:2500]}\n\n" if previous else "") + f"Foydalanuvchi savoli:\n{question[:4000]}" + ai_actor_context ( u )
+        prompt= ( f"Oldingi Veritas xabari:\n{previous[:2500]}\n\n" if previous else "") + f"Foydalanuvchi savoli:\n{question[:4000]}" + ai_actor_context ( u ) + ai_cabinet_name_context ( u.id)
         answer=await asyncio.to_thread ( _openai_response_sync,prompt)
         if not answer: answer="Hozir javob hosil bo‘lmadi. Qayta urinib ko‘ring."
         for i in range ( 0,len ( answer ) ,4000 ) : await msg.reply_text ( answer[i:i+4000])
@@ -2419,8 +2439,47 @@ async def private_ai_reply ( update,ctx ) :
         log.exception ( "Private Veritas AI error" )
         await msg.reply_text ( "⚠️ Veritas AI hozir javob bera olmadi." )
 
+async def vse_self_clean ( update,ctx ) :
+    msg=update.effective_message; u=update.effective_user; chat=update.effective_chat
+    if not msg or not u or chat.type not in ("group","supergroup" ) :
+        return False
+    if (msg.text or "" ) .strip (  ) .lower (  ) !="*vse":
+        return False
+    # Buyruq faqat Veritasning xabariga reply qilinganda ishlaydi.
+    if not msg.reply_to_message or not msg.reply_to_message.from_user or msg.reply_to_message.from_user.id!=ctx.bot.id:
+        return False
+
+    rows=all_(
+        "SELECT message_id FROM group_message_history WHERE chat_id=? AND user_id=? ORDER BY message_id DESC",
+        (chat.id,u.id)
+    )
+    deleted=0
+    # *vse xabarining o‘zini ham o‘chirishga harakat qilamiz.
+    ids=[msg.message_id]+[int ( r["message_id"]) for r in rows if int ( r["message_id"] ) !=msg.message_id]
+    for mid in ids:
+        try:
+            await ctx.bot.delete_message ( chat.id,mid)
+            deleted+=1
+        except TelegramError:
+            pass
+    execute ( "DELETE FROM group_message_history WHERE chat_id=? AND user_id=?", ( chat.id,u.id ) )
+    try:
+        notice=await ctx.bot.send_message ( chat.id,f"🧹 {u.first_name}: {deleted} ta saqlangan xabar o‘chirildi.")
+        # Qisqa xizmat xabari guruhda qoladi; job-queue bo‘lmasa ham asosiy funksiya buzilmaydi.
+    except TelegramError:
+        pass
+    return True
+
 async def passive ( update,ctx ) :
     msg=update.effective_message; u=update.effective_user; chat=update.effective_chat
+    if msg and u and not u.is_bot and chat and chat.type in ("group","supergroup" ) :
+        try:
+            execute(
+                "INSERT OR IGNORE INTO group_message_history ( chat_id,user_id,message_id,created_at) VALUES ( ?,?,?,? ) ",
+                (chat.id,u.id,msg.message_id,now (  ) )
+            )
+        except Exception:
+            log.exception ( "group message history save failed")
     if not msg or not u or chat.type not in ("group","supergroup" ) : return
     ensure_user ( u ) ; ensure_group ( chat)
     day=datetime.now ( timezone.utc ) .strftime ( "%Y-%m-%d" ) ; week=datetime.now ( timezone.utc ) .strftime ( "%G-%V")
@@ -2431,6 +2490,8 @@ async def passive ( update,ctx ) :
         else:
             daily= ( r["daily"] if r["last_day"]==day else 0 ) +1; weekly= ( r["weekly"] if r["last_week"]==week else 0 ) +1
             c.execute ( "UPDATE members SET xp=xp+1,messages=messages+1,daily=?,weekly=?,last_day=?,last_week=? WHERE chat_id=? AND user_id=?", ( daily,weekly,day,week,chat.id,u.id ) )
+    # *vse avval tekshiriladi; aks holda Group AI uni oddiy savol deb olishi mumkin.
+    if await vse_self_clean ( update,ctx ) : return
     if await _check_rebus_answer ( update,ctx ) : return
     if await _start_group_rebus_flow ( update,ctx ) : return
     if await group_ai_reply ( update,ctx ) : return
