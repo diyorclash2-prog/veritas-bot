@@ -121,6 +121,12 @@ def init_db (  ) :
       user_id INTEGER PRIMARY KEY, claimed_at INTEGER NOT NULL ) ;
     CREATE TABLE IF NOT EXISTS ai_group_trials(
       chat_id INTEGER PRIMARY KEY, claimed_at INTEGER NOT NULL, claimed_by INTEGER DEFAULT 0 ) ;
+    CREATE TABLE IF NOT EXISTS profile_likes(
+      target_user_id INTEGER NOT NULL,
+      voter_user_id INTEGER NOT NULL,
+      created_at INTEGER NOT NULL,
+      PRIMARY KEY ( target_user_id,voter_user_id) ) ;
+    CREATE INDEX IF NOT EXISTS idx_profile_likes_target ON profile_likes ( target_user_id ) ;
     CREATE TABLE IF NOT EXISTS ai_book_translations(
       id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER NOT NULL, book_id INTEGER NOT NULL,
       target_lang TEXT NOT NULL, status TEXT DEFAULT 'running', started_at INTEGER NOT NULL,
@@ -278,6 +284,7 @@ def main_menu_markup ( uid ) :
       [InlineKeyboardButton ( "🎁 Gift",callback_data="gifts" ) ,InlineKeyboardButton ( "💎 Premium",callback_data="premium" ) ],
       [InlineKeyboardButton ( "🏘 Guruhlarim",callback_data="mygroups" ) ],
       [InlineKeyboardButton ( "🌐 Global aktiv",callback_data="globalactive" ) ],
+      [InlineKeyboardButton ( "🔎 A’zoni topish",callback_data="profilefind" ) ],
       [InlineKeyboardButton ( "🤖 Veritas AI",callback_data="ai_private" ) ],
       [InlineKeyboardButton ( "🧩 AI Rebus",callback_data="rebus:start" ) ],
       [InlineKeyboardButton ( "📚 Vasatiya kutubxonasi",callback_data="library" ) ,InlineKeyboardButton ( "📜 Sahih Hadislar",callback_data="hadith" ) ],
@@ -358,6 +365,72 @@ def global_profile_text ( u ) :
         f"🏅 Ilm medali: {knowledge_medal ( books,hadiths )}\n\n"
         f"🤖 AI Premium: {ai_status}"
     )
+
+
+def profile_like_count ( uid ) :
+    r=one ( "SELECT COUNT ( *) n FROM profile_likes WHERE target_user_id=?", ( uid, ) )
+    return int ( r["n"] if r else 0 )
+
+def profile_liked_by ( target_uid,voter_uid ) :
+    return bool ( one ( "SELECT 1 FROM profile_likes WHERE target_user_id=? AND voter_user_id=?", ( target_uid,voter_uid ) ) )
+
+def public_profile_text ( uid ) :
+    r=one ( "SELECT user_id,username,first_name FROM users WHERE user_id=?", ( uid, ) )
+    if not r: return None
+    xp,msgs=user_total_stats ( uid )
+    lvl=level ( xp )
+    books,hadiths=content_contributions ( uid )
+    ai_until=ai_user_until ( uid )
+    ai_status=( "👑 Cheksiz (Super boshqaruv ) " if is_super ( uid ) else ( "✅ FAOL — "+fmt_until ( ai_until ) if ai_until>now ( ) else "❌ YO‘Q" ) )
+    name=r["first_name"] or ( "@"+r["username"] if r["username"] else f"ID {uid}" )
+    username= ( " @"+r["username"]) if r["username"] else ""
+    return (
+        f"👤 {name}{username}\n"
+        f"🆔 {uid}\n"
+        f"🛡 Botdagi roli: {bot_roles ( uid )}\n"
+        f"⭐ Kredit: {wallet ( uid )}\n"
+        f"🤖 AI Premium: {ai_status}\n\n"
+        f"🌐 Umumiy XP: {xp}\n"
+        f"💬 Umumiy xabarlar: {msgs}\n"
+        f"📈 Level: {lvl}\n"
+        f"🔥 Aktivlik darajasi: {activity_degree ( lvl )}\n"
+        f"📚 Qo‘shgan kitoblari: {books} ta\n"
+        f"📜 Qo‘shgan hadislari: {hadiths} ta\n"
+        f"🏅 Ilm medali: {knowledge_medal ( books,hadiths )}\n"
+        f"❤️ Like: {profile_like_count ( uid )}"
+    )
+
+def public_profile_markup ( target_uid,viewer_uid ) :
+    liked=profile_liked_by ( target_uid,viewer_uid )
+    like_text="💔 Like ni olish" if liked else "❤️ Like"
+    kb=[]
+    if target_uid != viewer_uid:
+        kb.append ( [InlineKeyboardButton ( like_text,callback_data=f"plike:{target_uid}" )] )
+    kb.append ( [InlineKeyboardButton ( "🔎 Boshqa a’zoni topish",callback_data="profilefind" )] )
+    kb.append ( [InlineKeyboardButton ( "⬅️ Orqaga",callback_data="home" ),InlineKeyboardButton ( "🏠 Bosh menyu",callback_data="home" )] )
+    return InlineKeyboardMarkup ( kb )
+
+async def send_public_profile ( ctx,chat_id,target_uid,viewer_uid,old_message=None ) :
+    text=public_profile_text ( target_uid )
+    if not text:
+        if old_message:
+            return await old_message.reply_text ( "❌ A’zo topilmadi." )
+        return await ctx.bot.send_message ( chat_id,"❌ A’zo topilmadi." )
+    markup=public_profile_markup ( target_uid,viewer_uid )
+    photo_id=None
+    try:
+        photos=await ctx.bot.get_user_profile_photos ( target_uid,limit=1 )
+        if photos.total_count and photos.photos:
+            # Eng kichik profil rasmi varianti.
+            photo_id=photos.photos[0][0].file_id
+    except TelegramError:
+        photo_id=None
+    if old_message:
+        try: await old_message.delete ( )
+        except TelegramError: pass
+    if photo_id:
+        return await ctx.bot.send_photo ( chat_id,photo=photo_id,caption=text[:1024],reply_markup=markup )
+    return await ctx.bot.send_message ( chat_id,text,reply_markup=markup )
 
 def global_active_rows ( limit=10 ) :
     # Global TOP faqat haqiqiy foydalanuvchilar uchun.
@@ -551,6 +624,22 @@ async def library_private_input ( update,ctx ) :
     if update.effective_chat.type!="private": return
     uid=update.effective_user.id; st=STATE.get ( uid)
     if st: ctx.user_data["workflow_message_id"]=update.effective_message.message_id
+    if st and st.get ( "mode" )=="profile_find":
+        msg=update.effective_message
+        if not msg.text:
+            return await msg.reply_text ( "🔎 A’zoning @username yoki Telegram ID sini yozing." )
+        raw=msg.text.strip ( )
+        target_uid=0
+        if raw.isdigit ( ):
+            target_uid=int ( raw )
+        else:
+            username=raw.lstrip ( "@" ).strip ( ).casefold ( )
+            r=one ( "SELECT user_id FROM users WHERE lower ( username ) =? LIMIT 1", ( username, ) )
+            if r: target_uid=int ( r["user_id"] )
+        if not target_uid or not one ( "SELECT 1 FROM users WHERE user_id=?", ( target_uid, ) ):
+            return await msg.reply_text ( "❌ Bu a’zo Veritas bazasidan topilmadi. @username yoki IDni tekshiring." )
+        STATE.pop ( uid,None )
+        return await send_public_profile ( ctx,msg.chat.id,target_uid,uid )
     if st and str ( st.get ( "mode","" )  ) .startswith ( "had_" ) :
         return await hadith_private_input ( update,ctx)
     if st and str ( st.get ( "mode","" )  ) .startswith ( "rebus_" ) :
@@ -2715,7 +2804,33 @@ async def callback ( update,ctx ) :
         return await top10_result ( ctx.bot,chat_id,with_gifts,u.id)
 
     if d=="me":
-        return await q.edit_message_text ( global_profile_text ( u ),reply_markup=back_markup ( ) )
+        return await send_public_profile ( ctx,q.message.chat.id,u.id,u.id,q.message )
+
+    if d=="profilefind":
+        STATE[u.id]={"mode":"profile_find"}
+        try:
+            if q.message.photo or q.message.video or q.message.document or q.message.audio or q.message.animation:
+                await q.message.delete ( )
+                return await ctx.bot.send_message ( q.message.chat.id,"🔎 A’ZONI TOPISH\n\nA’zoning @username yoki Telegram ID sini yozing.\nMasalan: @username yoki 123456789",reply_markup=back_markup ( "home" ) )
+            return await q.edit_message_text ( "🔎 A’ZONI TOPISH\n\nA’zoning @username yoki Telegram ID sini yozing.\nMasalan: @username yoki 123456789",reply_markup=back_markup ( "home" ) )
+        except TelegramError:
+            return await ctx.bot.send_message ( q.message.chat.id,"🔎 A’ZONI TOPISH\n\nA’zoning @username yoki Telegram ID sini yozing." )
+
+    if d.startswith ( "plike:" ) :
+        target_uid=int ( d.split ( ":",1 )[1] )
+        if target_uid==u.id:
+            return await q.answer ( "O‘z profilingizga Like bosib bo‘lmaydi.",show_alert=True )
+        if not one ( "SELECT 1 FROM users WHERE user_id=?", ( target_uid, ) ):
+            return await q.answer ( "A’zo topilmadi.",show_alert=True )
+        if profile_liked_by ( target_uid,u.id ):
+            execute ( "DELETE FROM profile_likes WHERE target_user_id=? AND voter_user_id=?", ( target_uid,u.id ) )
+            notice="Like olib tashlandi."
+        else:
+            execute ( "INSERT OR IGNORE INTO profile_likes ( target_user_id,voter_user_id,created_at) VALUES ( ?,?,? ) ", ( target_uid,u.id,now ( ) ) )
+            notice="❤️ Like qo‘yildi."
+        await q.answer ( notice )
+        # Rasmli profilni yangi hisob bilan qayta chiqaramiz.
+        return await send_public_profile ( ctx,q.message.chat.id,target_uid,u.id,q.message )
 
     if d=="globalactive":
         return await q.edit_message_text ( global_active_text ( 10 ),reply_markup=back_markup ( ) )
