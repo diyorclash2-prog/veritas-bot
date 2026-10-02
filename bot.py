@@ -273,6 +273,7 @@ def main_menu_markup ( uid ) :
       [InlineKeyboardButton ( "👤 Profil",callback_data="me" ) ,InlineKeyboardButton ( "⭐ Hisob",callback_data="wallet" ) ],
       [InlineKeyboardButton ( "🎁 Gift",callback_data="gifts" ) ,InlineKeyboardButton ( "💎 Premium",callback_data="premium" ) ],
       [InlineKeyboardButton ( "🏘 Guruhlarim",callback_data="mygroups" ) ],
+      [InlineKeyboardButton ( "🌐 Global aktiv",callback_data="globalactive" ) ],
       [InlineKeyboardButton ( "🤖 Veritas AI",callback_data="ai_private" ) ],
       [InlineKeyboardButton ( "🧩 AI Rebus",callback_data="rebus:start" ) ],
       [InlineKeyboardButton ( "📚 Vasatiya kutubxonasi",callback_data="library" ) ,InlineKeyboardButton ( "📜 Sahih Hadislar",callback_data="hadith" ) ],
@@ -294,8 +295,83 @@ def super_menu_markup (  ) :
     ])
 
 def user_total_stats ( uid ) :
+    # GLOBAL: foydalanuvchining Veritas ishlayotgan barcha guruhlaridagi natija jamlanadi.
     r=one ( "SELECT COALESCE ( SUM ( xp ) ,0) xp,COALESCE ( SUM ( messages ) ,0) messages FROM members WHERE user_id=?", ( uid, ) )
     return (int ( r["xp"] ) ,int ( r["messages"] ) ) if r else (0,0)
+
+def activity_degree ( lvl ) :
+    if lvl >= 251: return "🦅 Afsona"
+    if lvl >= 151: return "⚜️ Ustoz darajasi"
+    if lvl >= 101: return "🌟 Veritas faxri"
+    if lvl >= 76: return "👑 Elita a’zo"
+    if lvl >= 51: return "🏆 Faollar sardori"
+    if lvl >= 31: return "💎 Yuksak faol"
+    if lvl >= 21: return "🔥 Super Aktiv"
+    if lvl >= 11: return "✨ Ilmga intiluvchi"
+    if lvl >= 6: return "📖 Faol a’zo"
+    return "🌱 Ilm izlovchi"
+
+def content_contributions ( uid ) :
+    b=one ( "SELECT COUNT ( *) n FROM library_books WHERE added_by=? AND status='approved'", ( uid, ) )
+    h=one ( "SELECT COUNT ( *) n FROM hadiths WHERE added_by=? AND status='approved'", ( uid, ) )
+    return int ( b["n"] if b else 0 ),int ( h["n"] if h else 0 )
+
+def knowledge_medal ( books,hadiths ) :
+    total=int ( books ) +int ( hadiths )
+    if total >=100: return "🏆 Ilm fidoyisi"
+    if total >=50: return "🌟 Ilm elchisi"
+    if total >=20: return "🏅 Ilm tarqatuvchi"
+    if total >=1: return "📚 Ilm xizmatida"
+    return "—"
+
+def bot_roles ( uid ) :
+    roles=[]
+    if uid in SUPER_OWNERS: roles.append ( "👑 Super Ega" )
+    elif is_super_admin ( uid ): roles.append ( "🛡 Super Admin" )
+    if one ( "SELECT 1 FROM library_admins WHERE user_id=?", ( uid, ) ): roles.append ( "📚 Kutubxona admini" )
+    if one ( "SELECT 1 FROM hadith_admins WHERE user_id=?", ( uid, ) ): roles.append ( "📜 Hadis admini" )
+    vg=one ( "SELECT COUNT ( *) n FROM vadmins WHERE user_id=?", ( uid, ) )
+    if vg and int ( vg["n"] ) >0: roles.append ( f"🛡 Veritas admini ({int ( vg['n'] )} guruh ) " )
+    return ", ".join ( roles ) if roles else "A’zo"
+
+def global_profile_text ( u ) :
+    xp,msgs=user_total_stats ( u.id )
+    lvl=level ( xp )
+    books,hadiths=content_contributions ( u.id )
+    ai_until=ai_user_until ( u.id )
+    ai_status=( "👑 Cheksiz (Super boshqaruv ) " if is_super ( u.id ) else ( "✅ FAOL — "+fmt_until ( ai_until ) if ai_until>now ( ) else "❌ YO‘Q" ) )
+    return (
+        f"👤 {u.full_name}\n"
+        f"🆔 {u.id}\n"
+        f"🛡 Botdagi roli: {bot_roles ( u.id )}\n"
+        f"⭐ Kredit: {wallet ( u.id )}\n"
+        f"🌐 Umumiy XP: {xp}\n"
+        f"💬 Umumiy xabarlar: {msgs}\n"
+        f"📈 Level: {lvl}\n"
+        f"🔥 Aktivlik darajasi: {activity_degree ( lvl )}\n"
+        f"📚 Qo‘shgan kitoblari: {books} ta\n"
+        f"📜 Qo‘shgan hadislari: {hadiths} ta\n"
+        f"🏅 Ilm medali: {knowledge_medal ( books,hadiths )}\n\n"
+        f"🤖 AI Premium: {ai_status}"
+    )
+
+def global_active_rows ( limit=10 ) :
+    return all_ ( """SELECT m.user_id,SUM ( m.messages ) messages,SUM ( m.xp ) xp,
+                     COALESCE ( u.first_name,'' ) first_name,COALESCE ( u.username,'' ) username
+                     FROM members m LEFT JOIN users u ON u.user_id=m.user_id
+                     GROUP BY m.user_id
+                     ORDER BY messages DESC,xp DESC,m.user_id ASC LIMIT ?""", ( int ( limit ), ) )
+
+def global_active_text ( limit=10 ) :
+    rows=global_active_rows ( limit )
+    if not rows: return "🌐 VERITAS — GLOBAL AKTIV\n\nHozircha ma’lumot yo‘q."
+    lines=[]
+    medals=["🥇","🥈","🥉"]
+    for i,r in enumerate ( rows ) :
+        mark=medals[i] if i<3 else f"{i+1}."
+        lvl=level ( int ( r["xp"] or 0 ) )
+        lines.append ( f"{mark} {display_name_row ( r )} — {int ( r['messages'] or 0 )} xabar | LVL {lvl} {activity_degree ( lvl )}" )
+    return "🌐 VERITAS — GLOBAL AKTIV TOP 10\n\n"+"\n".join ( lines )+"\n\n📊 Veritas mavjud barcha guruhlardagi umumiy aktivlik."
 
 def fmt_until ( ts ) :
     if not ts: return "—"
@@ -957,7 +1033,7 @@ def help_menu_markup (  ) :
 
 def help_text ( section ) :
     data={
-      "main":"📌 ASOSIY\n\n*help — yordam markazi\n*id — Telegram ID va chat ID\n*men — profil va faollik\n*aktiv — faol a’zolar\n*top 10 — Super Ega TOP paneli\n*rules — guruh qoidalari\n*admins — adminlar\n*vse — Veritas xabariga reply qilib yozilsa, shu buyruqni yozgan a’zoning Veritas qayd etgan oldingi xabarlarini o‘chiradi\n*unvon <nom> / *unvonoff — unvon boshqaruvi",
+      "main":"📌 ASOSIY\n\n*help — yordam markazi\n*id — Telegram ID va chat ID\n*men — global profil, rol, ilm hissasi va faollik\n*ak — barcha guruhlar bo‘yicha Global TOP-10\n*aktiv — Global TOP-10\n*top 10 — Super Ega TOP paneli\n*rules — guruh qoidalari\n*admins — adminlar\n*vse — Veritas xabariga reply qilib yozilsa, shu buyruqni yozgan a’zoning Veritas qayd etgan oldingi xabarlarini o‘chiradi\n*unvon <nom> / *unvonoff — unvon boshqaruvi",
       "library":"📚 VASATIYA KUTUBXONASI\n\nMenyudan kitob qidirish, kategoriya, yangi kitoblar va sevimlilar ishlaydi.\n\n*ad.book — replydagi odamga kutubxona adminligi\n*unad.book — huquqni olish\n*bookadmins — kutubxona adminlari\n\nKitob admini kitob qo‘shishi, ✏️ Tahrirlash orqali nom, muallif, til, kategoriya, tavsif, muqova, PDF va audioni yangilashi mumkin.",
       "hadith":"📜 SAHIH HADISLAR\n\n*hadis — random hadis\n*hadis buxoriy 1 — aniq hadis\n*add.hadis — private chatda hadis qo‘shish\n*del.hadis buxoriy 1 — o‘chirish\n*ad.hadis / *unad.hadis — hadis admini huquqi\n*hadisadmins — hadis adminlari\n\nMavjud hadis topilsa uni ✏️ Tahrirlash mumkin.",
       "admins":"🛡 ADMINLAR\n\n*ruxsat / *ruxsatsiz — Veritas admini\n*admin / *unadmin — Telegram admini\n*approve / *unapprove / *approved — himoyalangan a’zolar\n*ad.book / *unad.book — kutubxona admini\n*ad.hadis / *unad.hadis — hadis admini",
@@ -1017,17 +1093,13 @@ async def paid ( update,ctx ) :
 async def show_me ( update,ctx ) :
     u=update.effective_user; ensure_user ( u)
     chat=update.effective_chat
+    txt=global_profile_text ( u )
     if chat.type in ("group","supergroup" ) :
-        ensure_group ( chat)
-        r=one ( "SELECT * FROM members WHERE chat_id=? AND user_id=?", ( chat.id,u.id ) )
-        xp=int ( r["xp"]) if r else 0; msgs=int ( r["messages"]) if r else 0; custom=r["title"] if r else ""
-        rank=one ( """SELECT 1+COUNT ( *) n FROM members WHERE chat_id=? AND messages>
-                   COALESCE (  ( SELECT messages FROM members WHERE chat_id=? AND user_id=? ) ,0 ) """, ( chat.id,chat.id,u.id )  ) ["n"]
-        txt=f"👤 {u.full_name}\n🆔 {u.id}\n🎖 {title_for ( u.id,custom ) }\n⭐ Kredit: {wallet ( u.id ) }\n📈 Level: {level ( xp ) } | XP: {xp}\n💬 Xabarlar: {msgs}\n🏆 Reyting: #{rank}"
-    else:
-        ai_until=ai_user_until ( u.id )
-        ai_status=( "👑 Cheksiz (Super boshqaruv ) " if is_super ( u.id ) else ( "✅ FAOL — "+fmt_until ( ai_until ) if ai_until>now ( ) else "❌ YO‘Q" ) )
-        txt=f"👤 {u.full_name}\n🆔 {u.id}\n🎖 {title_for ( u.id ) }\n⭐ Kredit: {wallet ( u.id ) }\n🤖 AI Premium: {ai_status}"
+        ensure_group ( chat )
+        r=one ( "SELECT title FROM members WHERE chat_id=? AND user_id=?", ( chat.id,u.id ) )
+        custom=( r["title"] if r else "" ) or ""
+        if custom:
+            txt += f"\n🎖 Guruh unvoni: {custom}"
     await update.effective_message.reply_text ( txt)
 
 async def title_command ( update,ctx,cmd,args ) :
@@ -1224,12 +1296,7 @@ async def info_command ( update,ctx,cmd,args ) :
         r=one ( "SELECT text FROM notes WHERE chat_id=? AND name=?", ( chat.id,args[0].lower (  )  )  ) ; return await msg.reply_text ( r["text"] if r else "Topilmadi.")
     if cmd=="aktiv":
         n=min ( 50,max ( 1,int ( args[0]) if args and args[0].isdigit ( ) else 10 ) )
-        rows=all_ ( """SELECT m.user_id,m.messages,m.title,m.xp,u.first_name,u.username
-                     FROM members m LEFT JOIN users u ON u.user_id=m.user_id
-                     WHERE m.chat_id=? ORDER BY m.messages DESC LIMIT ?""", ( chat.id,n ) )
-        return await msg.reply_text ( "🏆 Faollik\n"+ ( "\n".join(
-            f"{i+1}. {display_name_row ( r ) } — {r['messages']} | Lv.{level ( r['xp'] ) } {title_for ( r['user_id'],r['title'] ) }"
-            for i,r in enumerate ( rows ) ) or "Ma’lumot yo‘q" ) )
+        return await msg.reply_text ( global_active_text ( min ( n,10 ) ) )
 
 async def report_cmd ( update,ctx ) :
     if not replied ( update ) : return await update.effective_message.reply_text ( "↩️ Shikoyat qilinadigan xabarga reply qiling.")
@@ -1367,6 +1434,7 @@ async def star_text_router ( update,ctx ) :
     if cmd=="help": return await cmd_help ( update,ctx)
     if cmd=="id": return await cmd_id ( update,ctx)
     if cmd=="men": return await show_me ( update,ctx)
+    if cmd=="ak": return await msg.reply_text ( global_active_text ( 10 ) )
     if cmd in {"unvon","unvonoff"}:
         return await title_command ( update,ctx,cmd,args)
     if cmd=="top" and args and args[0]=="10":
@@ -2595,11 +2663,10 @@ async def callback ( update,ctx ) :
         return await top10_result ( ctx.bot,chat_id,with_gifts,u.id)
 
     if d=="me":
-        xp,msgs=user_total_stats ( u.id)
-        r=one ( "SELECT wallet FROM users WHERE user_id=?", ( u.id, ) )
-        ai_until=ai_user_until ( u.id )
-        ai_status=( "👑 Cheksiz (Super boshqaruv ) " if is_super ( u.id ) else ( "✅ FAOL — "+fmt_until ( ai_until ) if ai_until>now ( ) else "❌ YO‘Q" ) )
-        return await q.edit_message_text ( f"👤 {u.full_name}\n🆔 {u.id}\n🎖 {title_for ( u.id ) }\n⭐ Kredit: {r['wallet'] if r else 0}\n✨ XP: {xp}\n💬 Xabarlar: {msgs}\n\n🤖 AI Premium: {ai_status}",reply_markup=back_markup (  ) )
+        return await q.edit_message_text ( global_profile_text ( u ),reply_markup=back_markup ( ) )
+
+    if d=="globalactive":
+        return await q.edit_message_text ( global_active_text ( 10 ),reply_markup=back_markup ( ) )
 
     if d=="ai_private":
         until=ai_user_until ( u.id )
