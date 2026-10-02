@@ -53,9 +53,9 @@ DEMO_DAYS = 7
 WEEK_PRICE = 100
 PREMIUM = {3:1000, 6:1500, 12:2500}
 TOPUPS = (25,50,100,250,500,1000,2500)
-AI_PRIVATE_PRICE = 100
+AI_PRIVATE_PRICE = 10
 AI_PRIVATE_DAYS = 30
-AI_GROUP_PLANS = {7:100}
+AI_GROUP_PLANS = {30:100}
 AI_RATE_CACHE = {}
 TRANSLATION_SEMAPHORE = asyncio.Semaphore ( 2)
 FLOOD_CACHE = {}
@@ -117,6 +117,10 @@ def init_db (  ) :
     CREATE TABLE IF NOT EXISTS ai_group_subscriptions(
       chat_id INTEGER PRIMARY KEY, payer_id INTEGER DEFAULT 0, paid_until INTEGER DEFAULT 0,
       source TEXT DEFAULT 'paid', updated_at INTEGER DEFAULT 0 ) ;
+    CREATE TABLE IF NOT EXISTS ai_user_trials(
+      user_id INTEGER PRIMARY KEY, claimed_at INTEGER NOT NULL ) ;
+    CREATE TABLE IF NOT EXISTS ai_group_trials(
+      chat_id INTEGER PRIMARY KEY, claimed_at INTEGER NOT NULL, claimed_by INTEGER DEFAULT 0 ) ;
     CREATE TABLE IF NOT EXISTS ai_book_translations(
       id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER NOT NULL, book_id INTEGER NOT NULL,
       target_lang TEXT NOT NULL, status TEXT DEFAULT 'running', started_at INTEGER NOT NULL,
@@ -397,6 +401,45 @@ def ai_group_until ( chat_id ) :
 def ai_group_active ( chat_id ) :
     return ai_group_until ( chat_id ) > now ( )
 
+def ai_user_trial_used ( uid ) :
+    return bool ( one ( "SELECT 1 FROM ai_user_trials WHERE user_id=?", ( uid, ) ) )
+
+def ai_group_trial_used ( chat_id ) :
+    return bool ( one ( "SELECT 1 FROM ai_group_trials WHERE chat_id=?", ( chat_id, ) ) )
+
+def claim_ai_user_trial ( uid ) :
+    # Bir foydalanuvchiga faqat bir marta. Transaction race-conditionni ham to‘sadi.
+    ts=now ( )
+    with db ( ) as c:
+        try:
+            c.execute ( "INSERT INTO ai_user_trials ( user_id,claimed_at) VALUES ( ?,? ) ", ( uid,ts ) )
+        except sqlite3.IntegrityError:
+            return 0
+        old=c.execute ( "SELECT paid_until FROM ai_user_subscriptions WHERE user_id=?", ( uid, ) ).fetchone ( )
+        base=max ( ts,int ( old["paid_until"] ) if old else 0 )
+        until=base+30*86400
+        c.execute ( "INSERT INTO ai_user_subscriptions ( user_id,paid_until,updated_at) VALUES ( ?,?,?) "
+                    "ON CONFLICT ( user_id) DO UPDATE SET paid_until=excluded.paid_until,updated_at=excluded.updated_at",
+                    ( uid,until,ts ) )
+    return until
+
+def claim_ai_group_trial ( chat_id,uid ) :
+    # Har bir guruhga faqat bir marta 30 kun bepul.
+    ts=now ( )
+    with db ( ) as c:
+        try:
+            c.execute ( "INSERT INTO ai_group_trials ( chat_id,claimed_at,claimed_by) VALUES ( ?,?,? ) ", ( chat_id,ts,uid ) )
+        except sqlite3.IntegrityError:
+            return 0
+        old=c.execute ( "SELECT paid_until FROM ai_group_subscriptions WHERE chat_id=?", ( chat_id, ) ).fetchone ( )
+        base=max ( ts,int ( old["paid_until"] ) if old else 0 )
+        until=base+30*86400
+        c.execute ( "INSERT INTO ai_group_subscriptions ( chat_id,payer_id,paid_until,source,updated_at) VALUES ( ?,?,?,?,?) "
+                    "ON CONFLICT ( chat_id) DO UPDATE SET payer_id=excluded.payer_id,paid_until=excluded.paid_until,"
+                    "source=excluded.source,updated_at=excluded.updated_at",
+                    ( chat_id,uid,until,"trial",ts ) )
+    return until
+
 def extend_ai_user ( uid,days ) :
     old=ai_user_until ( uid ); base=max ( now ( ),old ); until=base+int ( days ) *86400
     execute ( "INSERT INTO ai_user_subscriptions ( user_id,paid_until,updated_at) VALUES ( ?,?,? ) ON CONFLICT ( user_id) DO UPDATE SET paid_until=excluded.paid_until,updated_at=excluded.updated_at", ( uid,until,now ( ) ) )
@@ -413,9 +456,11 @@ def ai_rate_ok ( scope_id,uid,seconds=5 ) :
     AI_RATE_CACHE[k]=t; return True
 
 def ai_group_menu ( chat_id,uid ) :
-    kb=[
-      [InlineKeyboardButton ( "⭐ 100 — 7 kun",callback_data=f"aigbuy:{chat_id}:7" ) ]
-    ]
+    kb=[]
+    if not ai_group_trial_used ( chat_id ):
+        kb.append ( [InlineKeyboardButton ( "🎁 30 kun BEPUL",callback_data=f"aigtrial:{chat_id}" ) ] )
+    else:
+        kb.append ( [InlineKeyboardButton ( "⭐ 100 — 30 kun",callback_data=f"aigbuy:{chat_id}:30" ) ] )
     if is_super ( uid ):
         kb += [
           [InlineKeyboardButton ( "👑 Bepul 1 kun",callback_data=f"aigfree:{chat_id}:1" ) ,InlineKeyboardButton ( "👑 7 kun",callback_data=f"aigfree:{chat_id}:7" ) ,InlineKeyboardButton ( "👑 30 kun",callback_data=f"aigfree:{chat_id}:30" ) ],
@@ -1043,7 +1088,7 @@ def help_text ( section ) :
       "library":"📚 VASATIYA KUTUBXONASI\n\nMenyudan kitob qidirish, kategoriya, yangi kitoblar va sevimlilar ishlaydi.\n\n*ad.book — replydagi odamga kutubxona adminligi\n*unad.book — huquqni olish\n*bookadmins — kutubxona adminlari\n\nKitob admini kitob qo‘shishi, ✏️ Tahrirlash orqali nom, muallif, til, kategoriya, tavsif, muqova, PDF va audioni yangilashi mumkin.",
       "hadith":"📜 SAHIH HADISLAR\n\n*hadis — random hadis\n*hadis buxoriy 1 — aniq hadis\n*add.hadis — private chatda hadis qo‘shish\n*del.hadis buxoriy 1 — o‘chirish\n*ad.hadis / *unad.hadis — hadis admini huquqi\n*hadisadmins — hadis adminlari\n\nMavjud hadis topilsa uni ✏️ Tahrirlash mumkin.",
       "admins":"🛡 ADMINLAR\n\n*ruxsat / *ruxsatsiz — Veritas admini\n*admin / *unadmin — Telegram admini\n*approve / *unapprove / *approved — himoyalangan a’zolar\n*ad.book / *unad.book — kutubxona admini\n*ad.hadis / *unad.hadis — hadis admini",
-      "superadmins":"👑 SUPER BOSHQARUV\n\n*superadmin — replydagi foydalanuvchini Super Admin qilish\n*unsuperadmin — replydagi Super Admin huquqini olish\n*superadmins — Super Ega va Super Adminlar ro‘yxati\n*ai.p — replydagi foydalanuvchiga 100 ⭐ evaziga 30 kun AI Premium berish\n\nSuper Admin bot boshqaruvida Super Ega vakolatlariga ega. Super Admin qo‘shish/olish esa faqat Super Ega uchun.",
+      "superadmins":"👑 SUPER BOSHQARUV\n\n*superadmin — replydagi foydalanuvchini Super Admin qilish\n*unsuperadmin — replydagi Super Admin huquqini olish\n*superadmins — Super Ega va Super Adminlar ro‘yxati\n*ai.p — replydagi foydalanuvchiga 10 ⭐ evaziga 30 kun AI Premium berish\n\nSuper Admin bot boshqaruvida Super Ega vakolatlariga ega. Super Admin qo‘shish/olish esa faqat Super Ega uchun.",
       "moderation":"👥 MODERATSIYA\n\nReply orqali: *warn, *unwarn, *warns, *clearwarns, *mute, *unmute, *kick, *ban, *unban, *del\n\n🧹 *vse — a’zo Veritas xabariga reply qilib yozadi; o‘sha a’zoning bot qayd etgan oldingi xabarlari o‘chiriladi.",
       "security":"🔐 HIMOYA\n\n*links on/off\n*blacklist <so‘z> / *unblacklist <so‘z> / *blacklists\n*lock <turi> / *unlock <turi> / *locks\n*antiflood on/off\n*flood 5\n*report / *reports on/off",
       "filters":"💬 FILTER VA NOTES\n\n*filter <kalit> <javob> / *filters / *stop <kalit> / *stopall\n*save <nom> <matn> / *get <nom> / *notes / *clear <nom>",
@@ -1469,7 +1514,8 @@ async def star_text_router ( update,ctx ) :
             return await msg.reply_text ( "🤖 Shaxsiy Veritas AI uchun bosh menyudagi «Veritas AI» tugmasidan foydalaning." )
         until=ai_group_until ( update.effective_chat.id )
         status=( "✅ FAOL\n📅 "+fmt_until ( until ) ) if until>now ( ) else "❌ FAOL EMAS"
-        return await msg.reply_text ( f"🤖 VERITAS AI — GURUH\n\n{status}\n\n100 ⭐ — 7 kun",reply_markup=ai_group_menu ( update.effective_chat.id,update.effective_user.id ) )
+        trial= ( "🎁 Birinchi 30 kun — BEPUL" if not ai_group_trial_used ( update.effective_chat.id ) else "⭐ Keyingi 30 kun — 100 ⭐")
+        return await msg.reply_text ( f"🤖 VERITAS AI — GURUH\n\n{status}\n\n{trial}",reply_markup=ai_group_menu ( update.effective_chat.id,update.effective_user.id ) )
     if update.effective_chat.type not in ("group","supergroup" ) :
         return await msg.reply_text ( "Bu buyruq guruh uchun.")
     if cmd in {"warn","unwarn","clearwarns","mute","unmute","kick","ban","unban","del","ruxsat","ruxsatsiz","admin","unadmin","approve","unapprove"}:
@@ -1757,8 +1803,8 @@ def _openai_response_sync ( prompt ) :
             "Siz Veritas Botsiz. O‘zingiz haqingizda so‘rashsa javobni tabiiy ravishda ‘Men Veritas Botman’ deb boshlang. "
             "Veritasni yaratgan Super Egalar: Sakranum (Telegram ID 5859289233) va Vasatiya (Telegram ID 7056675943 ) . Kim yaratgan, egasi yoki Super Egalari kim deb so‘ralsa shu ikki nomni ayting. "
             "Telegram ID 5859289233 dan yozayotgan odamni Sakranum, 7056675943 dan yozayotgan odamni Vasatiya deb taning. Super Adminlar ham global boshqaruv vakolatiga ega, ammo Super Admin tayinlash/olish faqat Super Egalarga tegishli. "
-            "Veritas — Telegram uchun guruh boshqaruvi va AI yordamchi bot. Shaxsiy Veritas AI Premium 100 Stars va 30 kun ishlaydi. "
-            "Guruh Veritas AI obunasi 100 Stars/7 kun. Super Ega guruh AI sini bepul 1, 7 yoki 30 kunga yoqa oladi. "
+            "Veritas — Telegram uchun guruh boshqaruvi va AI yordamchi bot. Shaxsiy Veritas AI Premium birinchi 30 kun bepul, keyingi 30 kun 10 Stars. "
+            "Guruh Veritas AI birinchi 30 kun bepul, keyingi 30 kun 100 Stars. Super Ega guruh AI sini bepul 1, 7 yoki 30 kunga yoqa oladi. "
             "Shaxsiy AI Premium va guruh AI obunasi alohida. Veritasda Vasatiya kutubxonasi bor: PDF/audio kitoblar, qidiruv, kategoriya, tillar, sevimlilar va kitob tahriri. "
             "Kutubxonadagi PDF kitobdan AI yordamida 5, 10 yoki 20 ta Telegram Quiz testi tuzib, foydalanuvchi admin bo‘lgan Veritas guruhiga yuborish mumkin. "
             "Veritasda Sahih Hadislar bo‘limi, hadis qidirish/random hadis va hadis adminlari mavjud. Guruh boshqaruvida warn, mute, kick, ban, blacklist, links, lock, antiflood, report, welcome/goodbye, filter, notes, rules, faollik va TOP funksiyalari bor. "
@@ -1837,9 +1883,9 @@ async def private_ai_media_reply ( update,ctx ) :
         return
     ensure_user ( u)
     if not ai_user_active ( u.id ) :
-        kb=InlineKeyboardMarkup ( [[InlineKeyboardButton ( "💎 100 ⭐ — 30 kun",callback_data="aipbuy" ) ],
+        kb=InlineKeyboardMarkup ( [[InlineKeyboardButton ( "💎 10 ⭐ — 30 kun",callback_data="aipbuy" ) ],
                                  [InlineKeyboardButton ( "⭐ Hisobni to‘ldirish",callback_data="wallet" ) ]])
-        return await msg.reply_text ( "🔒 Rasmni Veritas AI bilan tahlil qilish AI Premium uchun.\n\n💎 100 ⭐ — 30 kun",reply_markup=kb)
+        return await msg.reply_text ( "🔒 Rasmni Veritas AI bilan tahlil qilish AI Premium uchun.\n\n💎 10 ⭐ — 30 kun",reply_markup=kb)
     if not OPENAI_API_KEY:
         return await msg.reply_text ( "⚠️ Veritas AI kaliti sozlanmagan.")
     try:
@@ -2406,7 +2452,7 @@ def _translate_pdf_path_sync ( path,out_path,title,target_lang ) :
 
 async def _run_book_translation ( q,ctx,bid,target_lang ) :
     u=q.from_user
-    if not ai_user_active ( u.id ) : return await q.answer ( "🔒 AI Premium kerak: 100 ⭐ / 30 kun",show_alert=True)
+    if not ai_user_active ( u.id ) : return await q.answer ( "🔒 AI Premium kerak: birinchi 30 kun bepul, keyin 10 ⭐ / 30 kun",show_alert=True)
     if _translation_running ( u.id ) : return await q.answer ( "⏳ Sizda boshqa tarjima davom etmoqda.",show_alert=True)
     wait=_translation_wait_seconds ( u.id)
     if wait>0: return await q.answer ( f"⏳ Kunlik limit ishlatilgan. Taxminan { ( wait+3599 ) //3600} soat qoldi.",show_alert=True)
@@ -2461,7 +2507,7 @@ async def group_ai_reply ( update,ctx ) :
     question=msg.text.strip ( )
     if not question or question.startswith ( "*" ) : return False
     if not ai_group_active ( chat.id ) :
-        await msg.reply_text ( "🔒 Bu guruhda Veritas AI obunasi faol emas.\n\n*ai yozib tariflarni oching: 100 ⭐ / 7 kun." )
+        await msg.reply_text ( "🔒 Bu guruhda Veritas AI obunasi faol emas.\n\n*ai yozib tariflarni oching: birinchi 30 kun bepul, keyin 100 ⭐ / 30 kun." )
         return True
     if not ai_rate_ok ( chat.id,u.id,5 ) :
         await msg.reply_text ( "⏳ Juda tez so‘rov yuborildi. 5 soniyadan keyin qayta yozing." )
@@ -2496,8 +2542,8 @@ async def private_ai_reply ( update,ctx ) :
     if ctx.user_data.get ( "workflow_message_id" )==msg.message_id: return
     ensure_user ( u )
     if not ai_user_active ( u.id ) :
-        kb=InlineKeyboardMarkup ( [[InlineKeyboardButton ( "💎 100 ⭐ — 30 kun",callback_data="aipbuy" ) ],[InlineKeyboardButton ( "⭐ Hisobni to‘ldirish",callback_data="wallet" ) ]] )
-        return await msg.reply_text ( "🔒 Shaxsiy Veritas AI faqat AI Premium a’zolar uchun.\n\n💎 100 ⭐ — 30 kun",reply_markup=kb )
+        kb=InlineKeyboardMarkup ( [[InlineKeyboardButton ( "💎 10 ⭐ — 30 kun",callback_data="aipbuy" ) ],[InlineKeyboardButton ( "⭐ Hisobni to‘ldirish",callback_data="wallet" ) ]] )
+        return await msg.reply_text ( "🔒 Shaxsiy Veritas AI faqat AI Premium a’zolar uchun.\n\n💎 10 ⭐ — 30 kun",reply_markup=kb )
     if not ai_rate_ok ( "private",u.id,4 ) : return await msg.reply_text ( "⏳ 4 soniyadan keyin yana yozing." )
     if not OPENAI_API_KEY: return await msg.reply_text ( "⚠️ Veritas AI kaliti sozlanmagan." )
     try:
@@ -2679,19 +2725,40 @@ async def callback ( update,ctx ) :
         if is_super ( u.id ): status="👑 FAOL — "+super_role ( u.id )
         elif until>now ( ): status="✅ FAOL\n📅 "+fmt_until ( until )
         else: status="❌ FAOL EMAS"
-        kb=InlineKeyboardMarkup ( [[InlineKeyboardButton ( "💎 100 ⭐ — 30 kun",callback_data="aipbuy" ) ],[InlineKeyboardButton ( "⬅️ Orqaga",callback_data="home" ) ]] )
-        return await q.edit_message_text ( f"🤖 VERITAS AI — SHAXSIY YORDAMCHI\n\n{status}\n\nPremium narxi: 100 ⭐ / 30 kun.\nFaol bo‘lsa botga oddiy xabar yozishingiz kifoya.",reply_markup=kb )
+        if not ai_user_trial_used ( u.id ) and not is_super ( u.id ):
+            kb=InlineKeyboardMarkup ( [[InlineKeyboardButton ( "🎁 30 kun BEPUL",callback_data="aiptrial" ) ],[InlineKeyboardButton ( "⬅️ Orqaga",callback_data="home" ) ]] )
+            price_text="🎁 Birinchi 30 kun — BEPUL\nKeyingi 30 kun — 10 ⭐"
+        else:
+            kb=InlineKeyboardMarkup ( [[InlineKeyboardButton ( "💎 10 ⭐ — 30 kun",callback_data="aipbuy" ) ],[InlineKeyboardButton ( "⬅️ Orqaga",callback_data="home" ) ]] )
+            price_text="Premium narxi: 10 ⭐ / 30 kun."
+        return await q.edit_message_text ( f"🤖 VERITAS AI — SHAXSIY YORDAMCHI\n\n{status}\n\n{price_text}\nFaol bo‘lsa botga oddiy xabar yozishingiz kifoya.",reply_markup=kb )
+
+    if d=="aiptrial":
+        if is_super ( u.id ): return await q.answer ( "Super boshqaruv uchun AI allaqachon faol.",show_alert=True )
+        until=claim_ai_user_trial ( u.id )
+        if not until: return await q.answer ( "Bepul 30 kunlik muddat avval ishlatilgan.",show_alert=True )
+        return await q.edit_message_text ( f"🎁 Shaxsiy Veritas AI Premium 30 kun BEPUL yoqildi.\n📅 {fmt_until ( until )} gacha\n\nKeyingi 30 kun — 10 ⭐",reply_markup=back_markup ( "home" ) )
 
     if d=="aipbuy":
         if is_super ( u.id ): return await q.answer ( "Super boshqaruv uchun AI allaqachon faol.",show_alert=True )
+        if not ai_user_trial_used ( u.id ):
+            return await q.answer ( "Avval bepul 30 kunlik muddatdan foydalaning.",show_alert=True )
         if wallet ( u.id ) <AI_PRIVATE_PRICE: return await q.answer ( "Kredit yetarli emas. Hisobni Stars bilan to‘ldiring.",show_alert=True )
         if not wallet_change ( u.id,-AI_PRIVATE_PRICE,"ai_private_30d",u.id ): return
         until=extend_ai_user ( u.id,AI_PRIVATE_DAYS )
         return await q.edit_message_text ( f"✅ Shaxsiy Veritas AI Premium yoqildi.\n💎 {AI_PRIVATE_PRICE} ⭐\n📅 {fmt_until ( until )} gacha",reply_markup=back_markup ( "home" ) )
 
+    if d.startswith ( "aigtrial:" ) :
+        chat_id=int ( d.split ( ":" )[1] )
+        until=claim_ai_group_trial ( chat_id,u.id )
+        if not until: return await q.answer ( "Bu guruhning bepul 30 kuni avval ishlatilgan.",show_alert=True )
+        return await q.edit_message_text ( f"🎁 Veritas AI guruh uchun 30 kun BEPUL yoqildi.\n📅 {fmt_until ( until )} gacha\n\nKeyingi 30 kun — 100 ⭐",reply_markup=ai_group_menu ( chat_id,u.id ) )
+
     if d.startswith ( "aigbuy:" ) :
         _,schat,sdays=d.split ( ":" ); chat_id=int ( schat ); days=int ( sdays ); price=AI_GROUP_PLANS.get ( days )
         if not price: return
+        if not ai_group_trial_used ( chat_id ):
+            return await q.answer ( "Avval guruh uchun bepul 30 kunlik muddatni yoqing.",show_alert=True )
         if wallet ( u.id ) <price: return await q.answer ( f"Kredit yetarli emas. Kerak: {price} ⭐",show_alert=True )
         if not wallet_change ( u.id,-price,f"ai_group_{days}d",chat_id ): return
         until=extend_ai_group ( chat_id,days,u.id,"paid" )
@@ -2917,8 +2984,8 @@ async def callback ( update,ctx ) :
     if d.startswith ( "libtranslate:" ) :
         bid=int ( d.split ( ":" ) [1])
         if not ai_user_active ( u.id ) :
-            kb=InlineKeyboardMarkup ( [[InlineKeyboardButton ( "💎 100 ⭐ — 30 kun",callback_data="aipbuy" ) ],[InlineKeyboardButton ( "⬅️ Kitob",callback_data=f"libbook:{bid}" ) ]])
-            return await quiz_replace_message ( q,ctx,"🔒 AI KITOB TARJIMASI — Premium funksiya.\n\n💎 100 ⭐ / 30 kun\nPremium a’zo 24 soatda 1 ta kitob tarjima qila oladi.",reply_markup=kb)
+            kb=InlineKeyboardMarkup ( [[InlineKeyboardButton ( "💎 10 ⭐ — 30 kun",callback_data="aipbuy" ) ],[InlineKeyboardButton ( "⬅️ Kitob",callback_data=f"libbook:{bid}" ) ]])
+            return await quiz_replace_message ( q,ctx,"🔒 AI KITOB TARJIMASI — Premium funksiya.\n\n💎 10 ⭐ / 30 kun\nPremium a’zo 24 soatda 1 ta kitob tarjima qila oladi.",reply_markup=kb)
         wait=_translation_wait_seconds ( u.id)
         if wait>0: return await q.answer ( f"⏳ Kunlik limit ishlatilgan. Taxminan { ( wait+3599 ) //3600} soat qoldi.",show_alert=True)
         kb=InlineKeyboardMarkup ( [[InlineKeyboardButton ( "🇺🇿 O‘zbekcha",callback_data=f"libtrun:{bid}:uz" ) ],[InlineKeyboardButton ( "🇷🇺 Ruscha",callback_data=f"libtrun:{bid}:ru" ) ,InlineKeyboardButton ( "🇬🇧 English",callback_data=f"libtrun:{bid}:en" ) ],[InlineKeyboardButton ( "⬅️ Kitob",callback_data=f"libbook:{bid}" ) ]])
