@@ -127,6 +127,12 @@ def init_db (  ) :
       created_at INTEGER NOT NULL,
       PRIMARY KEY ( target_user_id,voter_user_id) ) ;
     CREATE INDEX IF NOT EXISTS idx_profile_likes_target ON profile_likes ( target_user_id ) ;
+    CREATE TABLE IF NOT EXISTS profile_dislikes(
+      target_user_id INTEGER NOT NULL,
+      voter_user_id INTEGER NOT NULL,
+      created_at INTEGER NOT NULL,
+      PRIMARY KEY ( target_user_id,voter_user_id) ) ;
+    CREATE INDEX IF NOT EXISTS idx_profile_dislikes_target ON profile_dislikes ( target_user_id ) ;
     CREATE TABLE IF NOT EXISTS ai_book_translations(
       id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER NOT NULL, book_id INTEGER NOT NULL,
       target_lang TEXT NOT NULL, status TEXT DEFAULT 'running', started_at INTEGER NOT NULL,
@@ -374,6 +380,13 @@ def profile_like_count ( uid ) :
 def profile_liked_by ( target_uid,voter_uid ) :
     return bool ( one ( "SELECT 1 FROM profile_likes WHERE target_user_id=? AND voter_user_id=?", ( target_uid,voter_uid ) ) )
 
+def profile_dislike_count ( uid ) :
+    r=one ( "SELECT COUNT ( *) n FROM profile_dislikes WHERE target_user_id=?", ( uid, ) )
+    return int ( r["n"] if r else 0 )
+
+def profile_disliked_by ( target_uid,voter_uid ) :
+    return bool ( one ( "SELECT 1 FROM profile_dislikes WHERE target_user_id=? AND voter_user_id=?", ( target_uid,voter_uid ) ) )
+
 def public_profile_text ( uid ) :
     r=one ( "SELECT user_id,username,first_name FROM users WHERE user_id=?", ( uid, ) )
     if not r: return None
@@ -397,15 +410,21 @@ def public_profile_text ( uid ) :
         f"📚 Qo‘shgan kitoblari: {books} ta\n"
         f"📜 Qo‘shgan hadislari: {hadiths} ta\n"
         f"🏅 Ilm medali: {knowledge_medal ( books,hadiths )}\n"
-        f"❤️ Like: {profile_like_count ( uid )}"
+        f"❤️ Like: {profile_like_count ( uid )}\n"
+        f"👎 Dizlayk: {profile_dislike_count ( uid )}"
     )
 
 def public_profile_markup ( target_uid,viewer_uid ) :
     liked=profile_liked_by ( target_uid,viewer_uid )
-    like_text="💔 Like ni olish" if liked else "❤️ Like"
+    disliked=profile_disliked_by ( target_uid,viewer_uid )
+    like_text= ( "💔 Like ni olish" if liked else "❤️ Like" ) +f" · {profile_like_count ( target_uid )}"
+    dislike_text= ( "↩️ Dizlaykni olish" if disliked else "👎 Dizlayk" ) +f" · {profile_dislike_count ( target_uid )}"
     kb=[]
     if target_uid != viewer_uid:
-        kb.append ( [InlineKeyboardButton ( like_text,callback_data=f"plike:{target_uid}" )] )
+        kb.append ( [
+            InlineKeyboardButton ( like_text,callback_data=f"plike:{target_uid}" ),
+            InlineKeyboardButton ( dislike_text,callback_data=f"pdislike:{target_uid}" )
+        ] )
     kb.append ( [InlineKeyboardButton ( "🔎 Boshqa a’zoni topish",callback_data="profilefind" )] )
     kb.append ( [InlineKeyboardButton ( "⬅️ Orqaga",callback_data="home" ),InlineKeyboardButton ( "🏠 Bosh menyu",callback_data="home" )] )
     return InlineKeyboardMarkup ( kb )
@@ -2826,10 +2845,27 @@ async def callback ( update,ctx ) :
             execute ( "DELETE FROM profile_likes WHERE target_user_id=? AND voter_user_id=?", ( target_uid,u.id ) )
             notice="Like olib tashlandi."
         else:
+            # Bir foydalanuvchi bir profilga bir vaqtda Like va Dizlayk bera olmaydi.
+            execute ( "DELETE FROM profile_dislikes WHERE target_user_id=? AND voter_user_id=?", ( target_uid,u.id ) )
             execute ( "INSERT OR IGNORE INTO profile_likes ( target_user_id,voter_user_id,created_at) VALUES ( ?,?,? ) ", ( target_uid,u.id,now ( ) ) )
             notice="❤️ Like qo‘yildi."
         await q.answer ( notice )
-        # Rasmli profilni yangi hisob bilan qayta chiqaramiz.
+        return await send_public_profile ( ctx,q.message.chat.id,target_uid,u.id,q.message )
+
+    if d.startswith ( "pdislike:" ) :
+        target_uid=int ( d.split ( ":",1 )[1] )
+        if target_uid==u.id:
+            return await q.answer ( "O‘z profilingizga Dizlayk bosib bo‘lmaydi.",show_alert=True )
+        if not one ( "SELECT 1 FROM users WHERE user_id=?", ( target_uid, ) ):
+            return await q.answer ( "A’zo topilmadi.",show_alert=True )
+        if profile_disliked_by ( target_uid,u.id ):
+            execute ( "DELETE FROM profile_dislikes WHERE target_user_id=? AND voter_user_id=?", ( target_uid,u.id ) )
+            notice="Dizlayk olib tashlandi."
+        else:
+            execute ( "DELETE FROM profile_likes WHERE target_user_id=? AND voter_user_id=?", ( target_uid,u.id ) )
+            execute ( "INSERT OR IGNORE INTO profile_dislikes ( target_user_id,voter_user_id,created_at) VALUES ( ?,?,? ) ", ( target_uid,u.id,now ( ) ) )
+            notice="👎 Dizlayk qo‘yildi."
+        await q.answer ( notice )
         return await send_public_profile ( ctx,q.message.chat.id,target_uid,u.id,q.message )
 
     if d=="globalactive":
