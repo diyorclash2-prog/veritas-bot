@@ -420,11 +420,12 @@ def public_profile_markup ( target_uid,viewer_uid ) :
     like_text= ( "💔 Like ni olish" if liked else "❤️ Like" ) +f" · {profile_like_count ( target_uid )}"
     dislike_text= ( "↩️ Dizlaykni olish" if disliked else "👎 Dizlayk" ) +f" · {profile_dislike_count ( target_uid )}"
     kb=[]
-    if target_uid != viewer_uid:
-        kb.append ( [
-            InlineKeyboardButton ( like_text,callback_data=f"plike:{target_uid}" ),
-            InlineKeyboardButton ( dislike_text,callback_data=f"pdislike:{target_uid}" )
-        ] )
+    # Like/Dizlayk tugmalari har bir profilda ko‘rinadi.
+    # O‘z profilida ham tugmalar ko‘rinadi, ammo callback ovoz berishni bloklaydi.
+    kb.append ( [
+        InlineKeyboardButton ( like_text,callback_data=f"plike:{target_uid}" ),
+        InlineKeyboardButton ( dislike_text,callback_data=f"pdislike:{target_uid}" )
+    ] )
     kb.append ( [InlineKeyboardButton ( "🔎 Boshqa a’zoni topish",callback_data="profilefind" )] )
     kb.append ( [InlineKeyboardButton ( "⬅️ Orqaga",callback_data="home" ),InlineKeyboardButton ( "🏠 Bosh menyu",callback_data="home" )] )
     return InlineKeyboardMarkup ( kb )
