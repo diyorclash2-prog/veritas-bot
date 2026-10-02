@@ -356,9 +356,15 @@ def global_profile_text ( u ) :
     )
 
 def global_active_rows ( limit=10 ) :
+    # Global TOP faqat haqiqiy foydalanuvchilar uchun.
+    # Telegram botlari/channel senderlari bazada users sifatida saqlanib qolgan bo‘lsa ham,
+    # @...bot username orqali TOPdan chiqariladi.
     return all_ ( """SELECT m.user_id,SUM ( m.messages ) messages,SUM ( m.xp ) xp,
                      COALESCE ( u.first_name,'' ) first_name,COALESCE ( u.username,'' ) username
-                     FROM members m LEFT JOIN users u ON u.user_id=m.user_id
+                     FROM members m
+                     JOIN users u ON u.user_id=m.user_id
+                     WHERE LOWER ( COALESCE ( u.username,'' ) ) NOT LIKE '%bot'
+                       AND LOWER ( COALESCE ( u.first_name,'' ) ) NOT IN ('channel','anonymous')
                      GROUP BY m.user_id
                      ORDER BY messages DESC,xp DESC,m.user_id ASC LIMIT ?""", ( int ( limit ), ) )
 
@@ -371,7 +377,7 @@ def global_active_text ( limit=10 ) :
         mark=medals[i] if i<3 else f"{i+1}."
         lvl=level ( int ( r["xp"] or 0 ) )
         lines.append ( f"{mark} {display_name_row ( r )} — {int ( r['messages'] or 0 )} xabar | LVL {lvl} {activity_degree ( lvl )}" )
-    return "🌐 VERITAS — GLOBAL AKTIV TOP 10\n\n"+"\n".join ( lines )+"\n\n📊 Veritas mavjud barcha guruhlardagi umumiy aktivlik."
+    return "🌐 VERITAS — GLOBAL AKTIV TOP 10\n\n"+"\n".join ( lines )+"\n\n👥 Faqat foydalanuvchilar reytingi.\n📊 Barcha guruhlardagi aktivlik jamlangan."
 
 def fmt_until ( ts ) :
     if not ts: return "—"
