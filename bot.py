@@ -830,6 +830,9 @@ async def library_private_input ( update,ctx ) :
     if not st or not str ( st.get ( "mode","" )  ) .startswith ( "lib_" ) : return
     msg=update.effective_message
     mode=st["mode"]
+    # Quick-add ham boshqa kutubxona oqimlari kabi shu data obyektidan foydalanadi.
+    # Oldingi buildda data quyida yaratilgani sabab fayl qabulida NameError yuz berardi.
+    data=st.setdefault ( "data", {})
     if mode=="lib_quick_file":
         doc=msg.document
         if not doc:
@@ -877,7 +880,6 @@ async def library_private_input ( update,ctx ) :
         return await msg.reply_text ( f"🔎 «{q}» bo‘yicha: {len ( rows ) } ta natija",reply_markup=InlineKeyboardMarkup ( kb ) )
     if not is_library_admin ( uid ) :
         STATE.pop ( uid,None ) ; return await msg.reply_text ( "⛔ Kutubxona boshqaruv huquqi yo‘q.")
-    data=st.setdefault ( "data",{})
     if mode.startswith ( "lib_edit_" ) :
         bid=int ( data.get ( "book_id",0 ) )
         if not bid or not one ( "SELECT 1 FROM library_books WHERE id=? AND status='approved'", ( bid, ) ) :
