@@ -214,7 +214,20 @@ def init_db (  ) :
     CREATE TABLE IF NOT EXISTS audit(
       id INTEGER PRIMARY KEY AUTOINCREMENT,actor_id INTEGER,chat_id INTEGER,action TEXT,detail TEXT,created_at INTEGER ) ;
     """
-    with db ( ) as c: c.executescript ( schema)
+    with db ( ) as c:
+        c.executescript ( schema)
+        # V8.1: kutubxona uchun universal kitob fayli. Eski PDF ustunlari saqlanadi.
+        cols={r[1] for r in c.execute ( "PRAGMA table_info ( library_books ) " ) .fetchall (  ) }
+        for col,decl in (
+            ("book_file_id","TEXT DEFAULT ''" ) ,
+            ("book_unique_id","TEXT DEFAULT ''" ) ,
+            ("book_file_name","TEXT DEFAULT ''" ) ,
+            ("book_format","TEXT DEFAULT ''" ) ,
+            ("book_file_size","INTEGER DEFAULT 0")
+        ):
+            if col not in cols:
+                c.execute ( f"ALTER TABLE library_books ADD COLUMN {col} {decl}")
+        c.execute ( "CREATE INDEX IF NOT EXISTS idx_library_book_unique ON library_books ( book_unique_id ) ")
 
 def ensure_user ( u ) :
     if not u: return
@@ -354,6 +367,7 @@ def bot_roles ( uid ) :
 def global_profile_text ( u ) :
     xp,msgs=user_total_stats ( u.id )
     lvl=level ( xp )
+    shown_lvl="+99" if u.id in SUPER_OWNERS else str ( lvl)
     books,hadiths=content_contributions ( u.id )
     ai_until=ai_user_until ( u.id )
     ai_status=( "👑 Cheksiz (Super boshqaruv ) " if is_super ( u.id ) else ( "✅ FAOL — "+fmt_until ( ai_until ) if ai_until>now ( ) else "❌ YO‘Q" ) )
@@ -364,7 +378,7 @@ def global_profile_text ( u ) :
         f"⭐ Kredit: {wallet ( u.id )}\n"
         f"🌐 Umumiy XP: {xp}\n"
         f"💬 Umumiy xabarlar: {msgs}\n"
-        f"📈 Level: {lvl}\n"
+        f"📈 Level: {shown_lvl}\n"
         f"🔥 Aktivlik darajasi: {activity_degree ( lvl )}\n"
         f"📚 Qo‘shgan kitoblari: {books} ta\n"
         f"📜 Qo‘shgan hadislari: {hadiths} ta\n"
@@ -392,6 +406,7 @@ def public_profile_text ( uid ) :
     if not r: return None
     xp,msgs=user_total_stats ( uid )
     lvl=level ( xp )
+    shown_lvl="+99" if uid in SUPER_OWNERS else str ( lvl)
     books,hadiths=content_contributions ( uid )
     ai_until=ai_user_until ( uid )
     ai_status=( "👑 Cheksiz (Super boshqaruv ) " if is_super ( uid ) else ( "✅ FAOL — "+fmt_until ( ai_until ) if ai_until>now ( ) else "❌ YO‘Q" ) )
@@ -405,20 +420,35 @@ def public_profile_text ( uid ) :
         f"🤖 AI Premium: {ai_status}\n\n"
         f"🌐 Umumiy XP: {xp}\n"
         f"💬 Umumiy xabarlar: {msgs}\n"
-        f"📈 Level: {lvl}\n"
+        f"📈 Level: {shown_lvl}\n"
         f"🔥 Aktivlik darajasi: {activity_degree ( lvl )}\n"
         f"📚 Qo‘shgan kitoblari: {books} ta\n"
         f"📜 Qo‘shgan hadislari: {hadiths} ta\n"
         f"🏅 Ilm medali: {knowledge_medal ( books,hadiths )}\n"
-        f"❤️ Like: {profile_like_count ( uid )}\n"
-        f"👎 Dizlayk: {profile_dislike_count ( uid )}"
+        f"💠 Qadr: {profile_like_count ( uid )}\n"
+        f"⚖️ E’tiroz: {profile_dislike_count ( uid )}"
     )
+
+def qadr_top_text ( limit=10 ) :
+    rows=all_ ( """SELECT u.user_id,u.first_name,u.username,COUNT ( pl.voter_user_id) qadr
+                    FROM profile_likes pl JOIN users u ON u.user_id=pl.target_user_id
+                    GROUP BY u.user_id,u.first_name,u.username
+                    ORDER BY qadr DESC,u.user_id ASC LIMIT ?""", ( int ( limit ) , ) )
+    if not rows:
+        return "🏆 VERITAS — QADR TOP 10\n\nHozircha Qadr berilmagan."
+    medals=["🥇","🥈","🥉"]
+    lines=["🏆 VERITAS — QADR TOP 10",""]
+    for i,r in enumerate ( rows,1 ) :
+        mark=medals[i-1] if i<=3 else f"{i}."
+        name=r["first_name"] or ( ( "@"+r["username"]) if r["username"] else f"ID {r['user_id']}")
+        lines.append ( f"{mark} {name} — 💠 {int ( r['qadr'] ) } Qadr")
+    return "\n".join ( lines)
 
 def public_profile_markup ( target_uid,viewer_uid ) :
     liked=profile_liked_by ( target_uid,viewer_uid )
     disliked=profile_disliked_by ( target_uid,viewer_uid )
-    like_text= ( "💔 Like ni olish" if liked else "❤️ Like" ) +f" · {profile_like_count ( target_uid )}"
-    dislike_text= ( "↩️ Dizlaykni olish" if disliked else "👎 Dizlayk" ) +f" · {profile_dislike_count ( target_uid )}"
+    like_text= ( "↩️ Qadrni olish" if liked else "💠 Qadr" ) +f" · {profile_like_count ( target_uid )}"
+    dislike_text= ( "↩️ E’tirozni olish" if disliked else "⚖️ E’tiroz" ) +f" · {profile_dislike_count ( target_uid )}"
     kb=[]
     # Like/Dizlayk tugmalari har bir profilda ko‘rinadi.
     # O‘z profilida ham tugmalar ko‘rinadi, ammo callback ovoz berishni bloklaydi.
@@ -593,6 +623,7 @@ def library_book_text ( r ) :
     return (f"📖 {r['title']}\n"
             f"✍️ Muallif: {r['author'] or '—'}\n"
             f"🌐 Til: {lib_lang_name ( r['lang'] ) }\n"
+            f"📁 Format: { ( r['book_format'] or ('PDF' if r['pdf_file_id'] else '—' )  ) .upper (  ) }\n"
             f"🗂 Kategoriya: {', '.join ( cats) if cats else '—'}\n"
             f"👤 Qo‘shgan: {added}\n"
             f"👁 Ko‘rildi: {r['views']} | ⬇️ Yuklandi: {r['downloads']}\n\n"
@@ -600,10 +631,10 @@ def library_book_text ( r ) :
 
 def library_book_markup ( uid,book_id,back="library" ) :
     fav=bool ( one ( "SELECT 1 FROM library_favorites WHERE user_id=? AND book_id=?", ( uid,book_id )  ) )
-    r=one ( "SELECT pdf_file_id,audio_file_id FROM library_books WHERE id=?", ( book_id, ) )
+    r=one ( "SELECT pdf_file_id,audio_file_id,book_file_id,book_format FROM library_books WHERE id=?", ( book_id, ) )
     kb=[]
     row=[]
-    if r and r["pdf_file_id"]: row.append ( InlineKeyboardButton ( "📄 PDF",callback_data=f"libpdf:{book_id}" ) )
+    if r and (r["book_file_id"] or r["pdf_file_id"] ) : row.append ( InlineKeyboardButton ( "📥 Kitobni olish",callback_data=f"libfile:{book_id}" ) )
     if r and r["audio_file_id"]: row.append ( InlineKeyboardButton ( "🎧 Audio",callback_data=f"libaudio:{book_id}" ) )
     if row: kb.append ( row)
     if r and r["pdf_file_id"]:
@@ -799,6 +830,42 @@ async def library_private_input ( update,ctx ) :
     if not st or not str ( st.get ( "mode","" )  ) .startswith ( "lib_" ) : return
     msg=update.effective_message
     mode=st["mode"]
+    if mode=="lib_quick_file":
+        doc=msg.document
+        if not doc:
+            return await msg.reply_text ( "📎 Kitob faylini Document/Fayl sifatida yuboring.\nPDF, EPUB, DOCX, TXT, FB2, MOBI yoki DJVU qabul qilinadi.")
+        filename= ( doc.file_name or "kitob" ) .strip ( )
+        ext=Path ( filename ) .suffix.lower (  ) .lstrip ( ".")
+        allowed={"pdf","epub","docx","txt","fb2","mobi","djvu"}
+        if ext not in allowed:
+            return await msg.reply_text ( "❌ Bu format hozircha qabul qilinmaydi.\nQabul qilinadi: PDF, EPUB, DOCX, TXT, FB2, MOBI, DJVU")
+        uniq=doc.file_unique_id or ""
+        if uniq:
+            dup=one ( "SELECT id,title FROM library_books WHERE (book_unique_id=? OR pdf_unique_id=?) AND status<>'deleted' LIMIT 1", ( uniq,uniq ) )
+            if dup:
+                STATE.pop ( uid,None)
+                return await msg.reply_text ( f"⚠️ Aynan shu fayl kutubxonada bor.\n📖 {dup['title']}\nID: {dup['id']}",reply_markup=library_home_markup ( uid ) )
+        title=Path ( filename ) .stem.replace ( "_"," " ) .strip (  ) [:250] or "Nomsiz kitob"
+        data.update ( {"title":title,"author":"","description":"","cover_file_id":"","categories":[],
+                     "book_file_id":doc.file_id,"book_unique_id":uniq,"book_file_name":filename,
+                     "book_format":ext,"book_file_size":int ( doc.file_size or 0 ) ,
+                     "pdf_file_id":doc.file_id if ext=="pdf" else "","pdf_unique_id":uniq if ext=="pdf" else "",
+                     "audio_file_id":"","audio_unique_id":""})
+        st["mode"]="lib_quick_author"
+        return await msg.reply_text ( f"✅ Fayl qabul qilindi: {filename}\n📖 Nom avtomatik: {title}\n\n✍️ Muallif nomini yozing. Noma’lum bo‘lsa: o'tkazish")
+    if mode=="lib_quick_author":
+        if not msg.text:
+            return await msg.reply_text ( "✍️ Muallif nomini yozing yoki «o'tkazish» deb yozing.")
+        raw=msg.text.strip ( )
+        if raw.casefold (  ) .replace ( "‘","'" ) .replace ( "’","'") not in {"o'tkazish","otkazish"}:
+            data["author"]=raw[:250]
+        dup=one ( "SELECT id FROM library_books WHERE lower ( title ) =lower ( ?) AND lower ( author ) =lower ( ?) AND status<>'deleted'", ( data["title"],data["author"] ) )
+        if dup:
+            STATE.pop ( uid,None)
+            return await msg.reply_text ( f"⚠️ Shu nom va muallifdagi kitob mavjud. ID: {dup['id']}",reply_markup=library_home_markup ( uid ) )
+        st["mode"]="lib_quick_lang"
+        kb=InlineKeyboardMarkup ( [[InlineKeyboardButton ( "🇺🇿 O‘zbekcha",callback_data="libaddlang:uz" ) ,InlineKeyboardButton ( "🇷🇺 Русский",callback_data="libaddlang:ru" ) ,InlineKeyboardButton ( "🇬🇧 English",callback_data="libaddlang:en" ) ]])
+        return await msg.reply_text ( "🌐 Kitob tilini tanlang. Shundan keyin kitob darhol saqlanadi:",reply_markup=kb)
     if mode=="lib_search":
         if not msg.text: return await msg.reply_text ( "🔎 Qidiruv uchun matn yuboring.")
         q=msg.text.strip (  ) ; STATE.pop ( uid,None)
@@ -846,7 +913,7 @@ async def library_private_input ( update,ctx ) :
             uniq=doc.file_unique_id or ""
             dup=one ( "SELECT id FROM library_books WHERE pdf_unique_id=? AND id<>? AND status<>'deleted'", ( uniq,bid ) ) if uniq else None
             if dup: return await msg.reply_text ( f"⚠️ Bu PDF boshqa kitobda mavjud. ID: {dup['id']}" )
-            execute ( "UPDATE library_books SET pdf_file_id=?,pdf_unique_id=? WHERE id=?", ( doc.file_id,uniq,bid ) )
+            execute ( "UPDATE library_books SET pdf_file_id=?,pdf_unique_id=?,book_file_id=?,book_unique_id=?,book_file_name=?,book_format='pdf',book_file_size=? WHERE id=?", ( doc.file_id,uniq,doc.file_id,uniq,doc.file_name or "",int ( doc.file_size or 0 ) ,bid ) )
         elif field=="audio":
             af=None
             if msg.audio: af=msg.audio
@@ -1595,6 +1662,7 @@ async def star_text_router ( update,ctx ) :
     if cmd=="id": return await cmd_id ( update,ctx)
     if cmd=="men": return await show_me ( update,ctx)
     if cmd=="ak": return await msg.reply_text ( global_active_text ( 10 ) )
+    if cmd=="qadr": return await msg.reply_text ( qadr_top_text ( 10 ) )
     if cmd in {"unvon","unvonoff"}:
         return await title_command ( update,ctx,cmd,args)
     if cmd=="top" and args and args[0]=="10":
@@ -2839,12 +2907,12 @@ async def callback ( update,ctx ) :
     if d.startswith ( "plike:" ) :
         target_uid=int ( d.split ( ":",1 )[1] )
         if target_uid==u.id:
-            return await q.answer ( "O‘z profilingizga Like bosib bo‘lmaydi.",show_alert=True )
+            return await q.answer ( "O‘z profilingizga Qadr berib bo‘lmaydi.",show_alert=True )
         if not one ( "SELECT 1 FROM users WHERE user_id=?", ( target_uid, ) ):
             return await q.answer ( "A’zo topilmadi.",show_alert=True )
         if profile_liked_by ( target_uid,u.id ):
             execute ( "DELETE FROM profile_likes WHERE target_user_id=? AND voter_user_id=?", ( target_uid,u.id ) )
-            notice="Like olib tashlandi."
+            notice="Qadr olib tashlandi."
         else:
             # Bir foydalanuvchi bir profilga bir vaqtda Like va Dizlayk bera olmaydi.
             execute ( "DELETE FROM profile_dislikes WHERE target_user_id=? AND voter_user_id=?", ( target_uid,u.id ) )
@@ -2856,12 +2924,12 @@ async def callback ( update,ctx ) :
     if d.startswith ( "pdislike:" ) :
         target_uid=int ( d.split ( ":",1 )[1] )
         if target_uid==u.id:
-            return await q.answer ( "O‘z profilingizga Dizlayk bosib bo‘lmaydi.",show_alert=True )
+            return await q.answer ( "O‘z profilingizga E’tiroz berib bo‘lmaydi.",show_alert=True )
         if not one ( "SELECT 1 FROM users WHERE user_id=?", ( target_uid, ) ):
             return await q.answer ( "A’zo topilmadi.",show_alert=True )
         if profile_disliked_by ( target_uid,u.id ):
             execute ( "DELETE FROM profile_dislikes WHERE target_user_id=? AND voter_user_id=?", ( target_uid,u.id ) )
-            notice="Dizlayk olib tashlandi."
+            notice="E’tiroz olib tashlandi."
         else:
             execute ( "DELETE FROM profile_likes WHERE target_user_id=? AND voter_user_id=?", ( target_uid,u.id ) )
             execute ( "INSERT OR IGNORE INTO profile_dislikes ( target_user_id,voter_user_id,created_at) VALUES ( ?,?,? ) ", ( target_uid,u.id,now ( ) ) )
@@ -3074,15 +3142,29 @@ async def callback ( update,ctx ) :
 
     if d=="libadd":
         if not is_library_admin ( u.id ) : return await q.edit_message_text ( "⛔ Ruxsat yo‘q.",reply_markup=back_markup ( "library" ) )
-        STATE[u.id]={"mode":"lib_add_title","data":{}}
-        return await q.edit_message_text ( "➕ KITOB QO‘SHISH\n\n1/7 — 📖 Kitob nomini yuboring:",reply_markup=back_markup ( "library" ) )
+        STATE[u.id]={"mode":"lib_quick_file","data":{}}
+        return await q.edit_message_text ( "➕ KITOB QO‘SHISH — OSON USUL\n\n📎 Avval kitob faylini yuboring.\n\nQabul qilinadi: PDF, EPUB, DOCX, TXT, FB2, MOBI, DJVU\n\nBot fayl nomidan kitob nomini avtomatik oladi. Keyin faqat muallif va tilni tanlaysiz.",reply_markup=back_markup ( "library" ) )
 
     if d.startswith ( "libaddlang:" ) :
         st=STATE.get ( u.id)
-        if not st or st.get ( "mode" ) !="lib_add_lang": return await q.edit_message_text ( "Jarayon eskirgan. Qaytadan boshlang.",reply_markup=back_markup ( "library" ) )
+        if not st or st.get ( "mode" ) not in {"lib_add_lang","lib_quick_lang"}: return await q.edit_message_text ( "Jarayon eskirgan. Qaytadan boshlang.",reply_markup=back_markup ( "library" ) )
         lang=d.split ( ":",1 ) [1]
         if lang not in ("uz","ru","en" ) : return
-        st["data"]["lang"]=lang; st["mode"]="lib_add_categories"
+        st["data"]["lang"]=lang
+        if st.get ( "mode" ) =="lib_quick_lang":
+            data=st["data"]
+            with db ( ) as c:
+                cur=c.execute ( """INSERT INTO library_books
+                    (title,author,lang,description,cover_file_id,pdf_file_id,pdf_unique_id,audio_file_id,audio_unique_id,
+                     added_by,status,created_at,book_file_id,book_unique_id,book_file_name,book_format,book_file_size)
+                    VALUES ( ?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,? ) """,
+                    (data["title"],data.get ( "author","" ) ,lang,"","",data.get ( "pdf_file_id","" ) ,data.get ( "pdf_unique_id","" ) ,"","",
+                     u.id,"approved",now (  ) ,data.get ( "book_file_id","" ) ,data.get ( "book_unique_id","" ) ,data.get ( "book_file_name","" ) ,
+                     data.get ( "book_format","" ) ,data.get ( "book_file_size",0 )  ) )
+                bid=cur.lastrowid
+            STATE.pop ( u.id,None ) ; audit ( u.id,0,"library_add_quick",str ( bid ) )
+            return await q.edit_message_text ( f"✅ Kitob saqlandi.\n📖 {data['title']}\n📁 {data.get ( 'book_format','' ) .upper (  ) }\nID: {bid}\n\nKerak bo‘lsa kitob kartasidan nomi, muqovasi, kategoriya va tavsifini tahrirlashingiz mumkin.",reply_markup=InlineKeyboardMarkup ( [[InlineKeyboardButton ( "📖 Kitobni ochish",callback_data=f"libbook:{bid}" ) ],[InlineKeyboardButton ( "📚 Kutubxona",callback_data="library" ) ]] ) )
+        st["mode"]="lib_add_categories"
         return await q.edit_message_text ( "🗂 Kategoriyalarni vergul bilan yuboring.\nMisol: Islomiy, Hadis, Tarix")
 
     if d.startswith ( "libnew:" ) :
@@ -3190,6 +3272,21 @@ async def callback ( update,ctx ) :
             execute ( "DELETE FROM library_favorites WHERE user_id=? AND book_id=?", ( u.id,bid ) )
         else: execute ( "INSERT OR IGNORE INTO library_favorites ( user_id,book_id,created_at) VALUES ( ?,?,? ) ", ( u.id,bid,now (  )  ) )
         return await library_show_book ( q,ctx,bid)
+
+    if d.startswith ( "libfile:" ) :
+        bid=int ( d.split ( ":" ) [1])
+        r=one ( "SELECT title,book_file_id,book_file_name,book_format,pdf_file_id FROM library_books WHERE id=? AND status='approved'", ( bid, ) )
+        if not r:
+            return await q.answer ( "Kitob topilmadi",show_alert=True)
+        fid=r["book_file_id"] or r["pdf_file_id"]
+        if not fid:
+            return await q.answer ( "Kitob fayli mavjud emas",show_alert=True)
+        try:
+            execute ( "UPDATE library_books SET downloads=downloads+1 WHERE id=?", ( bid, ) )
+            return await ctx.bot.send_document ( u.id,fid,caption=f"📚 {r['title']}\n📁 { ( r['book_format'] or 'PDF' ) .upper (  ) }\nVasatiya kutubxonasi")
+        except TelegramError as e:
+            log.exception ( "Library file send failed: book_id=%s",bid)
+            return await q.answer ( "⚠️ Faylni yuborishda xato. Admin tekshirishi kerak.",show_alert=True)
 
     if d.startswith ( "libpdf:" ) :
         bid=int ( d.split ( ":" ) [1] ) ; r=one ( "SELECT title,pdf_file_id FROM library_books WHERE id=? AND status='approved'", ( bid, ) )
