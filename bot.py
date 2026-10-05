@@ -28,7 +28,7 @@ except ImportError:
     fitz = None
 
 from telegram import (
-    Update, InlineKeyboardButton, InlineKeyboardMarkup, ChatPermissions,
+    Update, InlineKeyboardButton, InlineKeyboardMarkup, ReplyKeyboardMarkup, KeyboardButton, ChatPermissions,
     LabeledPrice
 )
 from telegram.constants import ChatMemberStatus
@@ -333,6 +333,13 @@ def v9_init_db (  ) :
         CREATE TABLE IF NOT EXISTS v9_lesson_progress ( lesson_id INTEGER NOT NULL,user_id INTEGER NOT NULL,stage TEXT DEFAULT 'new',score INTEGER DEFAULT 0,updated_at INTEGER NOT NULL,PRIMARY KEY ( lesson_id,user_id )  ) ;
         CREATE TABLE IF NOT EXISTS v9_points ( group_id INTEGER NOT NULL,user_id INTEGER NOT NULL,points INTEGER DEFAULT 0,updated_at INTEGER NOT NULL,PRIMARY KEY ( group_id,user_id )  ) ;
         CREATE TABLE IF NOT EXISTS v9_test_results ( id INTEGER PRIMARY KEY AUTOINCREMENT,lesson_id INTEGER NOT NULL,group_id INTEGER NOT NULL,user_id INTEGER NOT NULL,score INTEGER DEFAULT 0,max_score INTEGER DEFAULT 100,correct_count INTEGER DEFAULT 0,total_count INTEGER DEFAULT 0,details TEXT DEFAULT '',created_at INTEGER NOT NULL ) ;
+        CREATE TABLE IF NOT EXISTS v9_lesson_materials(
+          id INTEGER PRIMARY KEY AUTOINCREMENT,lesson_id INTEGER NOT NULL,kind TEXT NOT NULL,
+          file_id TEXT DEFAULT '',file_name TEXT DEFAULT '',mime_type TEXT DEFAULT '',
+          extracted_text TEXT DEFAULT '',created_at INTEGER NOT NULL ) ;
+        CREATE TABLE IF NOT EXISTS v9_tests(
+          id INTEGER PRIMARY KEY AUTOINCREMENT,lesson_id INTEGER NOT NULL,questions_json TEXT NOT NULL,
+          created_at INTEGER NOT NULL ) ;
         """)
 
 def root_choice_markup (  ) :
@@ -401,12 +408,399 @@ async def v9_callback ( update,ctx ) :
         count=one ( "SELECT COUNT ( *) n FROM v9_group_members WHERE group_id=? AND is_active=1", ( gid, )  ) ["n"]
         kb=InlineKeyboardMarkup ( [[InlineKeyboardButton ( "➕ Yangi dars",callback_data=f"v9:lesson:new:{gid}" ) ],[InlineKeyboardButton ( "📚 Darslar",callback_data=f"v9:lessons:{gid}" ) ,InlineKeyboardButton ( "📊 Natijalar",callback_data=f"v9:results:{gid}" ) ],[InlineKeyboardButton ( "⬅️ Guruhlarim",callback_data="v9:teacher:groups" ) ]]) if teacher else InlineKeyboardMarkup ( [[InlineKeyboardButton ( "📚 Darslar",callback_data=f"v9:lessons:{gid}" ) ],[InlineKeyboardButton ( "🏆 Guruh reytingi",callback_data=f"v9:ranking:{gid}" ) ],[InlineKeyboardButton ( "⬅️ Guruhlarim",callback_data="v9:student:groups" ) ]])
         return await q.edit_message_text ( f"📚 {g['title']}\n📖 Fan: {g['subject'] or 'Kiritilmagan'}\n👥 Talabalar: {count}\n🔑 Guruh kodi: {g['join_code']}",reply_markup=kb)
-    if d.startswith (  ( "v9:lesson:new:","v9:lessons:","v9:results:","v9:ranking:" ) ) or d=="v9:teacher:journal": return await q.answer ( "Bu bo‘lim keyingi V9 bosqichida ulanadi.",show_alert=True)
+
+    if d.startswith ( "v9:lesson:new:" ) :
+        gid=int ( d.rsplit ( ":",1 ) [1])
+        g=one ( "SELECT * FROM v9_groups WHERE id=? AND teacher_id=? AND is_active=1", ( gid,u.id ) )
+        if not g:return await q.answer ( "Bu guruh sizga tegishli emas.",show_alert=True)
+        STATE[u.id]={"mode":"v9_lesson_title","group_id":gid}
+        return await q.edit_message_text(
+            f"➕ YANGI DARS\n\n📚 Guruh: {g['title']}\n\n1/3 — Dars nomini yozing.",
+            reply_markup=InlineKeyboardMarkup ( [[InlineKeyboardButton ( "❌ Bekor qilish",callback_data=f"v9:group:{gid}" ) ]] ) )
+
+    if d.startswith ( "v9:lessonmode:" ) :
+        mode_choice=d.rsplit ( ":",1 ) [1]
+        st=STATE.get ( u.id) or {}
+        if st.get ( "mode" ) !="v9_lesson_mode" or mode_choice not in {"material_only","ai_plus"}:
+            return await q.answer ( "Dars yaratish sessiyasi topilmadi.",show_alert=True)
+        gid=int ( st["group_id"] ) ; g=one ( "SELECT * FROM v9_groups WHERE id=? AND teacher_id=?", ( gid,u.id ) )
+        if not g:return await q.answer ( "Ruxsat yo‘q.",show_alert=True)
+        mat=st["material"]; title=st["title"]
+        with db ( ) as c:
+            lid=c.execute ( """INSERT INTO v9_lessons ( group_id,teacher_id,title,material_type,material_file_id,material_text,ai_mode,status,created_at)
+                             VALUES ( ?,?,?,?,?,?,?,'published',? ) """,
+                          (gid,u.id,title,mat["kind"],mat["file_id"],mat["text"],mode_choice,now (  )  )  ) .lastrowid
+            c.execute ( """INSERT INTO v9_lesson_materials ( lesson_id,kind,file_id,file_name,mime_type,extracted_text,created_at)
+                         VALUES ( ?,?,?,?,?,?,? ) """, ( lid,mat["kind"],mat["file_id"],mat["file_name"],mat["mime"],mat["text"],now (  )  ) )
+        STATE.pop ( u.id,None)
+        await q.edit_message_text(
+            f"✅ DARS E’LON QILINDI\n\n📖 {title}\n📚 {g['title']}\n"
+            + ( "🔒 AI faqat darslikdan javob beradi." if mode_choice=="material_only" else "🧠 AI darslikni asos qilib qo‘shimcha tushuntiradi." ) ,
+            reply_markup=InlineKeyboardMarkup ( [[InlineKeyboardButton ( "📖 Darsni ochish",callback_data=f"v9:lesson:view:{lid}" ) ],[InlineKeyboardButton ( "⬅️ Guruh",callback_data=f"v9:group:{gid}" ) ]] ) )
+        return
+    if d.startswith ( "v9:lessons:" ) :
+        gid=int ( d.rsplit ( ":",1 ) [1])
+        g=one ( "SELECT * FROM v9_groups WHERE id=? AND is_active=1", ( gid, ) )
+        if not g:return await q.answer ( "Guruh topilmadi.",show_alert=True)
+        teacher=int ( g["teacher_id"] ) ==u.id
+        member=one ( "SELECT 1 FROM v9_group_members WHERE group_id=? AND user_id=? AND is_active=1", ( gid,u.id ) )
+        if not teacher and not member:return await q.answer ( "Ruxsat yo‘q.",show_alert=True)
+        rows=all_ ( "SELECT id,title,status FROM v9_lessons WHERE group_id=? AND status='published' ORDER BY id DESC", ( gid, ) )
+        if not rows:
+            back=f"v9:group:{gid}"
+            return await q.edit_message_text ( "📚 Hozircha e’lon qilingan dars yo‘q.",reply_markup=InlineKeyboardMarkup ( [[InlineKeyboardButton ( "⬅️ Guruh",callback_data=back ) ]] ) )
+        kb=[[InlineKeyboardButton (  ( "👨‍🏫 " if teacher else "📖 " ) +r["title"][:45],callback_data=f"v9:lesson:view:{r['id']}" ) ] for r in rows[:40]]
+        kb.append ( [InlineKeyboardButton ( "⬅️ Guruh",callback_data=f"v9:group:{gid}" ) ])
+        return await q.edit_message_text ( "📚 DARSLAR",reply_markup=InlineKeyboardMarkup ( kb ) )
+
+    if d.startswith ( "v9:lesson:view:" ) :
+        lid=int ( d.rsplit ( ":",1 ) [1])
+        l=one ( """SELECT l.*,g.title group_title,g.teacher_id group_teacher
+                 FROM v9_lessons l JOIN v9_groups g ON g.id=l.group_id
+                 WHERE l.id=? AND l.status='published'""", ( lid, ) )
+        if not l:return await q.answer ( "Dars topilmadi.",show_alert=True)
+        teacher=int ( l["group_teacher"] ) ==u.id
+        member=one ( "SELECT 1 FROM v9_group_members WHERE group_id=? AND user_id=? AND is_active=1", ( l["group_id"],u.id ) )
+        if not teacher and not member:return await q.answer ( "Ruxsat yo‘q.",show_alert=True)
+        mode="🔒 Faqat darslikdan" if l["ai_mode"]=="material_only" else "🧠 Darslik + AI tushuntirishi"
+        if teacher:
+            kb=InlineKeyboardMarkup ( [
+              [InlineKeyboardButton ( "📄 Material",callback_data=f"v9:lesson:material:{lid}" ) ,
+               InlineKeyboardButton ( "📝 Test yaratish",callback_data=f"v9:test:make:{lid}" ) ],
+              [InlineKeyboardButton ( "📊 Natijalar",callback_data=f"v9:lesson:results:{lid}" ) ],
+              [InlineKeyboardButton ( "⬅️ Darslar",callback_data=f"v9:lessons:{l['group_id']}" ) ]])
+        else:
+            kb=InlineKeyboardMarkup ( [
+              [InlineKeyboardButton ( "🤖 AI bilan o‘rganish",callback_data=f"v9:learn:{lid}" ) ],
+              [InlineKeyboardButton ( "📝 Yakuniy test",callback_data=f"v9:test:start:{lid}" ) ],
+              [InlineKeyboardButton ( "⬅️ Darslar",callback_data=f"v9:lessons:{l['group_id']}" ) ]])
+        return await q.edit_message_text(
+            f"📖 {l['title']}\n📚 {l['group_title']}\n{mode}",
+            reply_markup=kb)
+
+    if d.startswith ( "v9:lesson:material:" ) :
+        lid=int ( d.rsplit ( ":",1 ) [1])
+        l=one ( "SELECT * FROM v9_lessons WHERE id=? AND teacher_id=?", ( lid,u.id ) )
+        if not l:return await q.answer ( "Ruxsat yo‘q.",show_alert=True)
+        mats=all_ ( "SELECT kind,file_name,extracted_text FROM v9_lesson_materials WHERE lesson_id=? ORDER BY id", ( lid, ) )
+        lines=[]
+        for i,m in enumerate ( mats,1 ) :
+            nm=m["file_name"] or ("Yozma material" if m["kind"]=="text" else m["kind"])
+            lines.append ( f"{i}. {nm} — {len ( m['extracted_text'] or '' ) } belgi")
+        return await q.edit_message_text ( "📄 DARS MATERIALLARI\n\n"+ ( "\n".join ( lines) or "Material yo‘q." ) ,reply_markup=InlineKeyboardMarkup ( [[InlineKeyboardButton ( "⬅️ Dars",callback_data=f"v9:lesson:view:{lid}" ) ]] ) )
+
+    if d.startswith ( "v9:learn:" ) :
+        lid=int ( d.rsplit ( ":",1 ) [1])
+        l=one ( "SELECT * FROM v9_lessons WHERE id=? AND status='published'", ( lid, ) )
+        if not l:return await q.answer ( "Dars topilmadi.",show_alert=True)
+        member=one ( "SELECT 1 FROM v9_group_members WHERE group_id=? AND user_id=? AND is_active=1", ( l["group_id"],u.id ) )
+        if not member:return await q.answer ( "Siz bu guruh talabasi emassiz.",show_alert=True)
+        material=v9_lesson_context ( lid)
+        if not material:return await q.answer ( "Dars materiali bo‘sh.",show_alert=True)
+        STATE[u.id]={"mode":"v9_ai_lesson","lesson_id":lid,"group_id":l["group_id"]}
+        with db ( ) as c:
+            c.execute ( """INSERT INTO v9_lesson_progress ( lesson_id,user_id,stage,score,updated_at)
+                         VALUES ( ?,?,'learning',0,?)
+                         ON CONFLICT ( lesson_id,user_id) DO UPDATE SET stage='learning',updated_at=excluded.updated_at""", ( lid,u.id,now (  )  ) )
+        intro=await v9_ai_teach ( l,material,"Darsni boshlang. Avval mavzuni sodda va qiziqarli qilib tushuntiring, keyin menga bitta tekshiruvchi savol bering.")
+        await q.edit_message_text ( f"🤖 AI USTOZ — {l['title']}\n\n{intro[:3500]}",reply_markup=InlineKeyboardMarkup ( [[InlineKeyboardButton ( "📝 Testga o‘tish",callback_data=f"v9:test:start:{lid}" ) ],[InlineKeyboardButton ( "⬅️ Dars",callback_data=f"v9:lesson:view:{lid}" ) ]] ) )
+        return
+
+    if d.startswith ( "v9:test:make:" ) :
+        lid=int ( d.rsplit ( ":",1 ) [1])
+        l=one ( "SELECT * FROM v9_lessons WHERE id=? AND teacher_id=?", ( lid,u.id ) )
+        if not l:return await q.answer ( "Ruxsat yo‘q.",show_alert=True)
+        await q.edit_message_text ( "🧠 AI test tayyorlamoqda...")
+        qs=await v9_make_test ( lid,10)
+        if not qs:return await q.edit_message_text ( "⚠️ Test yaratilmadi.",reply_markup=InlineKeyboardMarkup ( [[InlineKeyboardButton ( "⬅️ Dars",callback_data=f"v9:lesson:view:{lid}" ) ]] ) )
+        with db ( ) as c:c.execute ( "INSERT INTO v9_tests ( lesson_id,questions_json,created_at) VALUES ( ?,?,? ) ", ( lid,json.dumps ( qs,ensure_ascii=False ) ,now (  )  ) )
+        return await q.edit_message_text ( f"✅ {len ( qs ) } ta savolli test tayyorlandi.\n\nTalabalar endi dars ichidan testni topshira oladi.",reply_markup=InlineKeyboardMarkup ( [[InlineKeyboardButton ( "⬅️ Dars",callback_data=f"v9:lesson:view:{lid}" ) ]] ) )
+
+    if d.startswith ( "v9:test:start:" ) :
+        lid=int ( d.rsplit ( ":",1 ) [1])
+        l=one ( "SELECT * FROM v9_lessons WHERE id=? AND status='published'", ( lid, ) )
+        if not l:return await q.answer ( "Dars topilmadi.",show_alert=True)
+        member=one ( "SELECT 1 FROM v9_group_members WHERE group_id=? AND user_id=? AND is_active=1", ( l["group_id"],u.id ) )
+        if not member:return await q.answer ( "Siz bu guruh talabasi emassiz.",show_alert=True)
+        tr=one ( "SELECT * FROM v9_tests WHERE lesson_id=? ORDER BY id DESC LIMIT 1", ( lid, ) )
+        if not tr:
+            qs=await v9_make_test ( lid,10)
+            if not qs:return await q.answer ( "Test hali tayyor emas.",show_alert=True)
+            with db ( ) as c:
+                tid=c.execute ( "INSERT INTO v9_tests ( lesson_id,questions_json,created_at) VALUES ( ?,?,? ) ", ( lid,json.dumps ( qs,ensure_ascii=False ) ,now (  )  )  ) .lastrowid
+        else:
+            tid=tr["id"]; qs=json.loads ( tr["questions_json"])
+        STATE[u.id]={"mode":"v9_test","lesson_id":lid,"group_id":l["group_id"],"test_id":tid,"questions":qs,"index":0,"correct":0}
+        return await v9_send_test_question ( q.message,u.id)
+
+    if d.startswith ( "v9:ans:" ) :
+        parts=d.split ( ":")
+        if len ( parts ) !=4:return
+        lid=int ( parts[2] ) ; chosen=int ( parts[3])
+        st=STATE.get ( u.id) or {}
+        if st.get ( "mode" ) !="v9_test" or int ( st.get ( "lesson_id",0 )  ) !=lid:return await q.answer ( "Bu test sessiyasi tugagan.",show_alert=True)
+        qs=st["questions"]; idx=int ( st["index"])
+        if idx>=len ( qs ) :return
+        correct=int ( qs[idx]["answer"])
+        if chosen==correct: st["correct"]=int ( st.get ( "correct",0 )  ) +1
+        st["index"]=idx+1; STATE[u.id]=st
+        await q.answer ( "✅ To‘g‘ri!" if chosen==correct else f"❌ To‘g‘ri javob: {correct+1}")
+        if st["index"]>=len ( qs ) :
+            total=len ( qs ) ; corr=int ( st["correct"] ) ; score=round ( corr*100/total) if total else 0
+            with db ( ) as c:
+                c.execute ( """INSERT INTO v9_test_results ( lesson_id,group_id,user_id,score,max_score,correct_count,total_count,details,created_at)
+                             VALUES ( ?,?,?,?,100,?,?,?,? ) """, ( lid,st["group_id"],u.id,score,corr,total,json.dumps ( {"test_id":st["test_id"]} ) ,now (  )  ) )
+                c.execute ( """INSERT INTO v9_points ( group_id,user_id,points,updated_at) VALUES ( ?,?,?,?)
+                             ON CONFLICT ( group_id,user_id) DO UPDATE SET points=points+excluded.points,updated_at=excluded.updated_at""", ( st["group_id"],u.id,score,now (  )  ) )
+                c.execute ( """INSERT INTO v9_lesson_progress ( lesson_id,user_id,stage,score,updated_at)
+                             VALUES ( ?,?,'completed',?,?)
+                             ON CONFLICT ( lesson_id,user_id) DO UPDATE SET stage='completed',score=excluded.score,updated_at=excluded.updated_at""", ( lid,u.id,score,now (  )  ) )
+            STATE.pop ( u.id,None)
+            return await q.edit_message_text ( f"🏁 TEST TUGADI\n\n✅ To‘g‘ri: {corr}/{total}\n🎯 Natija: {score}/100\n🏆 Guruh balliga: +{score}",reply_markup=InlineKeyboardMarkup ( [[InlineKeyboardButton ( "📖 Darsga qaytish",callback_data=f"v9:lesson:view:{lid}" ) ]] ) )
+        return await v9_send_test_question ( q.message,u.id,edit=True)
+
+    if d.startswith ( "v9:lesson:results:" ) :
+        lid=int ( d.rsplit ( ":",1 ) [1])
+        l=one ( "SELECT * FROM v9_lessons WHERE id=? AND teacher_id=?", ( lid,u.id ) )
+        if not l:return await q.answer ( "Ruxsat yo‘q.",show_alert=True)
+        rows=all_ ( """SELECT r.user_id,MAX ( r.score) score,MAX ( r.correct_count) correct_count,MAX ( r.total_count) total_count,
+                    COALESCE ( us.first_name,'') first_name,COALESCE ( us.username,'') username
+                    FROM v9_test_results r LEFT JOIN users us ON us.user_id=r.user_id
+                    WHERE r.lesson_id=? GROUP BY r.user_id ORDER BY score DESC""", ( lid, ) )
+        body="\n".join ( f"{i}. {r['first_name'] or ('@'+r['username'] if r['username'] else r['user_id'] ) } — {r['score']}/100" for i,r in enumerate ( rows,1 ) ) or "Hali test topshirgan talaba yo‘q."
+        return await q.edit_message_text ( f"📊 {l['title']} — NATIJALAR\n\n{body[:3500]}",reply_markup=InlineKeyboardMarkup ( [[InlineKeyboardButton ( "⬅️ Dars",callback_data=f"v9:lesson:view:{lid}" ) ]] ) )
+
+    if d.startswith ( "v9:results:" ) :
+        gid=int ( d.rsplit ( ":",1 ) [1])
+        g=one ( "SELECT * FROM v9_groups WHERE id=? AND teacher_id=?", ( gid,u.id ) )
+        if not g:return await q.answer ( "Ruxsat yo‘q.",show_alert=True)
+        rows=all_ ( """SELECT m.user_id,COALESCE ( us.first_name,'') first_name,COALESCE ( us.username,'') username,
+                    COALESCE ( p.points,0) points,COALESCE ( AVG ( r.score ) ,0) avg_score
+                    FROM v9_group_members m LEFT JOIN users us ON us.user_id=m.user_id
+                    LEFT JOIN v9_points p ON p.group_id=m.group_id AND p.user_id=m.user_id
+                    LEFT JOIN v9_test_results r ON r.group_id=m.group_id AND r.user_id=m.user_id
+                    WHERE m.group_id=? AND m.is_active=1 GROUP BY m.user_id ORDER BY points DESC""", ( gid, ) )
+        body="\n".join ( f"{i}. {r['first_name'] or ('@'+r['username'] if r['username'] else r['user_id'] ) } — 🏆 {r['points']} | 📝 {round ( r['avg_score'] ) }" for i,r in enumerate ( rows,1 ) ) or "Talabalar natijasi hali yo‘q."
+        return await q.edit_message_text ( f"📊 {g['title']} — JURNAL\n\n{body[:3500]}",reply_markup=InlineKeyboardMarkup ( [[InlineKeyboardButton ( "⬅️ Guruh",callback_data=f"v9:group:{gid}" ) ]] ) )
+
+    if d.startswith ( "v9:ranking:" ) :
+        gid=int ( d.rsplit ( ":",1 ) [1])
+        rows=all_ ( """SELECT p.user_id,p.points,COALESCE ( us.first_name,'') first_name,COALESCE ( us.username,'') username
+                     FROM v9_points p LEFT JOIN users us ON us.user_id=p.user_id
+                     WHERE p.group_id=? ORDER BY p.points DESC LIMIT 30""", ( gid, ) )
+        body="\n".join ( f"{i}. {r['first_name'] or ('@'+r['username'] if r['username'] else r['user_id'] ) } — {r['points']} ball" for i,r in enumerate ( rows,1 ) ) or "Hali ballar yo‘q."
+        return await q.edit_message_text ( "🏆 GURUH REYTINGI\n\n"+body,reply_markup=InlineKeyboardMarkup ( [[InlineKeyboardButton ( "⬅️ Guruh",callback_data=f"v9:group:{gid}" ) ]] ) )
+
+    if d=="v9:teacher:journal":
+        rows=all_ ( "SELECT id,title FROM v9_groups WHERE teacher_id=? AND is_active=1 ORDER BY id DESC", ( u.id, ) )
+        if not rows:return await q.edit_message_text ( "📊 Hali guruh yo‘q.",reply_markup=v9_teacher_markup (  ) )
+        kb=[[InlineKeyboardButton ( "📊 "+r["title"][:45],callback_data=f"v9:results:{r['id']}" ) ] for r in rows]
+        kb.append ( [InlineKeyboardButton ( "⬅️ Kabinet",callback_data="v9:teacher:home" ) ])
+        return await q.edit_message_text ( "📊 NATIJALAR / JURNAL\n\nGuruhni tanlang:",reply_markup=InlineKeyboardMarkup ( kb ) )
+
+
+def v9_teacher_keyboard (  ) :
+    return ReplyKeyboardMarkup ( [
+        [KeyboardButton ( "🏠 Bosh menyu" ) ,KeyboardButton ( "👥 Guruhlarim" ) ],
+        [KeyboardButton ( "➕ Dars berish" ) ,KeyboardButton ( "📊 Jurnal" ) ]
+    ],resize_keyboard=True,is_persistent=True)
+
+def v9_student_keyboard (  ) :
+    return ReplyKeyboardMarkup ( [
+        [KeyboardButton ( "🏠 Bosh menyu" ) ,KeyboardButton ( "📚 Darslarim" ) ],
+        [KeyboardButton ( "🤖 AI Ustoz" ) ,KeyboardButton ( "⭐ Ballarim" ) ]
+    ],resize_keyboard=True,is_persistent=True)
+
+def v9_lesson_context ( lid,limit=30000 ) :
+    rows=all_ ( "SELECT extracted_text FROM v9_lesson_materials WHERE lesson_id=? ORDER BY id", ( lid, ) )
+    text="\n\n".join (  ( r["extracted_text"] or "" ) .strip ( ) for r in rows if (r["extracted_text"] or "" ) .strip (  ) )
+    if not text:
+        l=one ( "SELECT material_text FROM v9_lessons WHERE id=?", ( lid, ) )
+        text= ( l["material_text"] or "") if l else ""
+    return text[:limit]
+
+def v9_extract_pdf ( raw ) :
+    if fitz is None:return ""
+    doc=fitz.open ( stream=raw,filetype="pdf")
+    parts=[]
+    for page in doc:
+        parts.append ( page.get_text ( "text" ) )
+        if sum ( len ( x) for x in parts ) >45000:break
+    doc.close ( )
+    return "\n".join ( parts ) [:45000]
+
+async def v9_ai_teach ( lesson,material,user_text ) :
+    if not OPENAI_API_KEY:
+        return "⚠️ OPENAI_API_KEY sozlanmagan."
+    rule= ( "FAQAT berilgan dars materiali doirasida javob ber. Materialda javob bo‘lmasa, "
+          "“Bu ma’lumot ustoz bergan darslikda yo‘q” deb ayt.") if lesson["ai_mode"]=="material_only" else (
+          "Asosiy manba ustoz bergan material bo‘lsin. Tushuntirish uchun umumiy bilimdan foydalanishingiz mumkin, "
+          "lekin materialdan tashqari qo‘shimchani aniq ajratib ko‘rsating.")
+    prompt=f"""Siz Veritas V9 AI Ustozsiz.
+Dars: {lesson['title']}
+QOIDA: {rule}
+Talabaga yoshiga mos, sodda, bosqichma-bosqich va interaktiv tarzda o‘rgating.
+Keraksiz uzun javob bermang.
+
+USTOZ BERGAN MATERIAL:
+{material}
+
+TALABA:
+{user_text}
+"""
+    try:return await asyncio.to_thread ( _openai_response_sync,prompt)
+    except Exception as e:
+        log.exception ( "V9 AI teach: %s",e)
+        return "⚠️ AI Ustoz vaqtincha javob bera olmadi."
+
+async def v9_make_test ( lid,count=10 ) :
+    l=one ( "SELECT * FROM v9_lessons WHERE id=?", ( lid, ) )
+    material=v9_lesson_context ( lid)
+    if not l or not material or not OPENAI_API_KEY:return []
+    prompt=f"""Quyidagi dars materialidan aynan {count} ta 4 variantli test tuzing.
+Faqat materialga tayangan savollar bo‘lsin. JSONdan boshqa hech narsa yozmang.
+Format:
+[{{"q":"savol","options":["A","B","C","D"],"answer":0}}]
+answer 0..3 oralig‘idagi to‘g‘ri variant indeksi.
+
+DARS: {l['title']}
+MATERIAL:
+{material[:28000]}
+"""
+    try:
+        raw=await asyncio.to_thread ( _openai_response_sync,prompt)
+        m=re.search ( r"\[[\s\S]*\]",raw)
+        data=json.loads ( m.group ( 0) if m else raw)
+        good=[]
+        for x in data:
+            if isinstance ( x,dict) and isinstance ( x.get ( "q" ) ,str) and isinstance ( x.get ( "options" ) ,list) and len ( x["options"] ) ==4 and str ( x.get ( "answer","" )  ) .isdigit (  ) :
+                a=int ( x["answer"])
+                if 0<=a<4:good.append ( {"q":x["q"][:500],"options":[str ( z ) [:200] for z in x["options"]],"answer":a})
+        return good[:count]
+    except Exception as e:
+        log.exception ( "V9 test generation: %s",e ) ;return []
+
+async def v9_send_test_question ( msg,uid,edit=False ) :
+    st=STATE.get ( uid) or {}; qs=st.get ( "questions") or []; idx=int ( st.get ( "index",0 ) )
+    if idx>=len ( qs ) :return
+    x=qs[idx]; lid=st["lesson_id"]
+    kb=InlineKeyboardMarkup ( [[InlineKeyboardButton ( f"{i+1}. {opt}",callback_data=f"v9:ans:{lid}:{i}" ) ] for i,opt in enumerate ( x["options"] ) ])
+    text=f"📝 TEST — {idx+1}/{len ( qs ) }\n\n{x['q']}"
+    if edit:return await msg.edit_text ( text,reply_markup=kb)
+    return await msg.reply_text ( text,reply_markup=kb)
+
+async def v9_show_teacher_home ( msg,uid ) :
+    await msg.reply_text ( "👨‍🏫 USTOZ KABINETI\n\nTezkor menyu pastda doim turadi.",reply_markup=v9_teacher_keyboard (  ) )
+    await msg.reply_text ( "Kerakli bo‘lim:",reply_markup=v9_teacher_markup (  ) )
+
+async def v9_show_student_home ( msg,uid ) :
+    await msg.reply_text ( "👨‍🎓 O‘QUVCHI / TALABA KABINETI\n\nTezkor menyu pastda doim turadi.",reply_markup=v9_student_keyboard (  ) )
+    await msg.reply_text ( "Kerakli bo‘lim:",reply_markup=v9_student_markup (  ) )
 
 async def v9_private_input ( update,ctx ) :
     msg=update.effective_message;u=update.effective_user
     if not msg or not u or msg.chat.type!="private":return
     st=STATE.get ( u.id) or {};mode=st.get ( "mode")
+    if str ( mode ) .startswith ( "v9_" ) :
+        ctx.user_data["v9_consumed_message_id"]=msg.message_id
+    # V9 doimiy tezkor menyu
+    txt= ( msg.text or "" ) .strip ( )
+    prof=one ( "SELECT role FROM v9_profiles WHERE user_id=?", ( u.id, ) )
+    role=prof["role"] if prof else ""
+
+    if txt=="🏠 Bosh menyu" and role:
+        STATE.pop ( u.id,None)
+        if role=="teacher": return await v9_show_teacher_home ( msg,u.id)
+        return await v9_show_student_home ( msg,u.id)
+
+    if txt=="👥 Guruhlarim" and role=="teacher":
+        STATE.pop ( u.id,None)
+        rows=all_ ( "SELECT id,title FROM v9_groups WHERE teacher_id=? AND is_active=1 ORDER BY id DESC", ( u.id, ) )
+        kb=[[InlineKeyboardButton ( "📚 "+r["title"][:45],callback_data=f"v9:group:{r['id']}" ) ] for r in rows[:30]]
+        if not kb:return await msg.reply_text ( "👥 Hali guruh yaratmagansiz.",reply_markup=v9_teacher_keyboard (  ) )
+        return await msg.reply_text ( "👥 GURUHLARIM",reply_markup=InlineKeyboardMarkup ( kb ) )
+
+    if txt=="➕ Dars berish" and role=="teacher":
+        STATE.pop ( u.id,None)
+        rows=all_ ( "SELECT id,title FROM v9_groups WHERE teacher_id=? AND is_active=1 ORDER BY id DESC", ( u.id, ) )
+        if not rows:return await msg.reply_text ( "Avval guruh yarating.",reply_markup=v9_teacher_keyboard (  ) )
+        kb=[[InlineKeyboardButton ( "➕ "+r["title"][:45],callback_data=f"v9:lesson:new:{r['id']}" ) ] for r in rows]
+        return await msg.reply_text ( "Qaysi guruhga dars berasiz?",reply_markup=InlineKeyboardMarkup ( kb ) )
+
+    if txt=="📊 Jurnal" and role=="teacher":
+        STATE.pop ( u.id,None)
+        rows=all_ ( "SELECT id,title FROM v9_groups WHERE teacher_id=? AND is_active=1 ORDER BY id DESC", ( u.id, ) )
+        kb=[[InlineKeyboardButton ( "📊 "+r["title"][:45],callback_data=f"v9:results:{r['id']}" ) ] for r in rows]
+        return await msg.reply_text ( "📊 JURNAL\n\nGuruhni tanlang:",reply_markup=InlineKeyboardMarkup ( kb) if kb else v9_teacher_keyboard (  ) )
+
+    if txt=="📚 Darslarim" and role=="student":
+        STATE.pop ( u.id,None)
+        rows=all_ ( "SELECT g.id,g.title FROM v9_groups g JOIN v9_group_members m ON m.group_id=g.id WHERE m.user_id=? AND m.is_active=1 AND g.is_active=1", ( u.id, ) )
+        kb=[[InlineKeyboardButton ( "📚 "+r["title"][:45],callback_data=f"v9:lessons:{r['id']}" ) ] for r in rows]
+        return await msg.reply_text ( "📚 DARSLARIM\n\nGuruhni tanlang:",reply_markup=InlineKeyboardMarkup ( kb) if kb else v9_student_keyboard (  ) )
+
+    if txt=="⭐ Ballarim" and role=="student":
+        STATE.pop ( u.id,None)
+        rows=all_ ( "SELECT g.title,p.points FROM v9_points p JOIN v9_groups g ON g.id=p.group_id WHERE p.user_id=? ORDER BY p.points DESC", ( u.id, ) )
+        body="\n".join ( f"🏆 {r['title']}: {r['points']} ball" for r in rows) or "Hozircha ball yo‘q."
+        return await msg.reply_text ( "⭐ BALLARIM\n\n"+body,reply_markup=v9_student_keyboard (  ) )
+
+    if txt=="🤖 AI Ustoz" and role=="student":
+        active=st if st.get ( "mode" ) =="v9_ai_lesson" else None
+        if active:
+            l=one ( "SELECT title FROM v9_lessons WHERE id=?", ( active["lesson_id"], ) )
+            return await msg.reply_text ( f"🤖 AI Ustoz faol: {l['title'] if l else 'dars'}\nSavolingizni yozavering.",reply_markup=v9_student_keyboard (  ) )
+        rows=all_ ( """SELECT l.id,l.title FROM v9_lessons l JOIN v9_group_members m ON m.group_id=l.group_id
+                     WHERE m.user_id=? AND m.is_active=1 AND l.status='published' ORDER BY l.id DESC LIMIT 20""", ( u.id, ) )
+        kb=[[InlineKeyboardButton ( "🤖 "+r["title"][:45],callback_data=f"v9:learn:{r['id']}" ) ] for r in rows]
+        return await msg.reply_text ( "🤖 Qaysi dars bo‘yicha AI Ustoz kerak?",reply_markup=InlineKeyboardMarkup ( kb) if kb else v9_student_keyboard (  ) )
+
+    # Yangi dars: nom -> material -> AI rejimi
+    if mode=="v9_lesson_title":
+        if not msg.text or len ( txt ) <2:return await msg.reply_text ( "Dars nomini yozing.")
+        st["title"]=txt[:150];st["mode"]="v9_lesson_material";STATE[u.id]=st
+        return await msg.reply_text(
+            "2/3 — Dars materialini yuboring.\n\n"
+            "📝 Oddiy matn\n📄 PDF\n🖼 Rasm yoki skrinshot\n\n"
+            "Veritas materialni o‘qib, talabaga o‘rgatish uchun tayyorlaydi.",
+            reply_markup=v9_teacher_keyboard (  ) )
+
+    if mode=="v9_lesson_material":
+        kind=""; file_id=""; file_name=""; mime=""; extracted=""
+        try:
+            if msg.text:
+                kind="text";extracted=txt
+            elif msg.document and (msg.document.mime_type or "" ) .lower (  ) =="application/pdf":
+                kind="pdf";file_id=msg.document.file_id;file_name=msg.document.file_name or "dars.pdf";mime="application/pdf"
+                tg=await ctx.bot.get_file ( file_id ) ;raw=bytes ( await tg.download_as_bytearray (  ) )
+                extracted=v9_extract_pdf ( raw)
+                if not extracted.strip (  ) :
+                    return await msg.reply_text ( "⚠️ Bu PDFdan matn olinmadi. Agar skan PDF bo‘lsa, sahifalarni rasm qilib yuboring.")
+            elif msg.photo or (msg.document and (msg.document.mime_type or "" ) .lower (  ) .startswith ( "image/" )  ) :
+                obj=msg.photo[-1] if msg.photo else msg.document
+                kind="image";file_id=obj.file_id;file_name=getattr ( obj,"file_name",None) or "screenshot.jpg";mime=getattr ( obj,"mime_type",None) or "image/jpeg"
+                tg=await ctx.bot.get_file ( file_id ) ;raw=bytes ( await tg.download_as_bytearray (  ) )
+                if not OPENAI_API_KEY:return await msg.reply_text ( "⚠️ Rasmni o‘qish uchun OPENAI_API_KEY kerak.")
+                extracted=await asyncio.to_thread ( _openai_image_response_sync,raw,mime,"Rasmdagi darslik matni, formulalar, jadval va asosiy ma’lumotlarni aniq ko‘chirib/tavsiflab bering. Hech narsa uydirmang.")
+            else:
+                return await msg.reply_text ( "PDF, rasm/skrinshot yoki yozma dars yuboring.")
+        except Exception as e:
+            log.exception ( "V9 material: %s",e)
+            return await msg.reply_text ( "⚠️ Materialni o‘qishda xato bo‘ldi. Boshqa fayl yoki matn bilan urinib ko‘ring.")
+        st["material"]={"kind":kind,"file_id":file_id,"file_name":file_name,"mime":mime,"text":extracted[:45000]}
+        st["mode"]="v9_lesson_mode";STATE[u.id]=st
+        kb=InlineKeyboardMarkup ( [
+          [InlineKeyboardButton ( "🔒 Faqat darslikdan",callback_data="v9:lessonmode:material_only" ) ],
+          [InlineKeyboardButton ( "🧠 Darslik + AI tushuntirishi",callback_data="v9:lessonmode:ai_plus" ) ]])
+        return await msg.reply_text ( f"✅ Material qabul qilindi ({len ( extracted ) } belgi ) .\n\n3/3 — AI qanday o‘qitsin?",reply_markup=kb)
+
+    if mode=="v9_ai_lesson" and msg.text:
+        lid=int ( st["lesson_id"] ) ;l=one ( "SELECT * FROM v9_lessons WHERE id=? AND status='published'", ( lid, ) )
+        if not l:return
+        material=v9_lesson_context ( lid)
+        answer=await v9_ai_teach ( l,material,txt)
+        ctx.user_data["v9_consumed_message_id"]=msg.message_id
+        return await msg.reply_text ( answer[:4000],reply_markup=v9_student_keyboard (  ) )
     if mode=="v9_new_group_title":
         if not msg.text or len ( msg.text.strip (  )  ) <2:return await msg.reply_text ( "Guruh nomini matn qilib yozing.")
         st["title"]=msg.text.strip (  ) [:120];st["mode"]="v9_new_group_subject";STATE[u.id]=st
@@ -3162,6 +3556,8 @@ async def group_ai_reply ( update,ctx ) :
     return True
 
 async def private_ai_reply ( update,ctx ) :
+    if ctx.user_data.get ( "v9_consumed_message_id" ) ==getattr ( update.effective_message,"message_id",None ) :
+        return
     if ctx.user_data.get ( "owner_consumed_message_id" ) ==getattr ( update.effective_message,"message_id",None ) :
         return
 
