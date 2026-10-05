@@ -134,6 +134,18 @@ def init_db (  ) :
       user_id INTEGER PRIMARY KEY, claimed_at INTEGER NOT NULL ) ;
     CREATE TABLE IF NOT EXISTS ai_group_trials(
       chat_id INTEGER PRIMARY KEY, claimed_at INTEGER NOT NULL, claimed_by INTEGER DEFAULT 0 ) ;
+    CREATE TABLE IF NOT EXISTS profile_likes(
+      target_user_id INTEGER NOT NULL,
+      voter_user_id INTEGER NOT NULL,
+      created_at INTEGER NOT NULL,
+      PRIMARY KEY ( target_user_id,voter_user_id) ) ;
+    CREATE INDEX IF NOT EXISTS idx_profile_likes_target ON profile_likes ( target_user_id ) ;
+    CREATE TABLE IF NOT EXISTS profile_dislikes(
+      target_user_id INTEGER NOT NULL,
+      voter_user_id INTEGER NOT NULL,
+      created_at INTEGER NOT NULL,
+      PRIMARY KEY ( target_user_id,voter_user_id) ) ;
+    CREATE INDEX IF NOT EXISTS idx_profile_dislikes_target ON profile_dislikes ( target_user_id ) ;
     CREATE TABLE IF NOT EXISTS ai_book_translations(
       id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER NOT NULL, book_id INTEGER NOT NULL,
       target_lang TEXT NOT NULL, status TEXT DEFAULT 'running', started_at INTEGER NOT NULL,
@@ -215,7 +227,26 @@ def init_db (  ) :
     CREATE TABLE IF NOT EXISTS audit(
       id INTEGER PRIMARY KEY AUTOINCREMENT,actor_id INTEGER,chat_id INTEGER,action TEXT,detail TEXT,created_at INTEGER ) ;
     """
-    with db ( ) as c: c.executescript ( schema)
+    with db ( ) as c:
+        c.executescript ( schema)
+        # Universal library file support. Old PDF columns remain compatible.
+        cols={r[1] for r in c.execute ( "PRAGMA table_info ( library_books ) " ) .fetchall (  ) }
+        for col,decl in (
+            ("book_file_id","TEXT DEFAULT ''" ) ,
+            ("book_unique_id","TEXT DEFAULT ''" ) ,
+            ("book_file_name","TEXT DEFAULT ''" ) ,
+            ("book_format","TEXT DEFAULT ''" ) ,
+            ("book_file_size","INTEGER DEFAULT 0")
+        ):
+            if col not in cols:
+                c.execute ( f"ALTER TABLE library_books ADD COLUMN {col} {decl}")
+        c.execute ( "CREATE INDEX IF NOT EXISTS idx_library_book_unique ON library_books ( book_unique_id ) ")
+        # Existing PDF records automatically become universal file records too.
+        c.execute ( """UPDATE library_books
+                     SET book_file_id=pdf_file_id,
+                         book_unique_id=pdf_unique_id,
+                         book_format=CASE WHEN COALESCE ( book_format,'' ) ='' THEN 'pdf' ELSE book_format END
+                     WHERE COALESCE ( book_file_id,'' ) ='' AND COALESCE ( pdf_file_id,'' ) <>''""")
 
 def ensure_user ( u ) :
     if not u: return
@@ -291,6 +322,7 @@ def main_menu_markup ( uid ) :
       [InlineKeyboardButton ( "🎁 Gift",callback_data="gifts" ) ,InlineKeyboardButton ( "💎 Premium",callback_data="premium" ) ],
       [InlineKeyboardButton ( "🏘 Guruhlarim",callback_data="mygroups" ) ],
       [InlineKeyboardButton ( "🌐 Global aktiv",callback_data="globalactive" ) ],
+      [InlineKeyboardButton ( "🔎 A’zo profili",callback_data="profilefind" ) ,InlineKeyboardButton ( "💠 Qadr TOP",callback_data="qadrtop" ) ],
       [InlineKeyboardButton ( "🤖 Veritas AI",callback_data="ai_private" ) ],
       [InlineKeyboardButton ( "🧩 AI Rebus",callback_data="rebus:start" ) ],
       [InlineKeyboardButton ( "📚 Vasatiya kutubxonasi",callback_data="library" ) ,InlineKeyboardButton ( "📜 Sahih Hadislar",callback_data="hadith" ) ],
@@ -489,9 +521,113 @@ def is_library_admin ( uid ) :
 def lib_lang_name ( code ) :
     return {"uz":"🇺🇿 O‘zbekcha","ru":"🇷🇺 Русский","en":"🇬🇧 English"}.get ( code,code)
 
+def profile_like_count ( uid ) :
+    r=one ( "SELECT COUNT ( *) n FROM profile_likes WHERE target_user_id=?", ( uid, ) )
+    return int ( r["n"] if r else 0 )
+
+
+def profile_liked_by ( target_uid,voter_uid ) :
+    return bool ( one ( "SELECT 1 FROM profile_likes WHERE target_user_id=? AND voter_user_id=?", ( target_uid,voter_uid ) ) )
+
+
+def profile_dislike_count ( uid ) :
+    r=one ( "SELECT COUNT ( *) n FROM profile_dislikes WHERE target_user_id=?", ( uid, ) )
+    return int ( r["n"] if r else 0 )
+
+
+def profile_disliked_by ( target_uid,voter_uid ) :
+    return bool ( one ( "SELECT 1 FROM profile_dislikes WHERE target_user_id=? AND voter_user_id=?", ( target_uid,voter_uid ) ) )
+
+
+def public_profile_text ( uid ) :
+    r=one ( "SELECT user_id,username,first_name FROM users WHERE user_id=?", ( uid, ) )
+    if not r: return None
+    xp,msgs=user_total_stats ( uid )
+    lvl=level ( xp )
+    shown_lvl="+99" if uid in SUPER_OWNERS else str ( lvl)
+    books,hadiths=content_contributions ( uid )
+    ai_until=ai_user_until ( uid )
+    ai_status=( "👑 Cheksiz (Super boshqaruv ) " if is_super ( uid ) else ( "✅ FAOL — "+fmt_until ( ai_until ) if ai_until>now ( ) else "❌ YO‘Q" ) )
+    name=r["first_name"] or ( "@"+r["username"] if r["username"] else f"ID {uid}" )
+    username= ( " @"+r["username"]) if r["username"] else ""
+    return (
+        f"👤 {name}{username}\n"
+        f"🆔 {uid}\n"
+        f"🛡 Botdagi roli: {bot_roles ( uid )}\n"
+        f"⭐ Kredit: {wallet ( uid )}\n"
+        f"🤖 AI Premium: {ai_status}\n\n"
+        f"🌐 Umumiy XP: {xp}\n"
+        f"💬 Umumiy xabarlar: {msgs}\n"
+        f"📈 Level: {shown_lvl}\n"
+        f"🔥 Aktivlik darajasi: {activity_degree ( lvl )}\n"
+        f"📚 Qo‘shgan kitoblari: {books} ta\n"
+        f"📜 Qo‘shgan hadislari: {hadiths} ta\n"
+        f"🏅 Ilm medali: {knowledge_medal ( books,hadiths )}\n"
+        f"💠 Qadr: {profile_like_count ( uid )}\n"
+        f"⚖️ E’tiroz: {profile_dislike_count ( uid )}"
+    )
+
+
+def qadr_top_text ( limit=10 ) :
+    rows=all_ ( """SELECT u.user_id,u.first_name,u.username,COUNT ( pl.voter_user_id) qadr
+                    FROM profile_likes pl JOIN users u ON u.user_id=pl.target_user_id
+                    GROUP BY u.user_id,u.first_name,u.username
+                    ORDER BY qadr DESC,u.user_id ASC LIMIT ?""", ( int ( limit ) , ) )
+    if not rows:
+        return "🏆 VERITAS — QADR TOP 10\n\nHozircha Qadr berilmagan."
+    medals=["🥇","🥈","🥉"]
+    lines=["🏆 VERITAS — QADR TOP 10",""]
+    for i,r in enumerate ( rows,1 ) :
+        mark=medals[i-1] if i<=3 else f"{i}."
+        name=r["first_name"] or ( ( "@"+r["username"]) if r["username"] else f"ID {r['user_id']}")
+        lines.append ( f"{mark} {name} — 💠 {int ( r['qadr'] ) } Qadr")
+    return "\n".join ( lines)
+
+
+def public_profile_markup ( target_uid,viewer_uid ) :
+    liked=profile_liked_by ( target_uid,viewer_uid )
+    disliked=profile_disliked_by ( target_uid,viewer_uid )
+    like_text= ( "↩️ Qadrni olish" if liked else "💠 Qadr" ) +f" · {profile_like_count ( target_uid )}"
+    dislike_text= ( "↩️ E’tirozni olish" if disliked else "⚖️ E’tiroz" ) +f" · {profile_dislike_count ( target_uid )}"
+    kb=[]
+    # Like/Dizlayk tugmalari har bir profilda ko‘rinadi.
+    # O‘z profilida ham tugmalar ko‘rinadi, ammo callback ovoz berishni bloklaydi.
+    kb.append ( [
+        InlineKeyboardButton ( like_text,callback_data=f"plike:{target_uid}" ),
+        InlineKeyboardButton ( dislike_text,callback_data=f"pdislike:{target_uid}" )
+    ] )
+    kb.append ( [InlineKeyboardButton ( "🔎 Boshqa a’zoni topish",callback_data="profilefind" )] )
+    kb.append ( [InlineKeyboardButton ( "⬅️ Orqaga",callback_data="home" ),InlineKeyboardButton ( "🏠 Bosh menyu",callback_data="home" )] )
+    return InlineKeyboardMarkup ( kb )
+
+
+async def send_public_profile ( ctx,chat_id,target_uid,viewer_uid,old_message=None ) :
+    text=public_profile_text ( target_uid )
+    if not text:
+        if old_message:
+            return await old_message.reply_text ( "❌ A’zo topilmadi." )
+        return await ctx.bot.send_message ( chat_id,"❌ A’zo topilmadi." )
+    markup=public_profile_markup ( target_uid,viewer_uid )
+    photo_id=None
+    try:
+        photos=await ctx.bot.get_user_profile_photos ( target_uid,limit=1 )
+        if photos.total_count and photos.photos:
+            # Eng kichik profil rasmi varianti.
+            photo_id=photos.photos[0][0].file_id
+    except TelegramError:
+        photo_id=None
+    if old_message:
+        try: await old_message.delete ( )
+        except TelegramError: pass
+    if photo_id:
+        return await ctx.bot.send_photo ( chat_id,photo=photo_id,caption=text[:1024],reply_markup=markup )
+    return await ctx.bot.send_message ( chat_id,text,reply_markup=markup )
+
+
 def library_home_markup ( uid ) :
     kb=[
-      [InlineKeyboardButton ( "🔎 Qidirish",callback_data="libsearch" ) ,InlineKeyboardButton ( "🗂 Kategoriyalar",callback_data="libcats:0" ) ],
+      [InlineKeyboardButton ( "🤖 AI Kitob qidirish",callback_data="libaisearch" ) ],
+      [InlineKeyboardButton ( "🔎 Oddiy qidirish",callback_data="libsearch" ) ,InlineKeyboardButton ( "🗂 Kategoriyalar",callback_data="libcats:0" ) ],
       [InlineKeyboardButton ( "🆕 Yangi kitoblar",callback_data="libnew:0" ) ,InlineKeyboardButton ( "❤️ Sevimlilar",callback_data="libfav:0" ) ],
       [InlineKeyboardButton ( "🇺🇿",callback_data="liblang:uz:0" ) ,InlineKeyboardButton ( "🇷🇺",callback_data="liblang:ru:0" ) ,InlineKeyboardButton ( "🇬🇧",callback_data="liblang:en:0" ) ],
     ]
@@ -521,10 +657,10 @@ def library_book_text ( r ) :
 
 def library_book_markup ( uid,book_id,back="library" ) :
     fav=bool ( one ( "SELECT 1 FROM library_favorites WHERE user_id=? AND book_id=?", ( uid,book_id )  ) )
-    r=one ( "SELECT pdf_file_id,audio_file_id FROM library_books WHERE id=?", ( book_id, ) )
+    r=one ( "SELECT pdf_file_id,audio_file_id,book_file_id,book_format FROM library_books WHERE id=?", ( book_id, ) )
     kb=[]
     row=[]
-    if r and r["pdf_file_id"]: row.append ( InlineKeyboardButton ( "📄 Kitob fayli",callback_data=f"libpdf:{book_id}" ) )
+    if r and (r["book_file_id"] or r["pdf_file_id"] ) : row.append ( InlineKeyboardButton ( "📥 Kitobni olish",callback_data=f"libfile:{book_id}" ) )
     if r and r["audio_file_id"]: row.append ( InlineKeyboardButton ( "🎧 Audio",callback_data=f"libaudio:{book_id}" ) )
     if row: kb.append ( row)
     if r and r["pdf_file_id"]:
@@ -561,12 +697,189 @@ def library_list_markup ( rows,page,prefix,total,extra="" ) :
     kb.append ( [InlineKeyboardButton ( "⬅️ Kutubxona",callback_data="library" ) ,InlineKeyboardButton ( "🏠 Bosh menyu",callback_data="home" ) ])
     return InlineKeyboardMarkup ( kb)
 
+
+def _compact ( s, n=180 ) :
+    return re.sub ( r"\s+"," ",str ( s or "" )  ) .strip (  ) [:n]
+
+def _ids_from_ai ( text, allowed ) :
+    found=[]
+    for x in re.findall ( r"\b\d+\b", text or "" ) :
+        i=int ( x)
+        if i in allowed and i not in found:
+            found.append ( i)
+    return found[:8]
+
+async def ai_library_search ( query ) :
+    """AI may rank only rows that actually exist in Vasatiya library."""
+    rows=all_ ( """SELECT b.id,b.title,b.author,b.description,b.lang,
+                       COALESCE ( GROUP_CONCAT ( c.name, ', ' ) ,'') cats
+                FROM library_books b
+                LEFT JOIN library_book_categories bc ON bc.book_id=b.id
+                LEFT JOIN library_categories c ON c.id=bc.category_id
+                WHERE b.status='approved'
+                GROUP BY b.id ORDER BY b.id DESC LIMIT 1200""")
+    if not rows: return []
+    q= ( query or "" ) .strip (  ) .lower ( )
+    words=[w for w in re.findall ( r"[\wʻ’'-]+",q,re.U) if len ( w ) >2]
+    scored=[]
+    for r in rows:
+        hay=" ".join ( [r["title"] or "",r["author"] or "",r["description"] or "",r["cats"] or ""] ) .lower ( )
+        score=sum ( 5 if w in (r["title"] or "" ) .lower ( ) else 2 if w in hay else 0 for w in words)
+        if score: scored.append (  ( score,r ) )
+    scored.sort ( key=lambda x: ( -x[0],-int ( x[1]["id"] )  ) )
+    # Give AI a real catalog, never open web/external books.
+    pool=[x[1] for x in scored[:120]]
+    if len ( pool ) <80:
+        seen={int ( r["id"]) for r in pool}
+        for r in rows:
+            if int ( r["id"]) not in seen:
+                pool.append ( r ) ; seen.add ( int ( r["id"] ) )
+            if len ( pool ) >=160: break
+    if OPENAI_API_KEY:
+        catalog="\n".join(
+            f"ID={r['id']} | { _compact ( r['title'],90) } | { _compact ( r['author'],55) } | "
+            f"{ _compact ( r['cats'],55) } | { _compact ( r['description'],120) }"
+            for r in pool
+        )
+        prompt=(
+            "Vazifa: foydalanuvchi so‘roviga mos kitoblarni FAQAT quyidagi Vasatiya katalogidan tanla. "
+            "Katalogda yo‘q kitobni uydirma. Eng mos 1-8 ta kitob ID sini moslik tartibida qaytar. "
+            "Javob formati faqat vergul bilan IDlar, masalan: 12,5,91. Mos kitob bo‘lmasa NONE.\n\n"
+            f"So‘rov: {query}\n\nKATALOG:\n{catalog}"
+        )
+        try:
+            ans=await asyncio.to_thread ( _openai_response_sync,prompt)
+            ids=_ids_from_ai ( ans,{int ( r["id"]) for r in pool})
+            if ids:
+                byid={int ( r["id"] ) :r for r in rows}
+                return [byid[i] for i in ids if i in byid]
+        except Exception:
+            log.exception ( "AI library search failed; lexical fallback used")
+    return [r for _,r in scored[:8]]
+
+async def ai_hadith_search ( query ) :
+    """AI may rank only hadiths stored in Veritas hadith DB."""
+    rows=all_ ( """SELECT id,collection,number,translation,explanation,source
+                 FROM hadiths WHERE status='approved'
+                 ORDER BY id DESC LIMIT 1600""")
+    if not rows: return []
+    q= ( query or "" ) .strip (  ) .lower ( )
+    words=[w for w in re.findall ( r"[\wʻ’'-]+",q,re.U) if len ( w ) >2]
+    scored=[]
+    for r in rows:
+        hay=" ".join ( [r["collection"] or "",str ( r["number"] ) ,r["translation"] or "",r["explanation"] or "",r["source"] or ""] ) .lower ( )
+        score=sum ( 3 if w in hay else 0 for w in words)
+        if score: scored.append (  ( score,r ) )
+    scored.sort ( key=lambda x: ( -x[0],-int ( x[1]["id"] )  ) )
+    pool=[x[1] for x in scored[:140]]
+    if len ( pool ) <100:
+        seen={int ( r["id"]) for r in pool}
+        for r in rows:
+            if int ( r["id"]) not in seen:
+                pool.append ( r ) ; seen.add ( int ( r["id"] ) )
+            if len ( pool ) >=180: break
+    if OPENAI_API_KEY:
+        catalog="\n".join(
+            f"ID={r['id']} | { _compact ( r['collection'],35) } {r['number']} | "
+            f"{ _compact ( r['translation'],150) } | { _compact ( r['explanation'],90) }"
+            for r in pool
+        )
+        prompt=(
+            "Vazifa: foydalanuvchi mavzusiga mos hadislarni FAQAT quyidagi Veritas hadis bazasidan tanla. "
+            "Tashqaridan hadis keltirma, raqam yoki matn uydirma. Eng mos 1-8 ta IDni qaytar. "
+            "Format faqat IDlar vergul bilan. Mos kelmasa NONE.\n\n"
+            f"So‘rov: {query}\n\nHADIS BAZASI:\n{catalog}"
+        )
+        try:
+            ans=await asyncio.to_thread ( _openai_response_sync,prompt)
+            ids=_ids_from_ai ( ans,{int ( r["id"]) for r in pool})
+            if ids:
+                byid={int ( r["id"] ) :r for r in rows}
+                return [byid[i] for i in ids if i in byid]
+        except Exception:
+            log.exception ( "AI hadith search failed; lexical fallback used")
+    return [r for _,r in scored[:8]]
+
+async def send_ai_library_results ( msg, query ) :
+    rows=await ai_library_search ( query)
+    if not rows:
+        return await msg.reply_text(
+            "🤖 Vasatiya AI bu so‘rovga mos kitobni o‘z kutubxonamizdan topmadi.\n"
+            "Boshqa kalit so‘z yoki mavzu bilan urinib ko‘ring.",
+            reply_markup=library_home_markup ( msg.from_user.id)
+        )
+    kb=[]
+    for r in rows[:8]:
+        title=_compact ( r["title"],42)
+        author=_compact ( r["author"],24)
+        label=f"📖 {title}" + (f" — {author}" if author else "")
+        kb.append ( [InlineKeyboardButton ( label,callback_data=f"libbook:{r['id']}" ) ])
+    kb.append ( [InlineKeyboardButton ( "🤖 Yana AI qidiruv",callback_data="libaisearch" ) ,
+               InlineKeyboardButton ( "📚 Kutubxona",callback_data="library" ) ])
+    return await msg.reply_text(
+        f"🤖 VASATIYA AI QIDIRUV\n\n🔎 So‘rov: {query}\n"
+        f"📚 Faqat Vasatiya kutubxonasidagi kitoblardan {len ( rows[:8] ) } ta mos natija:",
+        reply_markup=InlineKeyboardMarkup ( kb)
+    )
+
+async def send_ai_hadith_results ( msg, query ) :
+    rows=await ai_hadith_search ( query)
+    if not rows:
+        return await msg.reply_text(
+            "🤖 AI bu mavzuga mos hadisni faqat biz qo‘shgan hadislar orasidan topmadi.",
+            reply_markup=back_markup ( "hadith")
+        )
+    kb=[]
+    for r in rows[:8]:
+        kb.append ( [InlineKeyboardButton(
+            f"📜 {r['collection']} — {r['number']}",
+            callback_data=f"hshow:{r['id']}"
+        )])
+    kb.append ( [InlineKeyboardButton ( "🤖 Yana AI qidiruv",callback_data="hadaisearch" ) ,
+               InlineKeyboardButton ( "📜 Hadislar",callback_data="hadith" ) ])
+    return await msg.reply_text(
+        f"🤖 AI HADIS QIDIRUV\n\n🔎 Mavzu: {query}\n"
+        f"📜 Faqat Veritas bazasidagi hadislardan {len ( rows[:8] ) } ta mos natija:",
+        reply_markup=InlineKeyboardMarkup ( kb)
+    )
+
 async def library_private_input ( update,ctx ) :
     if update.effective_chat.type!="private": return
     uid=update.effective_user.id; st=STATE.get ( uid)
     if st: ctx.user_data["workflow_message_id"]=update.effective_message.message_id
     if st and str ( st.get ( "mode","" )  ) .startswith ( "had_" ) :
         return await hadith_private_input ( update,ctx)
+    if st and st.get ( "mode" ) =="profile_find":
+        msg=update.effective_message
+        if not msg.text: return await msg.reply_text ( "A’zoning @username yoki Telegram ID sini yozing.")
+        value=msg.text.strip (  ) ; target_uid=0
+        if value.isdigit (  ) :
+            target_uid=int ( value)
+        elif value.startswith ( "@" ) :
+            r=one ( "SELECT user_id FROM users WHERE lower ( username ) =lower ( ? ) ", ( value[1:], ) )
+            target_uid=int ( r["user_id"]) if r else 0
+        if not target_uid or not one ( "SELECT 1 FROM users WHERE user_id=?", ( target_uid, )  ) :
+            return await msg.reply_text ( "❌ Veritas bazasida bunday a’zo topilmadi.")
+        STATE.pop ( uid,None)
+        return await send_public_profile ( ctx,msg.chat.id,target_uid,uid)
+
+    if st and st.get ( "mode" ) =="lib_ai_search":
+        msg=update.effective_message
+        if not msg.text: return await msg.reply_text ( "🔎 Qidirayotgan kitob mavzusini matn qilib yozing.")
+        query=msg.text.strip ( )
+        if len ( query ) <2: return await msg.reply_text ( "So‘rov juda qisqa.")
+        STATE.pop ( uid,None)
+        await msg.reply_text ( "🤖 Vasatiya AI kutubxonamiz ichidan qidirmoqda...")
+        return await send_ai_library_results ( msg,query)
+
+    if st and st.get ( "mode" ) =="had_ai_search":
+        msg=update.effective_message
+        if not msg.text: return await msg.reply_text ( "🔎 Hadis mavzusini matn qilib yozing.")
+        query=msg.text.strip ( )
+        if len ( query ) <2: return await msg.reply_text ( "So‘rov juda qisqa.")
+        STATE.pop ( uid,None)
+        await msg.reply_text ( "🤖 AI faqat Veritasga qo‘shilgan hadislar ichidan qidirmoqda...")
+        return await send_ai_hadith_results ( msg,query)
     if st and str ( st.get ( "mode","" )  ) .startswith ( "rebus_" ) :
         msg=update.effective_message
         mode=st["mode"]
@@ -754,7 +1067,12 @@ async def library_private_input ( update,ctx ) :
             uniq=doc.file_unique_id or ""
             dup=one ( "SELECT id FROM library_books WHERE pdf_unique_id=? AND id<>? AND status<>'deleted'", ( uniq,bid ) ) if uniq else None
             if dup: return await msg.reply_text ( f"⚠️ Bu fayl boshqa kitobda mavjud. ID: {dup['id']}" )
-            execute ( "UPDATE library_books SET pdf_file_id=?,pdf_unique_id=? WHERE id=?", ( doc.file_id,uniq,bid ) )
+            fmt=name.rsplit ( ".",1 ) [-1] if "." in name else "file"
+            execute ( """UPDATE library_books
+                         SET pdf_file_id=?,pdf_unique_id=?,book_file_id=?,book_unique_id=?,
+                             book_file_name=?,book_format=?,book_file_size=?
+                         WHERE id=?""",
+                      ( doc.file_id,uniq,doc.file_id,uniq,doc.file_name or "",fmt,int ( doc.file_size or 0 ) ,bid ) )
         elif field=="audio":
             af=None
             if msg.audio: af=msg.audio
@@ -804,9 +1122,12 @@ async def library_private_input ( update,ctx ) :
             cur=c.execute(
                 """INSERT INTO library_books
                 (title,author,lang,description,cover_file_id,pdf_file_id,pdf_unique_id,
-                 audio_file_id,audio_unique_id,added_by,status,created_at)
-                VALUES (?,?,?,?,?,?,?,?,?,?,?,? ) """,
-                (title,"","uz","","",doc.file_id,uniq,"","",uid,"approved",now (  ) )
+                 audio_file_id,audio_unique_id,added_by,status,created_at,
+                 book_file_id,book_unique_id,book_file_name,book_format,book_file_size)
+                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,? ) """,
+                (title,"","uz","","",doc.file_id,uniq,"","",uid,"approved",now (  ) ,
+                 doc.file_id,uniq,filename,filename.rsplit ( ".",1 ) [-1].lower ( ) if "." in filename else "file",
+                 int ( doc.file_size or 0 ) )
             )
             bid=cur.lastrowid
 
@@ -1170,12 +1491,12 @@ def help_menu_markup (  ) :
 
 def help_text ( section ) :
     data={
-      "main":"📌 ASOSIY BUYRUQLAR\n━━━━━━━━━━━━━━━━━━\n*help — barcha yordam bo‘limlarini ochadi.\n*id — sizning Telegram ID va joriy chat ID sini ko‘rsatadi.\n*men — shaxsiy/global profilingizni ko‘rsatadi.\n*rules — guruh qoidalarini chiqaradi.\n*admins — guruh va Veritas adminlarini ko‘rsatadi.\n*vse — Veritas xabariga reply qilib yozilganda a’zoning Veritas qayd etgan oldingi xabarlarini tozalaydi.\n\n🏠 Shaxsiy chatdagi bosh menyudan AI, kutubxona, hadis, profil, Stars, Rebus va Egaga xabar bo‘limlari ochiladi.",
+      "main":"📌 ASOSIY BUYRUQLAR\n━━━━━━━━━━━━━━━━━━\n*help — barcha yordam bo‘limlarini ochadi.\n*id — sizning Telegram ID va joriy chat ID sini ko‘rsatadi.\n*men — shaxsiy/global profilingizni ko‘rsatadi.\n*qadr — Qadr TOP-10 ni ko‘rsatadi.\n💠 Qadr / ⚖️ E’tiroz — a’zoning ochiq profilidan baholash.\n*rules — guruh qoidalarini chiqaradi.\n*admins — guruh va Veritas adminlarini ko‘rsatadi.\n*vse — Veritas xabariga reply qilib yozilganda a’zoning Veritas qayd etgan oldingi xabarlarini tozalaydi.\n\n🏠 Shaxsiy chatdagi bosh menyudan AI, kutubxona, hadis, profil, Stars, Rebus va Egaga xabar bo‘limlari ochiladi.",
       "profile":"👤 PROFIL VA FAOLLIK\n━━━━━━━━━━━━━━━━━━\n*men — rol, XP, level, xabarlar, ilm hissasi va kabinet ma’lumotlari.\n*ak — barcha Veritas guruhlari bo‘yicha Global TOP-10.\n*aktiv — global faollik TOP ro‘yxati.\n*top 10 — TOP paneli.\n*unvon <nom> — maxsus unvon o‘rnatadi.\n*unvonoff — maxsus unvonni olib tashlaydi.\n\n📈 Veritas guruhlardagi faollikni jamlab profilga qo‘shadi.",
       "ai":"🤖 VERITAS AI\n━━━━━━━━━━━━━━━━━━\nShaxsiy menyudagi «🤖 Veritas AI» — AI yordamchi.\n*ai — guruhdagi AI holati va tarifini ochadi.\n*ai.p — replydagi foydalanuvchiga AI Premium sovg‘a qiladi.\n\n🎁 Shaxsiy AI: birinchi 30 kun bepul, keyin 10 ⭐ / 30 kun.\n🎁 Guruh AI: birinchi 30 kun bepul, keyin 100 ⭐ / 30 kun.\n🖼 AI rasmni ko‘rib tahlil qila oladi.\n📚 Kutubxona PDFlaridan AI test yaratish imkoniyatlari ham mavjud.",
       "rebus":"🧩 AI REBUS\n━━━━━━━━━━━━━━━━━━\nGuruhda Veritas xabariga reply qilib *rebus yozing.\nBot private chatda rebuslar soni va javoblarini so‘raydi.\nAI rasmli rebus yaratadi; to‘g‘ri javob topilgach keyingisi chiqadi.\n🏆 Yakunda g‘oliblar natijasi chiqariladi.\n📍 Bog‘langan kanal bo‘lsa rebus kanalga, aks holda guruhga joylanadi.",
       "library":"📚 VASATIYA KUTUBXONASI\n━━━━━━━━━━━━━━━━━━\n🔎 Kitob qidirish, kategoriya, yangi kitoblar va sevimlilar.\n📄 PDF/audio kitoblar va kitob boshqaruvi.\n*ad.book — replydagi odamga kutubxona adminligi beradi.\n*unad.book — kutubxona adminligini oladi.\n*bookadmins — kutubxona adminlarini ko‘rsatadi.\n\n✏️ Kitob admini nom, muallif, til, kategoriya, tavsif, muqova, PDF va audioni boshqaradi.",
-      "hadith":"📜 SAHIH HADISLAR\n━━━━━━━━━━━━━━━━━━\n*hadis — tasodifiy hadis chiqaradi.\n*hadis buxoriy 1 — aniq hadisni topadi.\n*add.hadis — private chatda yangi hadis qo‘shadi.\n*del.hadis buxoriy 1 — hadisni o‘chiradi.\n*ad.hadis — hadis adminligi beradi.\n*unad.hadis — huquqni oladi.\n*hadisadmins — hadis adminlari ro‘yxati.\n✏️ Mavjud hadisni tahrirlash ham mumkin.",
+      "hadith":"📜 SAHIH HADISLAR\n━━━━━━━━━━━━━━━━━━\n*hadis — tasodifiy hadis chiqaradi.\n🤖 AI Hadis qidirish — faqat Veritasga qo‘shilgan hadislar orasidan mavzu bo‘yicha topadi.\n*hadis buxoriy 1 — aniq hadisni topadi.\n*add.hadis — private chatda yangi hadis qo‘shadi.\n*del.hadis buxoriy 1 — hadisni o‘chiradi.\n*ad.hadis — hadis adminligi beradi.\n*unad.hadis — huquqni oladi.\n*hadisadmins — hadis adminlari ro‘yxati.\n✏️ Mavjud hadisni tahrirlash ham mumkin.",
       "moderation":"🛡 MODERATSIYA\n━━━━━━━━━━━━━━━━━━\n*warn [sabab] — replydagi a’zoga ogohlantirish beradi.\n*unwarn — bitta warnni olib tashlaydi.\n*warns — warnlar sonini ko‘rsatadi.\n*clearwarns — barcha warnlarni tozalaydi.\n*mute — replydagi a’zoni yozishdan cheklaydi.\n*unmute — mute holatini ochadi.\n*kick — a’zoni guruhdan chiqaradi.\n*ban — a’zoni bloklaydi.\n*unban — ban holatini ochadi.\n*del — reply qilingan xabarni o‘chiradi.\n*purge — reply qilingan joydan buyruqqacha xabarlarni tozalaydi.\n*pin — replydagi xabarni pin qiladi.\n*unpin — joriy pinni olib tashlaydi.\n*modlog — so‘nggi moderatsiya amallarini ko‘rsatadi.\n\nℹ️ Jazolash buyruqlarini foydalanuvchi xabariga reply qilib ishlating.",
       "tempmod":"⏱ VAQTLI JAZOLAR\n━━━━━━━━━━━━━━━━━━\n*tempmute 10m [sabab] — replydagi a’zoni 10 daqiqaga mute qiladi.\n*tempban 2h [sabab] — replydagi a’zoni 2 soatga ban qiladi.\n\n⏰ Vaqt: s=soniya, m=daqiqa, h=soat, d=kun, w=hafta.\nMisol: *tempmute 1d flood\nMuddat tugaganda Veritas jazoni avtomatik ochadi.",
       "security":"🔐 HIMOYA VA LOCKLAR\n━━━━━━━━━━━━━━━━━━\n*links on/off — havolalarni nazorat qiladi.\n*blacklist <so‘z> — taqiqlangan so‘z qo‘shadi.\n*unblacklist <so‘z> — blacklistdan olib tashlaydi.\n*blacklists — blacklist ro‘yxati.\n*lock <turi> — turdagi kontentni bloklaydi.\n*unlock <turi> — lockni ochadi.\n*locks — faol locklarni ko‘rsatadi.\n*lockall — media locklarning barchasini yoqadi.\n*unlockall — media locklarning barchasini o‘chiradi.\n\n🔒 Rose Full media himoyasi: forward, contact, location, poll, photo, video, audio, voice, document, sticker, animation.",
@@ -1671,6 +1992,8 @@ async def star_text_router ( update,ctx ) :
         return await superadmin_command ( update,ctx,cmd)
     if cmd in {"ad.book","unad.book","bookadmins","ad.hadis","unad.hadis","hadisadmins"}:
         return await content_admin_command ( update,ctx,cmd)
+    if cmd=="qadr":
+        return await msg.reply_text ( qadr_top_text ( 10 ) )
     if cmd=="hadis":
         return await hadith_command ( update,ctx,args)
     if cmd=="add.hadis":
@@ -2048,6 +2371,9 @@ def _openai_image_response_sync ( image_bytes, mime_type, user_text ) :
     return _extract_response_text ( data) or "Rasm tahlil qilindi, lekin javob hosil bo‘lmadi."
 
 async def private_ai_media_reply ( update,ctx ) :
+    if ctx.user_data.get ( "owner_consumed_message_id" ) ==getattr ( update.effective_message,"message_id",None ) :
+        return
+
     msg=update.effective_message; u=update.effective_user; chat=update.effective_chat
     if not msg or not u or chat.type!="private" or u.is_bot:
         return
@@ -2637,7 +2963,7 @@ async def _run_book_translation ( q,ctx,bid,target_lang ) :
     if wait>0: return await q.answer ( f"⏳ Kunlik limit ishlatilgan. Taxminan { ( wait+3599 ) //3600} soat qoldi.",show_alert=True)
     if target_lang not in {"uz","ru","en"}: return await q.answer ( "Til noto‘g‘ri",show_alert=True)
     r=one ( "SELECT title,pdf_file_id FROM library_books WHERE id=? AND status='approved'", ( bid, ) )
-    if not r or not r["pdf_file_id"]: return await q.answer ( "PDF mavjud emas",show_alert=True)
+    if not r or not r["pdf_file_id"]: return await q.answer ( "Kitob fayli mavjud emas",show_alert=True)
     cur=execute ( "INSERT INTO ai_book_translations ( user_id,book_id,target_lang,status,started_at) VALUES ( ?,?,?,?,? ) ", ( u.id,bid,target_lang,"running",now (  )  )  ) ; job_id=cur.lastrowid
     names={"uz":"🇺🇿 O‘zbekcha","ru":"🇷🇺 Ruscha","en":"🇬🇧 English"}
     await quiz_replace_message ( q,ctx,f"🌐 AI TARJIMA\n\n📖 {r['title']}\n➡️ {names[target_lang]}\n\nTarjima qilinmoqda. Katta kitob vaqt olishi mumkin...")
@@ -2713,6 +3039,9 @@ async def group_ai_reply ( update,ctx ) :
     return True
 
 async def private_ai_reply ( update,ctx ) :
+    if ctx.user_data.get ( "owner_consumed_message_id" ) ==getattr ( update.effective_message,"message_id",None ) :
+        return
+
     msg=update.effective_message; u=update.effective_user; chat=update.effective_chat
     if not msg or not u or chat.type!="private" or u.is_bot or not msg.text: return
     text=msg.text.strip ( )
@@ -2906,6 +3235,62 @@ async def callback ( update,ctx ) :
             reply_markup=back_markup ( "home")
         )
 
+    if d=="me":
+        return await send_public_profile ( ctx,q.message.chat.id,u.id,u.id,q.message)
+
+    if d=="profilefind":
+        STATE[u.id]={"mode":"profile_find"}
+        return await q.edit_message_text(
+            "🔎 A’ZONI TOPISH\n\nA’zoning @username yoki Telegram ID sini yozing.",
+            reply_markup=back_markup ( "home")
+        )
+
+    if d.startswith ( "plike:" ) :
+        target_uid=int ( d.split ( ":",1 ) [1])
+        if target_uid==u.id: return await q.answer ( "O‘z profilingizga Qadr berib bo‘lmaydi.",show_alert=True)
+        if profile_liked_by ( target_uid,u.id ) :
+            execute ( "DELETE FROM profile_likes WHERE target_user_id=? AND voter_user_id=?", ( target_uid,u.id ) )
+            notice="Qadr olib tashlandi."
+        else:
+            execute ( "DELETE FROM profile_dislikes WHERE target_user_id=? AND voter_user_id=?", ( target_uid,u.id ) )
+            execute ( "INSERT OR IGNORE INTO profile_likes ( target_user_id,voter_user_id,created_at) VALUES ( ?,?,? ) ", ( target_uid,u.id,now (  )  ) )
+            notice="💠 Qadr berildi."
+        await q.answer ( notice)
+        return await send_public_profile ( ctx,q.message.chat.id,target_uid,u.id,q.message)
+
+    if d.startswith ( "pdislike:" ) :
+        target_uid=int ( d.split ( ":",1 ) [1])
+        if target_uid==u.id: return await q.answer ( "O‘z profilingizga E’tiroz berib bo‘lmaydi.",show_alert=True)
+        if profile_disliked_by ( target_uid,u.id ) :
+            execute ( "DELETE FROM profile_dislikes WHERE target_user_id=? AND voter_user_id=?", ( target_uid,u.id ) )
+            notice="E’tiroz olib tashlandi."
+        else:
+            execute ( "DELETE FROM profile_likes WHERE target_user_id=? AND voter_user_id=?", ( target_uid,u.id ) )
+            execute ( "INSERT OR IGNORE INTO profile_dislikes ( target_user_id,voter_user_id,created_at) VALUES ( ?,?,? ) ", ( target_uid,u.id,now (  )  ) )
+            notice="⚖️ E’tiroz bildirildi."
+        await q.answer ( notice)
+        return await send_public_profile ( ctx,q.message.chat.id,target_uid,u.id,q.message)
+
+    if d=="libaisearch":
+        STATE[u.id]={"mode":"lib_ai_search"}
+        return await q.edit_message_text(
+            "🤖 AI KITOB QIDIRUV\n\n"
+            "Qanday kitob kerakligini oddiy gap bilan yozing.\n"
+            "Masalan: “Sabr haqida kitob”, “qiziqarli tarixiy kitob”, "
+            "“bolalar tarbiyasi haqida”.\n\n"
+            "🔒 AI faqat Vasatiya kutubxonasiga qo‘shilgan kitoblardan topadi.",
+            reply_markup=back_markup ( "library")
+        )
+
+    if d=="hadaisearch":
+        STATE[u.id]={"mode":"had_ai_search"}
+        return await q.edit_message_text(
+            "🤖 AI HADIS QIDIRUV\n\n"
+            "Mavzuni oddiy gap bilan yozing. Masalan: “sabr haqida”, “ota-ona haqqi”.\n\n"
+            "🔒 AI faqat Veritasga qo‘shilgan hadislar ichidan topadi.",
+            reply_markup=back_markup ( "hadith")
+        )
+
     if d=="home":
         try:
             if q.message.photo or q.message.video or q.message.document or q.message.audio or q.message.animation:
@@ -2923,6 +3308,9 @@ async def callback ( update,ctx ) :
 
     if d=="me":
         return await q.edit_message_text ( global_profile_text ( u ),reply_markup=back_markup ( ) )
+
+    if d=="qadrtop":
+        return await q.edit_message_text ( qadr_top_text ( 10 ) ,reply_markup=back_markup ( "home" ) )
 
     if d=="globalactive":
         return await q.edit_message_text ( global_active_text ( 10 ),reply_markup=back_markup ( ) )
@@ -3019,6 +3407,7 @@ async def callback ( update,ctx ) :
         total=one ( "SELECT COUNT ( *) n FROM hadiths WHERE status='approved'" ) ["n"]
         cols=all_ ( "SELECT collection,COUNT ( *) n FROM hadiths WHERE status='approved' GROUP BY collection ORDER BY collection")
         kb=[[InlineKeyboardButton ( f"📚 {r['collection']} · {r['n']}",callback_data=f"hcol:{r['collection']}:0" ) ] for r in cols[:20]]
+        kb.append ( [InlineKeyboardButton ( "🤖 AI Hadis qidirish",callback_data="hadaisearch" ) ])
         kb.append ( [InlineKeyboardButton ( "🎲 Random hadis",callback_data="hrandom" ) ])
         if is_hadith_admin ( u.id ) : kb.append ( [InlineKeyboardButton ( "➕ Hadis qo‘shish",callback_data="hadd" ) ])
         kb.append ( [InlineKeyboardButton ( "⬅️ Orqaga",callback_data="home" ) ,InlineKeyboardButton ( "🏠 Bosh menyu",callback_data="home" ) ])
@@ -3221,7 +3610,7 @@ async def callback ( update,ctx ) :
     if d.startswith ( "libquiz:" ) :
         bid=int ( d.split ( ":" )[1] )
         r=one ( "SELECT title,pdf_file_id FROM library_books WHERE id=? AND status='approved'", ( bid,) )
-        if not r or not r["pdf_file_id"]: return await q.answer ( "PDF mavjud emas",show_alert=True )
+        if not r or not r["pdf_file_id"]: return await q.answer ( "Kitob fayli mavjud emas",show_alert=True )
         groups=await _quiz_allowed_groups ( ctx,u.id )
         if not groups:
             return await quiz_replace_message ( q,ctx,"👥 Test yuborish uchun Veritas ishlayotgan kamida bitta guruhda admin bo‘lishingiz kerak.",reply_markup=InlineKeyboardMarkup ( [[InlineKeyboardButton ( "⬅️ Kitob",callback_data=f"libbook:{bid}" ) ]] ) )
@@ -3252,6 +3641,23 @@ async def callback ( update,ctx ) :
             execute ( "DELETE FROM library_favorites WHERE user_id=? AND book_id=?", ( u.id,bid ) )
         else: execute ( "INSERT OR IGNORE INTO library_favorites ( user_id,book_id,created_at) VALUES ( ?,?,? ) ", ( u.id,bid,now (  )  ) )
         return await library_show_book ( q,ctx,bid)
+
+    if d.startswith ( "libfile:" ) :
+        bid=int ( d.split ( ":" ) [1])
+        r=one ( """SELECT title,book_file_id,book_file_name,book_format,pdf_file_id
+                 FROM library_books WHERE id=? AND status='approved'""", ( bid, ) )
+        if not r: return await q.answer ( "Kitob topilmadi",show_alert=True)
+        fid=r["book_file_id"] or r["pdf_file_id"]
+        if not fid: return await q.answer ( "Kitob fayli mavjud emas",show_alert=True)
+        execute ( "UPDATE library_books SET downloads=downloads+1 WHERE id=?", ( bid, ) )
+        try:
+            return await ctx.bot.send_document(
+                u.id,fid,
+                caption=f"📚 {r['title']}\n📁 { ( r['book_format'] or 'PDF' ) .upper (  ) }\nVasatiya kutubxonasi"
+            )
+        except TelegramError:
+            log.exception ( "Library file send failed: %s",bid)
+            return await q.answer ( "⚠️ Faylni yuborishda xato.",show_alert=True)
 
     if d.startswith ( "libpdf:" ) :
         bid=int ( d.split ( ":" ) [1] ) ; r=one ( "SELECT title,pdf_file_id FROM library_books WHERE id=? AND status='approved'", ( bid, ) )
@@ -3646,6 +4052,7 @@ async def owner_message_state_handler ( update,ctx ) :
     if not msg or not u or not chat or chat.type!="private": return
     st=STATE.get ( u.id) or {}; mode=st.get ( "mode")
     if mode not in {"owner_message","owner_reply"}: return
+    ctx.user_data["owner_consumed_message_id"]=msg.message_id
 
     if mode=="owner_message":
         ensure_user ( u)
