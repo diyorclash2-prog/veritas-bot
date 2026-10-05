@@ -3301,7 +3301,14 @@ async def left_member ( update,ctx ) :
         except TelegramError: pass
 
 async def callback ( update,ctx ) :
-    q=update.callback_query; d=q.data; u=q.from_user; ensure_user ( u)
+    q=update.callback_query; d=q.data; u=q.from_user
+
+    # V9/root tugmalari shu yagona callback router ichidan boshqariladi.
+    # Bu V8 callbacklariga tegmaydi va alohida handler guruhlari to'qnashuvini yo'q qiladi.
+    if d and (d.startswith ( "v9:") or d.startswith ( "root:" )  ) :
+        return await v9_callback ( update,ctx)
+
+    ensure_user ( u)
     await q.answer ( )
 
     if d=="owner:message":
@@ -4238,7 +4245,6 @@ def main (  ) :
     app.add_handler ( CommandHandler ( "super",cmd_super ) )
     app.add_handler ( PreCheckoutQueryHandler ( precheckout ) )
     app.add_handler ( MessageHandler ( filters.SUCCESSFUL_PAYMENT,paid ) )
-    app.add_handler ( CallbackQueryHandler ( v9_callback,pattern=r"^ ( ?:v9:|root: ) " ),group=-2 )
     app.add_handler ( CallbackQueryHandler ( callback ) )
     app.add_handler ( MessageHandler ( filters.StatusUpdate.NEW_CHAT_MEMBERS,new_members ) )
     app.add_handler ( MessageHandler ( filters.StatusUpdate.LEFT_CHAT_MEMBER,left_member ) )
