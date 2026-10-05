@@ -102,6 +102,19 @@ def init_db (  ) :
       ON group_message_history ( chat_id,user_id,message_id ) ;
     CREATE TABLE IF NOT EXISTS approved ( chat_id INTEGER,user_id INTEGER,PRIMARY KEY ( chat_id,user_id )  ) ;
     CREATE TABLE IF NOT EXISTS warns ( chat_id INTEGER,user_id INTEGER,count INTEGER DEFAULT 0,PRIMARY KEY ( chat_id,user_id )  ) ;
+    -- V8 Moderation 2.0: Rose-uslubidagi kengaytirilgan moderatsiya.
+    CREATE TABLE IF NOT EXISTS moderation_settings(
+      chat_id INTEGER PRIMARY KEY, warn_limit INTEGER DEFAULT 3, warn_action TEXT DEFAULT 'ban',
+      warn_mute_seconds INTEGER DEFAULT 3600, clean_service INTEGER DEFAULT 0,
+      antirepeat INTEGER DEFAULT 1, repeat_limit INTEGER DEFAULT 4, repeat_window INTEGER DEFAULT 30 ) ;
+    CREATE TABLE IF NOT EXISTS moderation_log(
+      id INTEGER PRIMARY KEY AUTOINCREMENT, chat_id INTEGER NOT NULL, actor_id INTEGER DEFAULT 0,
+      target_id INTEGER DEFAULT 0, action TEXT NOT NULL, reason TEXT DEFAULT '',
+      duration INTEGER DEFAULT 0, created_at INTEGER NOT NULL ) ;
+    CREATE INDEX IF NOT EXISTS idx_moderation_log_chat ON moderation_log ( chat_id,created_at ) ;
+    CREATE TABLE IF NOT EXISTS warn_records(
+      id INTEGER PRIMARY KEY AUTOINCREMENT, chat_id INTEGER NOT NULL, user_id INTEGER NOT NULL,
+      actor_id INTEGER DEFAULT 0, reason TEXT DEFAULT '', created_at INTEGER NOT NULL ) ;
     CREATE TABLE IF NOT EXISTS blacklist ( chat_id INTEGER,word TEXT,PRIMARY KEY ( chat_id,word )  ) ;
     CREATE TABLE IF NOT EXISTS notes ( chat_id INTEGER,name TEXT,text TEXT,PRIMARY KEY ( chat_id,name )  ) ;
     CREATE TABLE IF NOT EXISTS filters_ ( chat_id INTEGER,key TEXT,response TEXT,PRIMARY KEY ( chat_id,key )  ) ;
@@ -121,18 +134,6 @@ def init_db (  ) :
       user_id INTEGER PRIMARY KEY, claimed_at INTEGER NOT NULL ) ;
     CREATE TABLE IF NOT EXISTS ai_group_trials(
       chat_id INTEGER PRIMARY KEY, claimed_at INTEGER NOT NULL, claimed_by INTEGER DEFAULT 0 ) ;
-    CREATE TABLE IF NOT EXISTS profile_likes(
-      target_user_id INTEGER NOT NULL,
-      voter_user_id INTEGER NOT NULL,
-      created_at INTEGER NOT NULL,
-      PRIMARY KEY ( target_user_id,voter_user_id) ) ;
-    CREATE INDEX IF NOT EXISTS idx_profile_likes_target ON profile_likes ( target_user_id ) ;
-    CREATE TABLE IF NOT EXISTS profile_dislikes(
-      target_user_id INTEGER NOT NULL,
-      voter_user_id INTEGER NOT NULL,
-      created_at INTEGER NOT NULL,
-      PRIMARY KEY ( target_user_id,voter_user_id) ) ;
-    CREATE INDEX IF NOT EXISTS idx_profile_dislikes_target ON profile_dislikes ( target_user_id ) ;
     CREATE TABLE IF NOT EXISTS ai_book_translations(
       id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER NOT NULL, book_id INTEGER NOT NULL,
       target_lang TEXT NOT NULL, status TEXT DEFAULT 'running', started_at INTEGER NOT NULL,
@@ -214,20 +215,7 @@ def init_db (  ) :
     CREATE TABLE IF NOT EXISTS audit(
       id INTEGER PRIMARY KEY AUTOINCREMENT,actor_id INTEGER,chat_id INTEGER,action TEXT,detail TEXT,created_at INTEGER ) ;
     """
-    with db ( ) as c:
-        c.executescript ( schema)
-        # V8.1: kutubxona uchun universal kitob fayli. Eski PDF ustunlari saqlanadi.
-        cols={r[1] for r in c.execute ( "PRAGMA table_info ( library_books ) " ) .fetchall (  ) }
-        for col,decl in (
-            ("book_file_id","TEXT DEFAULT ''" ) ,
-            ("book_unique_id","TEXT DEFAULT ''" ) ,
-            ("book_file_name","TEXT DEFAULT ''" ) ,
-            ("book_format","TEXT DEFAULT ''" ) ,
-            ("book_file_size","INTEGER DEFAULT 0")
-        ):
-            if col not in cols:
-                c.execute ( f"ALTER TABLE library_books ADD COLUMN {col} {decl}")
-        c.execute ( "CREATE INDEX IF NOT EXISTS idx_library_book_unique ON library_books ( book_unique_id ) ")
+    with db ( ) as c: c.executescript ( schema)
 
 def ensure_user ( u ) :
     if not u: return
@@ -303,7 +291,6 @@ def main_menu_markup ( uid ) :
       [InlineKeyboardButton ( "🎁 Gift",callback_data="gifts" ) ,InlineKeyboardButton ( "💎 Premium",callback_data="premium" ) ],
       [InlineKeyboardButton ( "🏘 Guruhlarim",callback_data="mygroups" ) ],
       [InlineKeyboardButton ( "🌐 Global aktiv",callback_data="globalactive" ) ],
-      [InlineKeyboardButton ( "🔎 A’zoni topish",callback_data="profilefind" ) ],
       [InlineKeyboardButton ( "🤖 Veritas AI",callback_data="ai_private" ) ],
       [InlineKeyboardButton ( "🧩 AI Rebus",callback_data="rebus:start" ) ],
       [InlineKeyboardButton ( "📚 Vasatiya kutubxonasi",callback_data="library" ) ,InlineKeyboardButton ( "📜 Sahih Hadislar",callback_data="hadith" ) ],
@@ -367,7 +354,6 @@ def bot_roles ( uid ) :
 def global_profile_text ( u ) :
     xp,msgs=user_total_stats ( u.id )
     lvl=level ( xp )
-    shown_lvl="+99" if u.id in SUPER_OWNERS else str ( lvl)
     books,hadiths=content_contributions ( u.id )
     ai_until=ai_user_until ( u.id )
     ai_status=( "👑 Cheksiz (Super boshqaruv ) " if is_super ( u.id ) else ( "✅ FAOL — "+fmt_until ( ai_until ) if ai_until>now ( ) else "❌ YO‘Q" ) )
@@ -378,109 +364,13 @@ def global_profile_text ( u ) :
         f"⭐ Kredit: {wallet ( u.id )}\n"
         f"🌐 Umumiy XP: {xp}\n"
         f"💬 Umumiy xabarlar: {msgs}\n"
-        f"📈 Level: {shown_lvl}\n"
+        f"📈 Level: {lvl}\n"
         f"🔥 Aktivlik darajasi: {activity_degree ( lvl )}\n"
         f"📚 Qo‘shgan kitoblari: {books} ta\n"
         f"📜 Qo‘shgan hadislari: {hadiths} ta\n"
         f"🏅 Ilm medali: {knowledge_medal ( books,hadiths )}\n\n"
         f"🤖 AI Premium: {ai_status}"
     )
-
-
-def profile_like_count ( uid ) :
-    r=one ( "SELECT COUNT ( *) n FROM profile_likes WHERE target_user_id=?", ( uid, ) )
-    return int ( r["n"] if r else 0 )
-
-def profile_liked_by ( target_uid,voter_uid ) :
-    return bool ( one ( "SELECT 1 FROM profile_likes WHERE target_user_id=? AND voter_user_id=?", ( target_uid,voter_uid ) ) )
-
-def profile_dislike_count ( uid ) :
-    r=one ( "SELECT COUNT ( *) n FROM profile_dislikes WHERE target_user_id=?", ( uid, ) )
-    return int ( r["n"] if r else 0 )
-
-def profile_disliked_by ( target_uid,voter_uid ) :
-    return bool ( one ( "SELECT 1 FROM profile_dislikes WHERE target_user_id=? AND voter_user_id=?", ( target_uid,voter_uid ) ) )
-
-def public_profile_text ( uid ) :
-    r=one ( "SELECT user_id,username,first_name FROM users WHERE user_id=?", ( uid, ) )
-    if not r: return None
-    xp,msgs=user_total_stats ( uid )
-    lvl=level ( xp )
-    shown_lvl="+99" if uid in SUPER_OWNERS else str ( lvl)
-    books,hadiths=content_contributions ( uid )
-    ai_until=ai_user_until ( uid )
-    ai_status=( "👑 Cheksiz (Super boshqaruv ) " if is_super ( uid ) else ( "✅ FAOL — "+fmt_until ( ai_until ) if ai_until>now ( ) else "❌ YO‘Q" ) )
-    name=r["first_name"] or ( "@"+r["username"] if r["username"] else f"ID {uid}" )
-    username= ( " @"+r["username"]) if r["username"] else ""
-    return (
-        f"👤 {name}{username}\n"
-        f"🆔 {uid}\n"
-        f"🛡 Botdagi roli: {bot_roles ( uid )}\n"
-        f"⭐ Kredit: {wallet ( uid )}\n"
-        f"🤖 AI Premium: {ai_status}\n\n"
-        f"🌐 Umumiy XP: {xp}\n"
-        f"💬 Umumiy xabarlar: {msgs}\n"
-        f"📈 Level: {shown_lvl}\n"
-        f"🔥 Aktivlik darajasi: {activity_degree ( lvl )}\n"
-        f"📚 Qo‘shgan kitoblari: {books} ta\n"
-        f"📜 Qo‘shgan hadislari: {hadiths} ta\n"
-        f"🏅 Ilm medali: {knowledge_medal ( books,hadiths )}\n"
-        f"💠 Qadr: {profile_like_count ( uid )}\n"
-        f"⚖️ E’tiroz: {profile_dislike_count ( uid )}"
-    )
-
-def qadr_top_text ( limit=10 ) :
-    rows=all_ ( """SELECT u.user_id,u.first_name,u.username,COUNT ( pl.voter_user_id) qadr
-                    FROM profile_likes pl JOIN users u ON u.user_id=pl.target_user_id
-                    GROUP BY u.user_id,u.first_name,u.username
-                    ORDER BY qadr DESC,u.user_id ASC LIMIT ?""", ( int ( limit ) , ) )
-    if not rows:
-        return "🏆 VERITAS — QADR TOP 10\n\nHozircha Qadr berilmagan."
-    medals=["🥇","🥈","🥉"]
-    lines=["🏆 VERITAS — QADR TOP 10",""]
-    for i,r in enumerate ( rows,1 ) :
-        mark=medals[i-1] if i<=3 else f"{i}."
-        name=r["first_name"] or ( ( "@"+r["username"]) if r["username"] else f"ID {r['user_id']}")
-        lines.append ( f"{mark} {name} — 💠 {int ( r['qadr'] ) } Qadr")
-    return "\n".join ( lines)
-
-def public_profile_markup ( target_uid,viewer_uid ) :
-    liked=profile_liked_by ( target_uid,viewer_uid )
-    disliked=profile_disliked_by ( target_uid,viewer_uid )
-    like_text= ( "↩️ Qadrni olish" if liked else "💠 Qadr" ) +f" · {profile_like_count ( target_uid )}"
-    dislike_text= ( "↩️ E’tirozni olish" if disliked else "⚖️ E’tiroz" ) +f" · {profile_dislike_count ( target_uid )}"
-    kb=[]
-    # Like/Dizlayk tugmalari har bir profilda ko‘rinadi.
-    # O‘z profilida ham tugmalar ko‘rinadi, ammo callback ovoz berishni bloklaydi.
-    kb.append ( [
-        InlineKeyboardButton ( like_text,callback_data=f"plike:{target_uid}" ),
-        InlineKeyboardButton ( dislike_text,callback_data=f"pdislike:{target_uid}" )
-    ] )
-    kb.append ( [InlineKeyboardButton ( "🔎 Boshqa a’zoni topish",callback_data="profilefind" )] )
-    kb.append ( [InlineKeyboardButton ( "⬅️ Orqaga",callback_data="home" ),InlineKeyboardButton ( "🏠 Bosh menyu",callback_data="home" )] )
-    return InlineKeyboardMarkup ( kb )
-
-async def send_public_profile ( ctx,chat_id,target_uid,viewer_uid,old_message=None ) :
-    text=public_profile_text ( target_uid )
-    if not text:
-        if old_message:
-            return await old_message.reply_text ( "❌ A’zo topilmadi." )
-        return await ctx.bot.send_message ( chat_id,"❌ A’zo topilmadi." )
-    markup=public_profile_markup ( target_uid,viewer_uid )
-    photo_id=None
-    try:
-        photos=await ctx.bot.get_user_profile_photos ( target_uid,limit=1 )
-        if photos.total_count and photos.photos:
-            # Eng kichik profil rasmi varianti.
-            photo_id=photos.photos[0][0].file_id
-    except TelegramError:
-        photo_id=None
-    if old_message:
-        try: await old_message.delete ( )
-        except TelegramError: pass
-    if photo_id:
-        return await ctx.bot.send_photo ( chat_id,photo=photo_id,caption=text[:1024],reply_markup=markup )
-    return await ctx.bot.send_message ( chat_id,text,reply_markup=markup )
 
 def global_active_rows ( limit=10 ) :
     # Global TOP faqat haqiqiy foydalanuvchilar uchun.
@@ -623,7 +513,6 @@ def library_book_text ( r ) :
     return (f"📖 {r['title']}\n"
             f"✍️ Muallif: {r['author'] or '—'}\n"
             f"🌐 Til: {lib_lang_name ( r['lang'] ) }\n"
-            f"📁 Format: { ( r['book_format'] or ('PDF' if r['pdf_file_id'] else '—' )  ) .upper (  ) }\n"
             f"🗂 Kategoriya: {', '.join ( cats) if cats else '—'}\n"
             f"👤 Qo‘shgan: {added}\n"
             f"👁 Ko‘rildi: {r['views']} | ⬇️ Yuklandi: {r['downloads']}\n\n"
@@ -631,10 +520,10 @@ def library_book_text ( r ) :
 
 def library_book_markup ( uid,book_id,back="library" ) :
     fav=bool ( one ( "SELECT 1 FROM library_favorites WHERE user_id=? AND book_id=?", ( uid,book_id )  ) )
-    r=one ( "SELECT pdf_file_id,audio_file_id,book_file_id,book_format FROM library_books WHERE id=?", ( book_id, ) )
+    r=one ( "SELECT pdf_file_id,audio_file_id FROM library_books WHERE id=?", ( book_id, ) )
     kb=[]
     row=[]
-    if r and (r["book_file_id"] or r["pdf_file_id"] ) : row.append ( InlineKeyboardButton ( "📥 Kitobni olish",callback_data=f"libfile:{book_id}" ) )
+    if r and r["pdf_file_id"]: row.append ( InlineKeyboardButton ( "📄 PDF",callback_data=f"libpdf:{book_id}" ) )
     if r and r["audio_file_id"]: row.append ( InlineKeyboardButton ( "🎧 Audio",callback_data=f"libaudio:{book_id}" ) )
     if row: kb.append ( row)
     if r and r["pdf_file_id"]:
@@ -675,22 +564,6 @@ async def library_private_input ( update,ctx ) :
     if update.effective_chat.type!="private": return
     uid=update.effective_user.id; st=STATE.get ( uid)
     if st: ctx.user_data["workflow_message_id"]=update.effective_message.message_id
-    if st and st.get ( "mode" )=="profile_find":
-        msg=update.effective_message
-        if not msg.text:
-            return await msg.reply_text ( "🔎 A’zoning @username yoki Telegram ID sini yozing." )
-        raw=msg.text.strip ( )
-        target_uid=0
-        if raw.isdigit ( ):
-            target_uid=int ( raw )
-        else:
-            username=raw.lstrip ( "@" ).strip ( ).casefold ( )
-            r=one ( "SELECT user_id FROM users WHERE lower ( username ) =? LIMIT 1", ( username, ) )
-            if r: target_uid=int ( r["user_id"] )
-        if not target_uid or not one ( "SELECT 1 FROM users WHERE user_id=?", ( target_uid, ) ):
-            return await msg.reply_text ( "❌ Bu a’zo Veritas bazasidan topilmadi. @username yoki IDni tekshiring." )
-        STATE.pop ( uid,None )
-        return await send_public_profile ( ctx,msg.chat.id,target_uid,uid )
     if st and str ( st.get ( "mode","" )  ) .startswith ( "had_" ) :
         return await hadith_private_input ( update,ctx)
     if st and str ( st.get ( "mode","" )  ) .startswith ( "rebus_" ) :
@@ -830,45 +703,6 @@ async def library_private_input ( update,ctx ) :
     if not st or not str ( st.get ( "mode","" )  ) .startswith ( "lib_" ) : return
     msg=update.effective_message
     mode=st["mode"]
-    # Quick-add ham boshqa kutubxona oqimlari kabi shu data obyektidan foydalanadi.
-    # Oldingi buildda data quyida yaratilgani sabab fayl qabulida NameError yuz berardi.
-    data=st.setdefault ( "data", {})
-    if mode=="lib_quick_file":
-        doc=msg.document
-        if not doc:
-            return await msg.reply_text ( "📎 Kitob faylini Document/Fayl sifatida yuboring.\nPDF, EPUB, DOCX, TXT, FB2, MOBI yoki DJVU qabul qilinadi.")
-        filename= ( doc.file_name or "kitob" ) .strip ( )
-        ext=Path ( filename ) .suffix.lower (  ) .lstrip ( ".")
-        allowed={"pdf","epub","docx","txt","fb2","mobi","djvu"}
-        if ext not in allowed:
-            return await msg.reply_text ( "❌ Bu format hozircha qabul qilinmaydi.\nQabul qilinadi: PDF, EPUB, DOCX, TXT, FB2, MOBI, DJVU")
-        uniq=doc.file_unique_id or ""
-        if uniq:
-            dup=one ( "SELECT id,title FROM library_books WHERE (book_unique_id=? OR pdf_unique_id=?) AND status<>'deleted' LIMIT 1", ( uniq,uniq ) )
-            if dup:
-                STATE.pop ( uid,None)
-                return await msg.reply_text ( f"⚠️ Aynan shu fayl kutubxonada bor.\n📖 {dup['title']}\nID: {dup['id']}",reply_markup=library_home_markup ( uid ) )
-        title=Path ( filename ) .stem.replace ( "_"," " ) .strip (  ) [:250] or "Nomsiz kitob"
-        data.update ( {"title":title,"author":"","description":"","cover_file_id":"","categories":[],
-                     "book_file_id":doc.file_id,"book_unique_id":uniq,"book_file_name":filename,
-                     "book_format":ext,"book_file_size":int ( doc.file_size or 0 ) ,
-                     "pdf_file_id":doc.file_id if ext=="pdf" else "","pdf_unique_id":uniq if ext=="pdf" else "",
-                     "audio_file_id":"","audio_unique_id":""})
-        st["mode"]="lib_quick_author"
-        return await msg.reply_text ( f"✅ Fayl qabul qilindi: {filename}\n📖 Nom avtomatik: {title}\n\n✍️ Muallif nomini yozing. Noma’lum bo‘lsa: o'tkazish")
-    if mode=="lib_quick_author":
-        if not msg.text:
-            return await msg.reply_text ( "✍️ Muallif nomini yozing yoki «o'tkazish» deb yozing.")
-        raw=msg.text.strip ( )
-        if raw.casefold (  ) .replace ( "‘","'" ) .replace ( "’","'") not in {"o'tkazish","otkazish"}:
-            data["author"]=raw[:250]
-        dup=one ( "SELECT id FROM library_books WHERE lower ( title ) =lower ( ?) AND lower ( author ) =lower ( ?) AND status<>'deleted'", ( data["title"],data["author"] ) )
-        if dup:
-            STATE.pop ( uid,None)
-            return await msg.reply_text ( f"⚠️ Shu nom va muallifdagi kitob mavjud. ID: {dup['id']}",reply_markup=library_home_markup ( uid ) )
-        st["mode"]="lib_quick_lang"
-        kb=InlineKeyboardMarkup ( [[InlineKeyboardButton ( "🇺🇿 O‘zbekcha",callback_data="libaddlang:uz" ) ,InlineKeyboardButton ( "🇷🇺 Русский",callback_data="libaddlang:ru" ) ,InlineKeyboardButton ( "🇬🇧 English",callback_data="libaddlang:en" ) ]])
-        return await msg.reply_text ( "🌐 Kitob tilini tanlang. Shundan keyin kitob darhol saqlanadi:",reply_markup=kb)
     if mode=="lib_search":
         if not msg.text: return await msg.reply_text ( "🔎 Qidiruv uchun matn yuboring.")
         q=msg.text.strip (  ) ; STATE.pop ( uid,None)
@@ -880,6 +714,7 @@ async def library_private_input ( update,ctx ) :
         return await msg.reply_text ( f"🔎 «{q}» bo‘yicha: {len ( rows ) } ta natija",reply_markup=InlineKeyboardMarkup ( kb ) )
     if not is_library_admin ( uid ) :
         STATE.pop ( uid,None ) ; return await msg.reply_text ( "⛔ Kutubxona boshqaruv huquqi yo‘q.")
+    data=st.setdefault ( "data",{})
     if mode.startswith ( "lib_edit_" ) :
         bid=int ( data.get ( "book_id",0 ) )
         if not bid or not one ( "SELECT 1 FROM library_books WHERE id=? AND status='approved'", ( bid, ) ) :
@@ -915,7 +750,7 @@ async def library_private_input ( update,ctx ) :
             uniq=doc.file_unique_id or ""
             dup=one ( "SELECT id FROM library_books WHERE pdf_unique_id=? AND id<>? AND status<>'deleted'", ( uniq,bid ) ) if uniq else None
             if dup: return await msg.reply_text ( f"⚠️ Bu PDF boshqa kitobda mavjud. ID: {dup['id']}" )
-            execute ( "UPDATE library_books SET pdf_file_id=?,pdf_unique_id=?,book_file_id=?,book_unique_id=?,book_file_name=?,book_format='pdf',book_file_size=? WHERE id=?", ( doc.file_id,uniq,doc.file_id,uniq,doc.file_name or "",int ( doc.file_size or 0 ) ,bid ) )
+            execute ( "UPDATE library_books SET pdf_file_id=?,pdf_unique_id=? WHERE id=?", ( doc.file_id,uniq,bid ) )
         elif field=="audio":
             af=None
             if msg.audio: af=msg.audio
@@ -1415,6 +1250,61 @@ async def top10_result ( bot,chat_id,with_gifts=False,actor_id=None ) :
     await bot.send_message ( chat_id,
         "🎁 TOP-3 Gift natijasi:\n"+ ( "\n".join ( "✅ "+x for x in sent) if sent else "Gift yuborilmadi." ) )
 
+def parse_duration ( value ) :
+    """10m, 2h, 1d, 1w kabi vaqtni sekundga aylantiradi."""
+    if not value: return 0
+    m=re.fullmatch ( r" ( \d+ )  ( s|m|h|d|w ) ",str ( value ) .strip (  ) .lower (  ) )
+    if not m: return 0
+    n=int ( m.group ( 1 )  ) ; unit=m.group ( 2)
+    return n*{"s":1,"m":60,"h":3600,"d":86400,"w":604800}[unit]
+
+def moderation_settings ( chat_id ) :
+    execute ( "INSERT OR IGNORE INTO moderation_settings ( chat_id) VALUES ( ? ) ", ( chat_id, ) )
+    return one ( "SELECT * FROM moderation_settings WHERE chat_id=?", ( chat_id, ) )
+
+def modlog ( chat_id,actor_id,target_id,action,reason="",duration=0 ) :
+    execute ( "INSERT INTO moderation_log ( chat_id,actor_id,target_id,action,reason,duration,created_at) VALUES ( ?,?,?,?,?,?,? ) ",
+            (chat_id,actor_id or 0,target_id or 0,action,reason or "",int ( duration or 0 ) ,now (  )  ) )
+
+async def purge_command ( update,ctx,args ) :
+    chat=update.effective_chat; msg=update.effective_message; actor=update.effective_user
+    if chat.type not in ("group","supergroup" ) : return
+    if not await can_manage ( ctx.bot,chat.id,actor.id ) :
+        return await msg.reply_text ( "⛔ Ruxsat yo‘q.")
+    limit=0
+    if args and args[0].isdigit (  ) : limit=min ( 200,max ( 1,int ( args[0] )  ) )
+    elif msg.reply_to_message: limit=max ( 1,msg.message_id-msg.reply_to_message.message_id+1)
+    else: return await msg.reply_text ( "Misol: *purge 20 yoki eski xabarga reply qilib *purge")
+    deleted=0
+    start=max ( 1,msg.message_id-limit+1)
+    for mid in range ( msg.message_id,start-1,-1 ) :
+        try:
+            await ctx.bot.delete_message ( chat.id,mid ) ; deleted+=1
+        except TelegramError: pass
+    modlog ( chat.id,actor.id,0,"purge",f"{deleted} xabar")
+
+async def moderation_config_command ( update,ctx,cmd,args ) :
+    chat=update.effective_chat; msg=update.effective_message; actor=update.effective_user
+    if chat.type not in ("group","supergroup" ) : return await msg.reply_text ( "Bu buyruq guruh uchun.")
+    if not await can_manage ( ctx.bot,chat.id,actor.id ) : return await msg.reply_text ( "⛔ Ruxsat yo‘q.")
+    st=moderation_settings ( chat.id)
+    if cmd=="warnlimit":
+        if not args or not args[0].isdigit ( ) or not 1<=int ( args[0] ) <=10: return await msg.reply_text ( "Misol: *warnlimit 3")
+        execute ( "UPDATE moderation_settings SET warn_limit=? WHERE chat_id=?", ( int ( args[0] ) ,chat.id )  ) ; return await msg.reply_text ( "✅ Warn limiti saqlandi.")
+    if cmd=="warnaction":
+        if not args or args[0].lower ( ) not in {"ban","kick","mute"}: return await msg.reply_text ( "Misol: *warnaction ban / kick / mute")
+        execute ( "UPDATE moderation_settings SET warn_action=? WHERE chat_id=?", ( args[0].lower (  ) ,chat.id )  ) ; return await msg.reply_text ( "✅ Warn jazosi saqlandi.")
+    if cmd in {"cleanservice","antirepeat"}:
+        if not args or args[0].lower ( ) not in {"on","off"}: return await msg.reply_text ( f"*{cmd} on/off")
+        col="clean_service" if cmd=="cleanservice" else "antirepeat"
+        execute ( f"UPDATE moderation_settings SET {col}=? WHERE chat_id=?", ( 1 if args[0].lower (  ) =="on" else 0,chat.id )  ) ; return await msg.reply_text ( "✅ Saqlandi.")
+    if cmd=="modlog":
+        rows=all_ ( "SELECT * FROM moderation_log WHERE chat_id=? ORDER BY id DESC LIMIT 15", ( chat.id, ) )
+        if not rows: return await msg.reply_text ( "📋 Moderatsiya logi bo‘sh.")
+        lines=["📋 SO‘NGGI MODERATSIYA AMALLARI"]
+        for r in rows: lines.append ( f"• {r['action']} | target {r['target_id']} | admin {r['actor_id']}"+ ( f" | {r['reason']}" if r['reason'] else "" ) )
+        return await msg.reply_text ( "\n".join ( lines ) )
+
 async def group_action ( update,ctx,cmd,arg ) :
     chat=update.effective_chat; u=update.effective_user; msg=update.effective_message
     ensure_group ( chat ) ; ensure_user ( u)
@@ -1432,23 +1322,43 @@ async def group_action ( update,ctx,cmd,arg ) :
         return await msg.reply_text ( "🛡 Himoyalangan foydalanuvchi.")
     try:
         if cmd=="warn":
+            reason=" ".join ( arg ) .strip ( ) or "Sabab ko‘rsatilmagan"
             execute ( """INSERT INTO warns ( chat_id,user_id,count) VALUES ( ?,?,1)
             ON CONFLICT ( chat_id,user_id) DO UPDATE SET count=count+1""", ( chat.id,tu.id ) )
+            execute ( "INSERT INTO warn_records ( chat_id,user_id,actor_id,reason,created_at) VALUES ( ?,?,?,?,? ) ", ( chat.id,tu.id,u.id,reason,now (  )  ) )
             n=one ( "SELECT count FROM warns WHERE chat_id=? AND user_id=?", ( chat.id,tu.id )  ) ["count"]
-            if n>=3:
-                await ctx.bot.ban_chat_member ( chat.id,tu.id ) ; execute ( "DELETE FROM warns WHERE chat_id=? AND user_id=?", ( chat.id,tu.id ) )
-                return await msg.reply_text ( f"🚫 {tu.full_name}: 3 warn → ban.")
-            return await msg.reply_text ( f"⚠️ {tu.full_name}: {n}/3 warn.")
+            st=moderation_settings ( chat.id ) ; limit=int ( st["warn_limit"] or 3 ) ; action=st["warn_action"] or "ban"
+            modlog ( chat.id,u.id,tu.id,"warn",reason)
+            if n>=limit:
+                execute ( "DELETE FROM warns WHERE chat_id=? AND user_id=?", ( chat.id,tu.id ) )
+                if action=="kick":
+                    await ctx.bot.ban_chat_member ( chat.id,tu.id ) ; await ctx.bot.unban_chat_member ( chat.id,tu.id)
+                elif action=="mute":
+                    sec=int ( st["warn_mute_seconds"] or 3600)
+                    await ctx.bot.restrict_chat_member ( chat.id,tu.id,ChatPermissions ( can_send_messages=False ) ,until_date=datetime.now ( timezone.utc ) +timedelta ( seconds=sec ) )
+                else: await ctx.bot.ban_chat_member ( chat.id,tu.id)
+                modlog ( chat.id,u.id,tu.id,"warn_"+action,reason)
+                return await msg.reply_text ( f"⚠️ {tu.full_name}: {limit}/{limit} warn → {action}.\nSabab: {reason}")
+            return await msg.reply_text ( f"⚠️ {tu.full_name}: {n}/{limit} warn.\nSabab: {reason}")
         if cmd=="unwarn":
             execute ( "UPDATE warns SET count=MAX ( count-1,0) WHERE chat_id=? AND user_id=?", ( chat.id,tu.id ) )
         elif cmd=="clearwarns": execute ( "DELETE FROM warns WHERE chat_id=? AND user_id=?", ( chat.id,tu.id ) )
         elif cmd=="mute":
-            await ctx.bot.restrict_chat_member ( chat.id,tu.id,ChatPermissions ( can_send_messages=False ) )
+            sec=parse_duration ( arg[0]) if arg else 0
+            until= ( datetime.now ( timezone.utc ) +timedelta ( seconds=sec ) ) if sec else None
+            await ctx.bot.restrict_chat_member ( chat.id,tu.id,ChatPermissions ( can_send_messages=False ) ,until_date=until)
+            reason=" ".join ( arg[1:] if sec else arg ) .strip ( )
+            modlog ( chat.id,u.id,tu.id,"mute",reason,sec)
         elif cmd=="unmute":
             await ctx.bot.restrict_chat_member ( chat.id,tu.id,ChatPermissions ( can_send_messages=True,can_send_audios=True,can_send_documents=True,can_send_photos=True,can_send_videos=True,can_send_video_notes=True,can_send_voice_notes=True,can_send_polls=True,can_send_other_messages=True,can_add_web_page_previews=True,can_invite_users=True ) )
         elif cmd=="kick":
             await ctx.bot.ban_chat_member ( chat.id,tu.id ) ; await ctx.bot.unban_chat_member ( chat.id,tu.id)
-        elif cmd=="ban": await ctx.bot.ban_chat_member ( chat.id,tu.id)
+        elif cmd=="ban":
+            sec=parse_duration ( arg[0]) if arg else 0
+            until= ( datetime.now ( timezone.utc ) +timedelta ( seconds=sec ) ) if sec else None
+            await ctx.bot.ban_chat_member ( chat.id,tu.id,until_date=until)
+            reason=" ".join ( arg[1:] if sec else arg ) .strip ( )
+            modlog ( chat.id,u.id,tu.id,"ban",reason,sec)
         elif cmd=="unban": await ctx.bot.unban_chat_member ( chat.id,tu.id,only_if_banned=True)
         elif cmd=="ruxsat": execute ( "INSERT OR IGNORE INTO vadmins VALUES ( ?,? ) ", ( chat.id,tu.id ) )
         elif cmd=="ruxsatsiz": execute ( "DELETE FROM vadmins WHERE chat_id=? AND user_id=?", ( chat.id,tu.id ) )
@@ -1664,7 +1574,6 @@ async def star_text_router ( update,ctx ) :
     if cmd=="id": return await cmd_id ( update,ctx)
     if cmd=="men": return await show_me ( update,ctx)
     if cmd=="ak": return await msg.reply_text ( global_active_text ( 10 ) )
-    if cmd=="qadr": return await msg.reply_text ( qadr_top_text ( 10 ) )
     if cmd in {"unvon","unvonoff"}:
         return await title_command ( update,ctx,cmd,args)
     if cmd=="top" and args and args[0]=="10":
@@ -1697,6 +1606,17 @@ async def star_text_router ( update,ctx ) :
         return await msg.reply_text ( f"🤖 VERITAS AI — GURUH\n\n{status}\n\n{trial}",reply_markup=ai_group_menu ( update.effective_chat.id,update.effective_user.id ) )
     if update.effective_chat.type not in ("group","supergroup" ) :
         return await msg.reply_text ( "Bu buyruq guruh uchun.")
+    if cmd=="purge": return await purge_command ( update,ctx,args)
+    if cmd in {"warnlimit","warnaction","cleanservice","antirepeat","modlog"}:
+        return await moderation_config_command ( update,ctx,cmd,args)
+    if cmd=="pin":
+        if not await can_manage ( ctx.bot,update.effective_chat.id,update.effective_user.id ) : return await msg.reply_text ( "⛔ Ruxsat yo‘q.")
+        t=replied ( update)
+        if not t: return await msg.reply_text ( "↩️ Pin qilinadigan xabarga reply qiling.")
+        await ctx.bot.pin_chat_message ( update.effective_chat.id,t.message_id ) ; modlog ( update.effective_chat.id,update.effective_user.id,0,"pin" ) ; return await msg.reply_text ( "📌 Pin qilindi.")
+    if cmd=="unpin":
+        if not await can_manage ( ctx.bot,update.effective_chat.id,update.effective_user.id ) : return await msg.reply_text ( "⛔ Ruxsat yo‘q.")
+        await ctx.bot.unpin_chat_message ( update.effective_chat.id ) ; modlog ( update.effective_chat.id,update.effective_user.id,0,"unpin" ) ; return await msg.reply_text ( "📌 Pin olib tashlandi.")
     if cmd in {"warn","unwarn","clearwarns","mute","unmute","kick","ban","unban","del","ruxsat","ruxsatsiz","admin","unadmin","approve","unapprove"}:
         return await group_action ( update,ctx,cmd,args)
     if cmd in {"links","antiflood","reports","welcome","goodbye","flood","setrules","lock","unlock","blacklist","unblacklist","filter","stop","stopall","save","clear"}:
@@ -2830,15 +2750,23 @@ async def passive ( update,ctx ) :
             if r["key"] in text: return await msg.reply_text ( r["response"])
 
 async def new_members ( update,ctx ) :
+    st=moderation_settings ( update.effective_chat.id)
     g=one ( "SELECT welcome FROM groups WHERE chat_id=?", ( update.effective_chat.id, ) )
     if g and g["welcome"]:
         names=", ".join ( u.first_name for u in update.effective_message.new_chat_members)
         await update.effective_message.reply_text ( f"👋 Xush kelibsiz, {names}!")
+    if st and st["clean_service"]:
+        try: await update.effective_message.delete ( )
+        except TelegramError: pass
 
 async def left_member ( update,ctx ) :
+    st=moderation_settings ( update.effective_chat.id)
     g=one ( "SELECT goodbye FROM groups WHERE chat_id=?", ( update.effective_chat.id, ) )
     if g and g["goodbye"] and update.effective_message.left_chat_member:
         await update.effective_message.reply_text ( f"👋 {update.effective_message.left_chat_member.first_name} guruhni tark etdi.")
+    if st and st["clean_service"]:
+        try: await update.effective_message.delete ( )
+        except TelegramError: pass
 
 async def callback ( update,ctx ) :
     q=update.callback_query; d=q.data; u=q.from_user; ensure_user ( u)
@@ -2894,50 +2822,7 @@ async def callback ( update,ctx ) :
         return await top10_result ( ctx.bot,chat_id,with_gifts,u.id)
 
     if d=="me":
-        return await send_public_profile ( ctx,q.message.chat.id,u.id,u.id,q.message )
-
-    if d=="profilefind":
-        STATE[u.id]={"mode":"profile_find"}
-        try:
-            if q.message.photo or q.message.video or q.message.document or q.message.audio or q.message.animation:
-                await q.message.delete ( )
-                return await ctx.bot.send_message ( q.message.chat.id,"🔎 A’ZONI TOPISH\n\nA’zoning @username yoki Telegram ID sini yozing.\nMasalan: @username yoki 123456789",reply_markup=back_markup ( "home" ) )
-            return await q.edit_message_text ( "🔎 A’ZONI TOPISH\n\nA’zoning @username yoki Telegram ID sini yozing.\nMasalan: @username yoki 123456789",reply_markup=back_markup ( "home" ) )
-        except TelegramError:
-            return await ctx.bot.send_message ( q.message.chat.id,"🔎 A’ZONI TOPISH\n\nA’zoning @username yoki Telegram ID sini yozing." )
-
-    if d.startswith ( "plike:" ) :
-        target_uid=int ( d.split ( ":",1 )[1] )
-        if target_uid==u.id:
-            return await q.answer ( "O‘z profilingizga Qadr berib bo‘lmaydi.",show_alert=True )
-        if not one ( "SELECT 1 FROM users WHERE user_id=?", ( target_uid, ) ):
-            return await q.answer ( "A’zo topilmadi.",show_alert=True )
-        if profile_liked_by ( target_uid,u.id ):
-            execute ( "DELETE FROM profile_likes WHERE target_user_id=? AND voter_user_id=?", ( target_uid,u.id ) )
-            notice="Qadr olib tashlandi."
-        else:
-            # Bir foydalanuvchi bir profilga bir vaqtda Like va Dizlayk bera olmaydi.
-            execute ( "DELETE FROM profile_dislikes WHERE target_user_id=? AND voter_user_id=?", ( target_uid,u.id ) )
-            execute ( "INSERT OR IGNORE INTO profile_likes ( target_user_id,voter_user_id,created_at) VALUES ( ?,?,? ) ", ( target_uid,u.id,now ( ) ) )
-            notice="❤️ Like qo‘yildi."
-        await q.answer ( notice )
-        return await send_public_profile ( ctx,q.message.chat.id,target_uid,u.id,q.message )
-
-    if d.startswith ( "pdislike:" ) :
-        target_uid=int ( d.split ( ":",1 )[1] )
-        if target_uid==u.id:
-            return await q.answer ( "O‘z profilingizga E’tiroz berib bo‘lmaydi.",show_alert=True )
-        if not one ( "SELECT 1 FROM users WHERE user_id=?", ( target_uid, ) ):
-            return await q.answer ( "A’zo topilmadi.",show_alert=True )
-        if profile_disliked_by ( target_uid,u.id ):
-            execute ( "DELETE FROM profile_dislikes WHERE target_user_id=? AND voter_user_id=?", ( target_uid,u.id ) )
-            notice="E’tiroz olib tashlandi."
-        else:
-            execute ( "DELETE FROM profile_likes WHERE target_user_id=? AND voter_user_id=?", ( target_uid,u.id ) )
-            execute ( "INSERT OR IGNORE INTO profile_dislikes ( target_user_id,voter_user_id,created_at) VALUES ( ?,?,? ) ", ( target_uid,u.id,now ( ) ) )
-            notice="👎 Dizlayk qo‘yildi."
-        await q.answer ( notice )
-        return await send_public_profile ( ctx,q.message.chat.id,target_uid,u.id,q.message )
+        return await q.edit_message_text ( global_profile_text ( u ),reply_markup=back_markup ( ) )
 
     if d=="globalactive":
         return await q.edit_message_text ( global_active_text ( 10 ),reply_markup=back_markup ( ) )
@@ -3144,29 +3029,15 @@ async def callback ( update,ctx ) :
 
     if d=="libadd":
         if not is_library_admin ( u.id ) : return await q.edit_message_text ( "⛔ Ruxsat yo‘q.",reply_markup=back_markup ( "library" ) )
-        STATE[u.id]={"mode":"lib_quick_file","data":{}}
-        return await q.edit_message_text ( "➕ KITOB QO‘SHISH — OSON USUL\n\n📎 Avval kitob faylini yuboring.\n\nQabul qilinadi: PDF, EPUB, DOCX, TXT, FB2, MOBI, DJVU\n\nBot fayl nomidan kitob nomini avtomatik oladi. Keyin faqat muallif va tilni tanlaysiz.",reply_markup=back_markup ( "library" ) )
+        STATE[u.id]={"mode":"lib_add_title","data":{}}
+        return await q.edit_message_text ( "➕ KITOB QO‘SHISH\n\n1/7 — 📖 Kitob nomini yuboring:",reply_markup=back_markup ( "library" ) )
 
     if d.startswith ( "libaddlang:" ) :
         st=STATE.get ( u.id)
-        if not st or st.get ( "mode" ) not in {"lib_add_lang","lib_quick_lang"}: return await q.edit_message_text ( "Jarayon eskirgan. Qaytadan boshlang.",reply_markup=back_markup ( "library" ) )
+        if not st or st.get ( "mode" ) !="lib_add_lang": return await q.edit_message_text ( "Jarayon eskirgan. Qaytadan boshlang.",reply_markup=back_markup ( "library" ) )
         lang=d.split ( ":",1 ) [1]
         if lang not in ("uz","ru","en" ) : return
-        st["data"]["lang"]=lang
-        if st.get ( "mode" ) =="lib_quick_lang":
-            data=st["data"]
-            with db ( ) as c:
-                cur=c.execute ( """INSERT INTO library_books
-                    (title,author,lang,description,cover_file_id,pdf_file_id,pdf_unique_id,audio_file_id,audio_unique_id,
-                     added_by,status,created_at,book_file_id,book_unique_id,book_file_name,book_format,book_file_size)
-                    VALUES ( ?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,? ) """,
-                    (data["title"],data.get ( "author","" ) ,lang,"","",data.get ( "pdf_file_id","" ) ,data.get ( "pdf_unique_id","" ) ,"","",
-                     u.id,"approved",now (  ) ,data.get ( "book_file_id","" ) ,data.get ( "book_unique_id","" ) ,data.get ( "book_file_name","" ) ,
-                     data.get ( "book_format","" ) ,data.get ( "book_file_size",0 )  ) )
-                bid=cur.lastrowid
-            STATE.pop ( u.id,None ) ; audit ( u.id,0,"library_add_quick",str ( bid ) )
-            return await q.edit_message_text ( f"✅ Kitob saqlandi.\n📖 {data['title']}\n📁 {data.get ( 'book_format','' ) .upper (  ) }\nID: {bid}\n\nKerak bo‘lsa kitob kartasidan nomi, muqovasi, kategoriya va tavsifini tahrirlashingiz mumkin.",reply_markup=InlineKeyboardMarkup ( [[InlineKeyboardButton ( "📖 Kitobni ochish",callback_data=f"libbook:{bid}" ) ],[InlineKeyboardButton ( "📚 Kutubxona",callback_data="library" ) ]] ) )
-        st["mode"]="lib_add_categories"
+        st["data"]["lang"]=lang; st["mode"]="lib_add_categories"
         return await q.edit_message_text ( "🗂 Kategoriyalarni vergul bilan yuboring.\nMisol: Islomiy, Hadis, Tarix")
 
     if d.startswith ( "libnew:" ) :
@@ -3274,21 +3145,6 @@ async def callback ( update,ctx ) :
             execute ( "DELETE FROM library_favorites WHERE user_id=? AND book_id=?", ( u.id,bid ) )
         else: execute ( "INSERT OR IGNORE INTO library_favorites ( user_id,book_id,created_at) VALUES ( ?,?,? ) ", ( u.id,bid,now (  )  ) )
         return await library_show_book ( q,ctx,bid)
-
-    if d.startswith ( "libfile:" ) :
-        bid=int ( d.split ( ":" ) [1])
-        r=one ( "SELECT title,book_file_id,book_file_name,book_format,pdf_file_id FROM library_books WHERE id=? AND status='approved'", ( bid, ) )
-        if not r:
-            return await q.answer ( "Kitob topilmadi",show_alert=True)
-        fid=r["book_file_id"] or r["pdf_file_id"]
-        if not fid:
-            return await q.answer ( "Kitob fayli mavjud emas",show_alert=True)
-        try:
-            execute ( "UPDATE library_books SET downloads=downloads+1 WHERE id=?", ( bid, ) )
-            return await ctx.bot.send_document ( u.id,fid,caption=f"📚 {r['title']}\n📁 { ( r['book_format'] or 'PDF' ) .upper (  ) }\nVasatiya kutubxonasi")
-        except TelegramError as e:
-            log.exception ( "Library file send failed: book_id=%s",bid)
-            return await q.answer ( "⚠️ Faylni yuborishda xato. Admin tekshirishi kerak.",show_alert=True)
 
     if d.startswith ( "libpdf:" ) :
         bid=int ( d.split ( ":" ) [1] ) ; r=one ( "SELECT title,pdf_file_id FROM library_books WHERE id=? AND status='approved'", ( bid, ) )
