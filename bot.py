@@ -3330,9 +3330,216 @@ async def giveaway_job ( ctx ) :
 async def error_handler ( update,ctx ) :
     log.exception ( "Handler error",exc_info=ctx.error)
 
+
+# =========================================================
+# V8 ROSE FULL — advanced moderation compatibility layer
+# =========================================================
+ROSE_REPEAT_CACHE = {}
+ROSE_JOIN_CACHE = {}
+
+def rose_full_init_db (  ) :
+    with db ( ) as c:
+        c.executescript ( """
+        CREATE TABLE IF NOT EXISTS rose_settings(
+          chat_id INTEGER PRIMARY KEY,
+          anti_repeat INTEGER DEFAULT 1, repeat_limit INTEGER DEFAULT 4, repeat_window INTEGER DEFAULT 30,
+          anti_raid INTEGER DEFAULT 1, raid_join_limit INTEGER DEFAULT 8, raid_window INTEGER DEFAULT 20,
+          raid_mute_seconds INTEGER DEFAULT 300, clean_commands INTEGER DEFAULT 0,
+          welcome_text TEXT DEFAULT '', goodbye_text TEXT DEFAULT '',
+          lock_forward INTEGER DEFAULT 0, lock_contact INTEGER DEFAULT 0, lock_location INTEGER DEFAULT 0,
+          lock_poll INTEGER DEFAULT 0, lock_photo INTEGER DEFAULT 0, lock_video INTEGER DEFAULT 0,
+          lock_audio INTEGER DEFAULT 0, lock_voice INTEGER DEFAULT 0, lock_document INTEGER DEFAULT 0,
+          lock_sticker INTEGER DEFAULT 0, lock_animation INTEGER DEFAULT 0
+        );
+        CREATE TABLE IF NOT EXISTS temp_moderation(
+          chat_id INTEGER NOT NULL,user_id INTEGER NOT NULL,kind TEXT NOT NULL,until_ts INTEGER NOT NULL,
+          PRIMARY KEY ( chat_id,user_id,kind)
+        );
+        """)
+
+def rose_row ( chat_id ) :
+    execute ( "INSERT OR IGNORE INTO rose_settings ( chat_id) VALUES ( ? ) ", ( chat_id, ) )
+    return one ( "SELECT * FROM rose_settings WHERE chat_id=?", ( chat_id, ) )
+
+def parse_duration ( v ) :
+    m=re.fullmatch ( r" ( \d+ )  ( s|m|h|d|w ) ?", ( v or '' ) .lower (  ) )
+    if not m:return 0
+    n=int ( m.group ( 1 )  ) ; unit=m.group ( 2) or 'm'
+    return n*{'s':1,'m':60,'h':3600,'d':86400,'w':604800}[unit]
+
+def rose_content_kind ( msg ) :
+    if msg.forward_origin:return 'forward'
+    if msg.contact:return 'contact'
+    if msg.location or msg.venue:return 'location'
+    if msg.poll:return 'poll'
+    if msg.photo:return 'photo'
+    if msg.video:return 'video'
+    if msg.audio:return 'audio'
+    if msg.voice:return 'voice'
+    if msg.document:return 'document'
+    if msg.sticker:return 'sticker'
+    if msg.animation:return 'animation'
+    return ''
+
+async def rose_delete ( msg ) :
+    try: await msg.delete (  ) ; return True
+    except TelegramError:return False
+
+async def rose_advanced_command ( update,ctx,cmd,args ) :
+    chat=update.effective_chat; msg=update.effective_message; actor=update.effective_user
+    if not chat or chat.type not in ('group','supergroup' ) : return False
+    if cmd not in {'purge','pin','unpin','lockall','unlockall','cleanservice','antirepeat','raid','modlog','setwelcome','setgoodbye','tempban','tempmute'}:
+        return False
+    if not await can_manage ( ctx.bot,chat.id,actor.id ) :
+        await msg.reply_text ( '⛔ Bu buyruq uchun admin huquqi kerak.' ) ; return True
+    rose_row ( chat.id)
+    if cmd=='purge':
+        if not msg.reply_to_message:
+            await msg.reply_text ( '↩️ Boshlanish xabariga reply qilib *purge yozing.' ) ; return True
+        start=msg.reply_to_message.message_id; end=msg.message_id; deleted=0
+        for mid in range ( start,end+1 ) :
+            try: await ctx.bot.delete_message ( chat.id,mid ) ; deleted+=1
+            except TelegramError: pass
+        try: await ctx.bot.send_message ( chat.id,f'🧹 {deleted} ta xabar tozalandi.')
+        except TelegramError: pass
+        return True
+    if cmd=='pin':
+        t=msg.reply_to_message
+        if not t: await msg.reply_text ( '↩️ Pin qilinadigan xabarga reply qiling.' ) ; return True
+        try: await ctx.bot.pin_chat_message ( chat.id,t.message_id,disable_notification=True ) ; await msg.reply_text ( '📌 Xabar pin qilindi.')
+        except TelegramError as e: await msg.reply_text ( f'❌ Pin bo‘lmadi: {e}')
+        return True
+    if cmd=='unpin':
+        try: await ctx.bot.unpin_chat_message ( chat.id ) ; await msg.reply_text ( '📌 Pin olib tashlandi.')
+        except TelegramError as e: await msg.reply_text ( f'❌ {e}')
+        return True
+    if cmd in {'lockall','unlockall'}:
+        val=1 if cmd=='lockall' else 0
+        cols=['lock_forward','lock_contact','lock_location','lock_poll','lock_photo','lock_video','lock_audio','lock_voice','lock_document','lock_sticker','lock_animation']
+        execute ( 'UPDATE rose_settings SET '+','.join ( f'{x}=?' for x in cols ) +' WHERE chat_id=?',tuple ( [val]*len ( cols ) +[chat.id] ) )
+        await msg.reply_text ( '🔒 Barcha media lock yoqildi.' if val else '🔓 Barcha media lock o‘chirildi.' ) ; return True
+    if cmd=='cleanservice':
+        if not args or args[0].lower ( ) not in ('on','off' ) : await msg.reply_text ( '*cleanservice on/off' ) ; return True
+        execute ( 'UPDATE moderation_settings SET clean_service=? WHERE chat_id=?', ( 1 if args[0].lower (  ) =='on' else 0,chat.id ) )
+        await msg.reply_text ( '✅ Service xabarlar sozlamasi saqlandi.' ) ; return True
+    if cmd=='antirepeat':
+        if not args or args[0].lower ( ) not in ('on','off' ) : await msg.reply_text ( '*antirepeat on/off [limit]' ) ; return True
+        val=1 if args[0].lower (  ) =='on' else 0; lim=int ( args[1]) if len ( args ) >1 and args[1].isdigit ( ) else 4
+        execute ( 'UPDATE rose_settings SET anti_repeat=?,repeat_limit=? WHERE chat_id=?', ( val,max ( 2,min ( lim,10 )  ) ,chat.id ) )
+        await msg.reply_text ( '🔁 Anti-repeat yangilandi.' ) ; return True
+    if cmd=='raid':
+        if not args or args[0].lower ( ) not in ('on','off' ) : await msg.reply_text ( '*raid on/off' ) ; return True
+        execute ( 'UPDATE rose_settings SET anti_raid=? WHERE chat_id=?', ( 1 if args[0].lower (  ) =='on' else 0,chat.id )  ) ; await msg.reply_text ( '🛡 Anti-raid yangilandi.' ) ; return True
+    if cmd in {'setwelcome','setgoodbye'}:
+        txt=' '.join ( args ) .strip ( )
+        if not txt and msg.reply_to_message: txt=msg.reply_to_message.text or msg.reply_to_message.caption or ''
+        if not txt: await msg.reply_text ( f'*{cmd} <matn>' ) ; return True
+        col='welcome_text' if cmd=='setwelcome' else 'goodbye_text'; execute ( f'UPDATE rose_settings SET {col}=? WHERE chat_id=?', ( txt,chat.id )  ) ; await msg.reply_text ( '✅ Matn saqlandi.' ) ; return True
+    if cmd=='modlog':
+        rows=all_ ( 'SELECT * FROM moderation_log WHERE chat_id=? ORDER BY id DESC LIMIT 15', ( chat.id, ) )
+        if not rows: await msg.reply_text ( '📋 Moderatsiya logi bo‘sh.' ) ; return True
+        lines=['📋 SO‘NGGI MODERATSIYA']
+        for r in rows: lines.append ( f"• {r['action']} | {r['target_id']} | {r['reason'] or 'sababsiz'}")
+        await msg.reply_text ( '\n'.join ( lines )  ) ; return True
+    if cmd in {'tempmute','tempban'}:
+        t=msg.reply_to_message
+        if not t or not t.from_user: await msg.reply_text ( f'↩️ Foydalanuvchiga reply qilib *{cmd} 10m [sabab]' ) ; return True
+        if not args: await msg.reply_text ( '⏱ Vaqt kiriting: 10m, 2h, 1d' ) ; return True
+        sec=parse_duration ( args[0] ) ; reason=' '.join ( args[1:]) or 'Sabab ko‘rsatilmagan'
+        if sec<=0: await msg.reply_text ( '❌ Vaqt formati noto‘g‘ri.' ) ; return True
+        until=now (  ) +sec
+        try:
+            if cmd=='tempmute': await ctx.bot.restrict_chat_member ( chat.id,t.from_user.id,ChatPermissions ( can_send_messages=False ) ,until_date=datetime.fromtimestamp ( until,timezone.utc ) )
+            else: await ctx.bot.ban_chat_member ( chat.id,t.from_user.id,until_date=datetime.fromtimestamp ( until,timezone.utc ) )
+            execute ( 'INSERT OR REPLACE INTO temp_moderation VALUES ( ?,?,?,? ) ', ( chat.id,t.from_user.id,cmd,until ) )
+            execute ( 'INSERT INTO moderation_log ( chat_id,actor_id,target_id,action,reason,duration,created_at) VALUES ( ?,?,?,?,?,?,? ) ', ( chat.id,actor.id,t.from_user.id,cmd,reason,sec,now (  )  ) )
+            await msg.reply_text ( f"✅ {t.from_user.first_name}: {cmd} — {args[0]}\n📝 {reason}")
+        except TelegramError as e: await msg.reply_text ( f'❌ Amal bajarilmadi: {e}')
+        return True
+    return False
+
+_original_star_text_router=star_text_router
+async def star_text_router ( update,ctx ) :
+    msg=update.effective_message
+    if msg and msg.text and msg.text.startswith ( '*' ) :
+        parts=msg.text[1:].strip (  ) .split (  ) ; cmd=parts[0].lower ( ) if parts else ''; args=parts[1:]
+        if await rose_advanced_command ( update,ctx,cmd,args ) : return
+    return await _original_star_text_router ( update,ctx)
+
+_original_passive=passive
+async def passive ( update,ctx ) :
+    msg=update.effective_message; chat=update.effective_chat; u=update.effective_user
+    if msg and chat and u and not u.is_bot and chat.type in ('group','supergroup' ) :
+        ensure_group ( chat ) ; rr=rose_row ( chat.id)
+        if not await protected ( ctx.bot,chat.id,u.id) and not one ( 'SELECT 1 FROM approved WHERE chat_id=? AND user_id=?', ( chat.id,u.id )  ) :
+            kind=rose_content_kind ( msg)
+            if kind and rr[f'lock_{kind}']:
+                await rose_delete ( msg ) ; return
+            txt= ( msg.text or msg.caption or '' ) .strip (  ) .lower ( )
+            if rr['anti_repeat'] and txt:
+                key= ( chat.id,u.id,txt[:500] ) ; ts=now (  ) ; arr=[x for x in ROSE_REPEAT_CACHE.get ( key,[]) if ts-x<=rr['repeat_window']]; arr.append ( ts ) ; ROSE_REPEAT_CACHE[key]=arr
+                if len ( arr ) >=rr['repeat_limit']:
+                    await rose_delete ( msg)
+                    try: await ctx.bot.restrict_chat_member ( chat.id,u.id,ChatPermissions ( can_send_messages=False ) ,until_date=datetime.now ( timezone.utc ) +timedelta ( minutes=2 )  ) ; await ctx.bot.send_message ( chat.id,f'🔁 {u.first_name}: takroriy spam sabab 2 daqiqa mute.')
+                    except TelegramError: pass
+                    ROSE_REPEAT_CACHE[key]=[]; return
+    return await _original_passive ( update,ctx)
+
+_original_new_members=new_members
+async def new_members ( update,ctx ) :
+    chat=update.effective_chat; msg=update.effective_message
+    if chat and chat.type in ('group','supergroup' ) :
+        rr=rose_row ( chat.id ) ; ts=now (  ) ; arr=[x for x in ROSE_JOIN_CACHE.get ( chat.id,[]) if ts-x<=rr['raid_window']]
+        arr += [ts]*len ( msg.new_chat_members or [] ) ; ROSE_JOIN_CACHE[chat.id]=arr
+        if rr['anti_raid'] and len ( arr ) >=rr['raid_join_limit']:
+            for nu in msg.new_chat_members or []:
+                if not nu.is_bot:
+                    try: await ctx.bot.restrict_chat_member ( chat.id,nu.id,ChatPermissions ( can_send_messages=False ) ,until_date=datetime.now ( timezone.utc ) +timedelta ( seconds=rr['raid_mute_seconds'] ) )
+                    except TelegramError: pass
+            try: await ctx.bot.send_message ( chat.id,'🚨 Anti-raid ishga tushdi. Yangi a’zolar vaqtincha cheklab qo‘yildi.')
+            except TelegramError: pass
+        custom=rr['welcome_text']
+        if custom:
+            names=', '.join ( x.first_name for x in msg.new_chat_members or [])
+            txt=custom.replace ( '{first}',names ) .replace ( '{chatname}',chat.title or '')
+            try: await msg.reply_text ( txt)
+            except TelegramError: pass
+            st=moderation_settings ( chat.id)
+            if st and st['clean_service']:
+                try: await msg.delete ( )
+                except TelegramError: pass
+            return
+    return await _original_new_members ( update,ctx)
+
+_original_left_member=left_member
+async def left_member ( update,ctx ) :
+    chat=update.effective_chat; msg=update.effective_message
+    if chat and chat.type in ('group','supergroup' ) :
+        rr=rose_row ( chat.id ) ; custom=rr['goodbye_text']; lu=msg.left_chat_member
+        if custom and lu:
+            txt=custom.replace ( '{first}',lu.first_name or '' ) .replace ( '{chatname}',chat.title or '')
+            try: await msg.reply_text ( txt)
+            except TelegramError: pass
+            st=moderation_settings ( chat.id)
+            if st and st['clean_service']:
+                try: await msg.delete ( )
+                except TelegramError: pass
+            return
+    return await _original_left_member ( update,ctx)
+
+async def rose_cleanup_job ( ctx ) :
+    rows=all_ ( 'SELECT * FROM temp_moderation WHERE until_ts<=?', ( now (  ) , ) )
+    for r in rows:
+        try:
+            if r['kind']=='tempmute': await ctx.bot.restrict_chat_member ( r['chat_id'],r['user_id'],ChatPermissions ( can_send_messages=True,can_send_audios=True,can_send_documents=True,can_send_photos=True,can_send_videos=True,can_send_video_notes=True,can_send_voice_notes=True,can_send_polls=True,can_send_other_messages=True,can_add_web_page_previews=True,can_invite_users=True ) )
+            elif r['kind']=='tempban': await ctx.bot.unban_chat_member ( r['chat_id'],r['user_id'],only_if_banned=True)
+        except TelegramError: pass
+        execute ( 'DELETE FROM temp_moderation WHERE chat_id=? AND user_id=? AND kind=?', ( r['chat_id'],r['user_id'],r['kind'] ) )
+
 def main (  ) :
     if not TOKEN: raise RuntimeError ( "BOT_TOKEN kiritilmagan.")
     init_db ( )
+    rose_full_init_db ( )
     app=Application.builder (  ) .token ( TOKEN ) .build ( )
     app.add_handler ( CommandHandler ( "start",start ) )
     app.add_handler ( CommandHandler ( "help",cmd_help ) )
@@ -3353,7 +3560,9 @@ def main (  ) :
     app.add_handler ( MessageHandler ( filters.ALL & ~filters.StatusUpdate.ALL & ~filters.SUCCESSFUL_PAYMENT,passive ) ,group=3)
     # Plain private text AI comes last.
     app.add_handler ( MessageHandler ( filters.ChatType.PRIVATE & filters.TEXT & ~filters.COMMAND & ~filters.Regex ( r"^\*" ) ,private_ai_reply ) ,group=4)
-    if app.job_queue: app.job_queue.run_repeating ( giveaway_job,60,first=10)
+    if app.job_queue:
+        app.job_queue.run_repeating ( giveaway_job,60,first=10)
+        app.job_queue.run_repeating ( rose_cleanup_job,30,first=15)
     app.add_error_handler ( error_handler)
     log.info ( "VERITAS v8 starting")
     app.run_polling ( allowed_updates=Update.ALL_TYPES)
