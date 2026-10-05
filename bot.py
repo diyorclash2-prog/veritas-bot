@@ -294,6 +294,7 @@ def main_menu_markup ( uid ) :
       [InlineKeyboardButton ( "🤖 Veritas AI",callback_data="ai_private" ) ],
       [InlineKeyboardButton ( "🧩 AI Rebus",callback_data="rebus:start" ) ],
       [InlineKeyboardButton ( "📚 Vasatiya kutubxonasi",callback_data="library" ) ,InlineKeyboardButton ( "📜 Sahih Hadislar",callback_data="hadith" ) ],
+      [InlineKeyboardButton ( "📨 Egaga xabar qoldirish",callback_data="owner:message" ) ],
       [InlineKeyboardButton ( "ℹ️ Veritas haqida",callback_data="about" ) ],
     ]
     if is_super ( uid ):
@@ -1080,37 +1081,56 @@ async def cmd_id ( update,ctx ) :
     await update.effective_message.reply_text ( f"👤 ID: {update.effective_user.id}\n💬 Chat ID: {update.effective_chat.id}")
 
 async def cmd_help ( update,ctx ) :
-    kb=InlineKeyboardMarkup ( [
-        [InlineKeyboardButton ( "📚 Vasatiya",callback_data="help:library" ) ,InlineKeyboardButton ( "📜 Hadislar",callback_data="help:hadith" ) ],
-        [InlineKeyboardButton ( "🛡 Adminlar",callback_data="help:admins" ) ,InlineKeyboardButton ( "👑 Super boshqaruv",callback_data="help:superadmins" ) ],
-        [InlineKeyboardButton ( "👥 Moderatsiya",callback_data="help:moderation" ) ],
-        [InlineKeyboardButton ( "🔐 Himoya",callback_data="help:security" ) ,InlineKeyboardButton ( "💬 Filter / Notes",callback_data="help:filters" ) ],
+    await update.effective_message.reply_text(
+        "❓ VERITAS V8 — YORDAM MARKAZI\n\n"
+        "🪶 Veritas qila oladigan barcha asosiy ishlar shu yerda jamlangan.\n"
+        "Kerakli bo‘limni tanlang:",
+        reply_markup=help_home_markup ( )
+    )
+
+def help_home_markup (  ) :
+    return InlineKeyboardMarkup ( [
+        [InlineKeyboardButton ( "📌 Asosiy",callback_data="help:main" ) , InlineKeyboardButton ( "👤 Profil / Faollik",callback_data="help:profile" ) ],
+        [InlineKeyboardButton ( "🤖 Veritas AI",callback_data="help:ai" ) , InlineKeyboardButton ( "🧩 AI Rebus",callback_data="help:rebus" ) ],
+        [InlineKeyboardButton ( "📚 Vasatiya",callback_data="help:library" ) , InlineKeyboardButton ( "📜 Hadislar",callback_data="help:hadith" ) ],
+        [InlineKeyboardButton ( "🛡 Moderatsiya",callback_data="help:moderation" ) , InlineKeyboardButton ( "⏱ Vaqtli jazolar",callback_data="help:tempmod" ) ],
+        [InlineKeyboardButton ( "🔐 Himoya / Lock",callback_data="help:security" ) , InlineKeyboardButton ( "🌊 Anti-spam / Raid",callback_data="help:antispam" ) ],
+        [InlineKeyboardButton ( "👋 Welcome / Goodbye",callback_data="help:welcome" ) , InlineKeyboardButton ( "💬 Filter / Notes",callback_data="help:filters" ) ],
+        [InlineKeyboardButton ( "🛡 Adminlar",callback_data="help:admins" ) , InlineKeyboardButton ( "👑 Super boshqaruv",callback_data="help:superadmins" ) ],
+        [InlineKeyboardButton ( "⭐ Stars / Gift",callback_data="help:stars" ) , InlineKeyboardButton ( "🎉 Giveaway",callback_data="help:giveaway" ) ],
+        [InlineKeyboardButton ( "📢 Xabarnoma",callback_data="help:broadcast" ) , InlineKeyboardButton ( "📨 Egaga xabar",callback_data="help:owner" ) ],
         [InlineKeyboardButton ( "⚙️ Guruh sozlamalari",callback_data="help:settings" ) ],
-        [InlineKeyboardButton ( "⭐ Stars / Gift",callback_data="help:stars" ) ,InlineKeyboardButton ( "🎉 Giveaway",callback_data="help:giveaway" ) ],
-        [InlineKeyboardButton ( "📢 Xabarnoma",callback_data="help:broadcast" ) ,InlineKeyboardButton ( "📌 Asosiy",callback_data="help:main" ) ],
         [InlineKeyboardButton ( "🏠 Bosh menyu",callback_data="home" ) ]
-    ] )
-    await update.effective_message.reply_text ( "❓ VERITAS YORDAM MARKAZI\n\nKerakli bo‘limni tanlang:",reply_markup=kb )
+    ])
 
 def help_menu_markup (  ) :
-    return InlineKeyboardMarkup ( [[InlineKeyboardButton ( "⬅️ Yordam bo‘limlari",callback_data="help:home" ) ,InlineKeyboardButton ( "🏠 Bosh menyu",callback_data="home" ) ]] )
+    return InlineKeyboardMarkup ( [
+        [InlineKeyboardButton ( "⬅️ Yordam bo‘limlari",callback_data="help:home" ) , InlineKeyboardButton ( "🏠 Bosh menyu",callback_data="home" ) ]
+    ])
 
 def help_text ( section ) :
     data={
-      "main":"📌 ASOSIY\n\n*help — yordam markazi\n*id — Telegram ID va chat ID\n*men — global profil, rol, ilm hissasi va faollik\n*ak — barcha guruhlar bo‘yicha Global TOP-10\n*aktiv — Global TOP-10\n*top 10 — Super Ega TOP paneli\n*rules — guruh qoidalari\n*admins — adminlar\n*vse — Veritas xabariga reply qilib yozilsa, shu buyruqni yozgan a’zoning Veritas qayd etgan oldingi xabarlarini o‘chiradi\n*unvon <nom> / *unvonoff — unvon boshqaruvi",
-      "library":"📚 VASATIYA KUTUBXONASI\n\nMenyudan kitob qidirish, kategoriya, yangi kitoblar va sevimlilar ishlaydi.\n\n*ad.book — replydagi odamga kutubxona adminligi\n*unad.book — huquqni olish\n*bookadmins — kutubxona adminlari\n\nKitob admini kitob qo‘shishi, ✏️ Tahrirlash orqali nom, muallif, til, kategoriya, tavsif, muqova, PDF va audioni yangilashi mumkin.",
-      "hadith":"📜 SAHIH HADISLAR\n\n*hadis — random hadis\n*hadis buxoriy 1 — aniq hadis\n*add.hadis — private chatda hadis qo‘shish\n*del.hadis buxoriy 1 — o‘chirish\n*ad.hadis / *unad.hadis — hadis admini huquqi\n*hadisadmins — hadis adminlari\n\nMavjud hadis topilsa uni ✏️ Tahrirlash mumkin.",
-      "admins":"🛡 ADMINLAR\n\n*ruxsat / *ruxsatsiz — Veritas admini\n*admin / *unadmin — Telegram admini\n*approve / *unapprove / *approved — himoyalangan a’zolar\n*ad.book / *unad.book — kutubxona admini\n*ad.hadis / *unad.hadis — hadis admini",
-      "superadmins":"👑 SUPER BOSHQARUV\n\n*superadmin — replydagi foydalanuvchini Super Admin qilish\n*unsuperadmin — replydagi Super Admin huquqini olish\n*superadmins — Super Ega va Super Adminlar ro‘yxati\n*ai.p — replydagi foydalanuvchiga 10 ⭐ evaziga 30 kun AI Premium berish\n\nSuper Admin bot boshqaruvida Super Ega vakolatlariga ega. Super Admin qo‘shish/olish esa faqat Super Ega uchun.",
-      "moderation":"👥 MODERATSIYA\n\nReply orqali: *warn, *unwarn, *warns, *clearwarns, *mute, *unmute, *kick, *ban, *unban, *del\n\n🧹 *vse — a’zo Veritas xabariga reply qilib yozadi; o‘sha a’zoning bot qayd etgan oldingi xabarlari o‘chiriladi.",
-      "security":"🔐 HIMOYA\n\n*links on/off\n*blacklist <so‘z> / *unblacklist <so‘z> / *blacklists\n*lock <turi> / *unlock <turi> / *locks\n*antiflood on/off\n*flood 5\n*report / *reports on/off",
-      "filters":"💬 FILTER VA NOTES\n\n*filter <kalit> <javob> / *filters / *stop <kalit> / *stopall\n*save <nom> <matn> / *get <nom> / *notes / *clear <nom>",
-      "settings":"⚙️ GURUH SOZLAMALARI\n\n*welcome on/off\n*goodbye on/off\n*setrules <matn>",
-      "stars":"⭐ STARS / SOVG‘A\n\n*topup 100 — kabinet krediti\n*stars 100 — Telegram Stars Gift oynasi (Super Ega ) \n*give <narx> — real Gift\n*premium 3/6/12 — Premium sovg‘asi",
-      "giveaway":"🎉 GIVEAWAY\n\n*giveaway gift <narx> <daq> <g‘oliblar> — konkurs ochish\n*join — konkursga qo‘shilish",
-      "broadcast":"📢 XABARNOMA\n\n*post <matn> — barcha foydalanuvchi va guruhlarga matn\n*post — xabar/postga reply qilinsa o‘sha xabarni hammaga nusxalaydi\n\nSuper Ega yoki Super Admin uchun."
+      "main":"📌 ASOSIY BUYRUQLAR\n━━━━━━━━━━━━━━━━━━\n*help — barcha yordam bo‘limlarini ochadi.\n*id — sizning Telegram ID va joriy chat ID sini ko‘rsatadi.\n*men — shaxsiy/global profilingizni ko‘rsatadi.\n*rules — guruh qoidalarini chiqaradi.\n*admins — guruh va Veritas adminlarini ko‘rsatadi.\n*vse — Veritas xabariga reply qilib yozilganda a’zoning Veritas qayd etgan oldingi xabarlarini tozalaydi.\n\n🏠 Shaxsiy chatdagi bosh menyudan AI, kutubxona, hadis, profil, Stars, Rebus va Egaga xabar bo‘limlari ochiladi.",
+      "profile":"👤 PROFIL VA FAOLLIK\n━━━━━━━━━━━━━━━━━━\n*men — rol, XP, level, xabarlar, ilm hissasi va kabinet ma’lumotlari.\n*ak — barcha Veritas guruhlari bo‘yicha Global TOP-10.\n*aktiv — global faollik TOP ro‘yxati.\n*top 10 — TOP paneli.\n*unvon <nom> — maxsus unvon o‘rnatadi.\n*unvonoff — maxsus unvonni olib tashlaydi.\n\n📈 Veritas guruhlardagi faollikni jamlab profilga qo‘shadi.",
+      "ai":"🤖 VERITAS AI\n━━━━━━━━━━━━━━━━━━\nShaxsiy menyudagi «🤖 Veritas AI» — AI yordamchi.\n*ai — guruhdagi AI holati va tarifini ochadi.\n*ai.p — replydagi foydalanuvchiga AI Premium sovg‘a qiladi.\n\n🎁 Shaxsiy AI: birinchi 30 kun bepul, keyin 10 ⭐ / 30 kun.\n🎁 Guruh AI: birinchi 30 kun bepul, keyin 100 ⭐ / 30 kun.\n🖼 AI rasmni ko‘rib tahlil qila oladi.\n📚 Kutubxona PDFlaridan AI test yaratish imkoniyatlari ham mavjud.",
+      "rebus":"🧩 AI REBUS\n━━━━━━━━━━━━━━━━━━\nGuruhda Veritas xabariga reply qilib *rebus yozing.\nBot private chatda rebuslar soni va javoblarini so‘raydi.\nAI rasmli rebus yaratadi; to‘g‘ri javob topilgach keyingisi chiqadi.\n🏆 Yakunda g‘oliblar natijasi chiqariladi.\n📍 Bog‘langan kanal bo‘lsa rebus kanalga, aks holda guruhga joylanadi.",
+      "library":"📚 VASATIYA KUTUBXONASI\n━━━━━━━━━━━━━━━━━━\n🔎 Kitob qidirish, kategoriya, yangi kitoblar va sevimlilar.\n📄 PDF/audio kitoblar va kitob boshqaruvi.\n*ad.book — replydagi odamga kutubxona adminligi beradi.\n*unad.book — kutubxona adminligini oladi.\n*bookadmins — kutubxona adminlarini ko‘rsatadi.\n\n✏️ Kitob admini nom, muallif, til, kategoriya, tavsif, muqova, PDF va audioni boshqaradi.",
+      "hadith":"📜 SAHIH HADISLAR\n━━━━━━━━━━━━━━━━━━\n*hadis — tasodifiy hadis chiqaradi.\n*hadis buxoriy 1 — aniq hadisni topadi.\n*add.hadis — private chatda yangi hadis qo‘shadi.\n*del.hadis buxoriy 1 — hadisni o‘chiradi.\n*ad.hadis — hadis adminligi beradi.\n*unad.hadis — huquqni oladi.\n*hadisadmins — hadis adminlari ro‘yxati.\n✏️ Mavjud hadisni tahrirlash ham mumkin.",
+      "moderation":"🛡 MODERATSIYA\n━━━━━━━━━━━━━━━━━━\n*warn [sabab] — replydagi a’zoga ogohlantirish beradi.\n*unwarn — bitta warnni olib tashlaydi.\n*warns — warnlar sonini ko‘rsatadi.\n*clearwarns — barcha warnlarni tozalaydi.\n*mute — replydagi a’zoni yozishdan cheklaydi.\n*unmute — mute holatini ochadi.\n*kick — a’zoni guruhdan chiqaradi.\n*ban — a’zoni bloklaydi.\n*unban — ban holatini ochadi.\n*del — reply qilingan xabarni o‘chiradi.\n*purge — reply qilingan joydan buyruqqacha xabarlarni tozalaydi.\n*pin — replydagi xabarni pin qiladi.\n*unpin — joriy pinni olib tashlaydi.\n*modlog — so‘nggi moderatsiya amallarini ko‘rsatadi.\n\nℹ️ Jazolash buyruqlarini foydalanuvchi xabariga reply qilib ishlating.",
+      "tempmod":"⏱ VAQTLI JAZOLAR\n━━━━━━━━━━━━━━━━━━\n*tempmute 10m [sabab] — replydagi a’zoni 10 daqiqaga mute qiladi.\n*tempban 2h [sabab] — replydagi a’zoni 2 soatga ban qiladi.\n\n⏰ Vaqt: s=soniya, m=daqiqa, h=soat, d=kun, w=hafta.\nMisol: *tempmute 1d flood\nMuddat tugaganda Veritas jazoni avtomatik ochadi.",
+      "security":"🔐 HIMOYA VA LOCKLAR\n━━━━━━━━━━━━━━━━━━\n*links on/off — havolalarni nazorat qiladi.\n*blacklist <so‘z> — taqiqlangan so‘z qo‘shadi.\n*unblacklist <so‘z> — blacklistdan olib tashlaydi.\n*blacklists — blacklist ro‘yxati.\n*lock <turi> — turdagi kontentni bloklaydi.\n*unlock <turi> — lockni ochadi.\n*locks — faol locklarni ko‘rsatadi.\n*lockall — media locklarning barchasini yoqadi.\n*unlockall — media locklarning barchasini o‘chiradi.\n\n🔒 Rose Full media himoyasi: forward, contact, location, poll, photo, video, audio, voice, document, sticker, animation.",
+      "antispam":"🌊 ANTI-SPAM / ANTI-RAID\n━━━━━━━━━━━━━━━━━━\n*antiflood on/off — flood himoyasini yoqadi/o‘chiradi.\n*flood 5 — flood chegarasini belgilaydi.\n*antirepeat on/off [limit] — bir xil xabarni takrorlashdan himoya qiladi.\n*raid on/off — ko‘p odam birdan kirgandagi raid himoyasi.\n*report — adminlarni yordamga chaqiradi.\n*reports on/off — report tizimini boshqaradi.\n\n🛡 Approved va admin foydalanuvchilar himoya filtrlari uchun istisno qilinishi mumkin.",
+      "welcome":"👋 WELCOME / GOODBYE\n━━━━━━━━━━━━━━━━━━\n*welcome on/off — kirish xabarini yoqadi/o‘chiradi.\n*goodbye on/off — chiqish xabarini yoqadi/o‘chiradi.\n*setwelcome <matn> — maxsus welcome matni.\n*setgoodbye <matn> — maxsus goodbye matni.\n*cleanservice on/off — join/leave servis xabarlarini tozalaydi.\n\n🧩 Matnda {first} — ism, {chatname} — guruh nomi sifatida ishlatiladi.",
+      "filters":"💬 FILTER VA NOTES\n━━━━━━━━━━━━━━━━━━\n*filter <kalit> <javob> — kalit so‘zga avtomatik javob saqlaydi.\n*filters — filterlar ro‘yxati.\n*stop <kalit> — bitta filterni o‘chiradi.\n*stopall — barcha filterlarni tozalaydi.\n*save <nom> <matn> — note saqlaydi.\n*get <nom> — note chiqaradi.\n*notes — notelar ro‘yxati.\n*clear <nom> — noteni o‘chiradi.",
+      "admins":"🛡 ADMIN BOSHQARUVI\n━━━━━━━━━━━━━━━━━━\n*ruxsat — replydagi a’zoga Veritas boshqaruv huquqi beradi.\n*ruxsatsiz — Veritas huquqini oladi.\n*admin — Telegram admini qiladi.\n*unadmin — Telegram adminligini oladi.\n*approve — a’zoni himoya filtrlari uchun tasdiqlaydi.\n*unapprove — approve holatini olib tashlaydi.\n*approved — tasdiqlangan a’zolar ro‘yxati.\n*ad.book / *unad.book — kutubxona admini.\n*ad.hadis / *unad.hadis — hadis admini.",
+      "superadmins":"👑 SUPER BOSHQARUV\n━━━━━━━━━━━━━━━━━━\n*superadmin — replydagi foydalanuvchini Super Admin qiladi.\n*unsuperadmin — Super Admin huquqini oladi.\n*superadmins — Super Egalar va Super Adminlar ro‘yxati.\n*post — global xabarnoma yuboradi.\n*ai.p — replydagi foydalanuvchiga AI Premium beradi.\n\n👑 Super Admin qo‘shish/olish faqat haqiqiy Super Ega uchun.",
+      "stars":"⭐ STARS / GIFT / PREMIUM\n━━━━━━━━━━━━━━━━━━\n*topup 100 — Veritas kabinetiga Stars kredit oladi.\n*stars 100 — Telegram Stars bilan bog‘liq oynani ochadi (ruxsatga qarab ) .\n*give <narx> — replydagi foydalanuvchiga real Telegram Gift yuboradi.\n*premium 3/6/12 — replydagi foydalanuvchiga Telegram Premium sovg‘a qiladi.\n⭐ Kabinet balansi bosh menyudagi «Hisob» bo‘limida ko‘rinadi.",
+      "giveaway":"🎉 GIVEAWAY\n━━━━━━━━━━━━━━━━━━\n*giveaway gift <narx> <daq> <g‘oliblar> — guruhda Gift konkursini ochadi.\n*join — faol konkursga qatnashadi.\n🏆 Vaqt tugaganda Veritas g‘oliblarni avtomatik tanlaydi.",
+      "broadcast":"📢 GLOBAL XABARNOMA\n━━━━━━━━━━━━━━━━━━\n*post <matn> — barcha foydalanuvchi va guruhlarga matn yuboradi.\n*post — biror post/xabarga reply qilib ishlatilsa, o‘sha xabarni nusxalaydi.\n🔐 Faqat Super boshqaruv uchun.",
+      "owner":"📨 EGAGA XABAR QOLDIRISH\n━━━━━━━━━━━━━━━━━━\nBosh menyudan «📨 Egaga xabar qoldirish» tugmasini bosing.\nKeyin matn, rasm, video, voice, audio, sticker yoki hujjat yuborishingiz mumkin.\n📬 Xabar Super Egalarga yetkaziladi.\n✉️ Ega «Javob berish» tugmasi orqali sizga Veritas ichidan javob beradi.\n✅ «Ko‘rildi» — murojaat ko‘rilganini belgilaydi.\n🗑 «Yopish» — murojaatni yakunlaydi.",
+      "settings":"⚙️ GURUH SOZLAMALARI\n━━━━━━━━━━━━━━━━━━\n*setrules <matn> — guruh qoidalarini saqlaydi.\n*welcome on/off — welcome tizimi.\n*goodbye on/off — goodbye tizimi.\n*cleanservice on/off — servis xabarlarini tozalash.\n*links on/off — link himoyasi.\n*antiflood on/off — flood himoyasi.\n*reports on/off — report tizimi.\n\n🪶 Barcha sozlamalar guruh bo‘yicha alohida saqlanadi."
     }
-    return data.get ( section,"Bo‘lim topilmadi." )
+    return data.get ( section,"Bo‘lim topilmadi.")
 
 async def cmd_super ( update,ctx ) :
     ensure_user ( update.effective_user)
@@ -2772,18 +2792,38 @@ async def callback ( update,ctx ) :
     q=update.callback_query; d=q.data; u=q.from_user; ensure_user ( u)
     await q.answer ( )
 
+    if d=="owner:message":
+        if q.message.chat.type != "private":
+            return await q.edit_message_text ( "📨 Egaga xabar faqat botning shaxsiy chatida ishlaydi.",reply_markup=back_markup ( "home" ) )
+        STATE[u.id]={"mode":"owner_message"}
+        return await q.edit_message_text(
+            "📨 EGAGA XABAR QOLDIRISH\n\nXabaringizni yuboring. Matn, rasm, video, voice, audio, sticker yoki hujjat bo‘lishi mumkin.\n\n❌ Bekor qilish uchun /start bosing.",
+            reply_markup=back_markup ( "home")
+        )
+
+    if d.startswith ( "ownerreply:" ) :
+        if u.id not in SUPER_OWNERS:
+            return await q.answer ( "Faqat Super Ega uchun.",show_alert=True)
+        tid=int ( d.split ( ":",1 ) [1] ) ; row=one ( "SELECT * FROM owner_messages WHERE id=?", ( tid, ) )
+        if not row: return await q.answer ( "Murojaat topilmadi.",show_alert=True)
+        STATE[u.id]={"mode":"owner_reply","ticket_id":tid,"target_id":int ( row["user_id"] ) }
+        return await q.message.reply_text ( f"✉️ #{tid} murojaatga javobingizni yuboring. Matn yoki media mumkin.")
+
+    if d.startswith ( "ownerseen:" ) :
+        if u.id not in SUPER_OWNERS: return await q.answer ( "Faqat Super Ega uchun.",show_alert=True)
+        tid=int ( d.split ( ":",1 ) [1] ) ; execute ( "UPDATE owner_messages SET status='seen',handled_by=? WHERE id=?", ( u.id,tid ) )
+        return await q.answer ( "✅ Ko‘rildi deb belgilandi.",show_alert=True)
+
+    if d.startswith ( "ownerclose:" ) :
+        if u.id not in SUPER_OWNERS: return await q.answer ( "Faqat Super Ega uchun.",show_alert=True)
+        tid=int ( d.split ( ":",1 ) [1] ) ; execute ( "UPDATE owner_messages SET status='closed',handled_by=? WHERE id=?", ( u.id,tid ) )
+        return await q.answer ( "🗑 Murojaat yopildi.",show_alert=True)
+
     if d=="help:home":
-        kb=InlineKeyboardMarkup ( [
-            [InlineKeyboardButton ( "📚 Vasatiya",callback_data="help:library" ) ,InlineKeyboardButton ( "📜 Hadislar",callback_data="help:hadith" ) ],
-            [InlineKeyboardButton ( "🛡 Adminlar",callback_data="help:admins" ) ,InlineKeyboardButton ( "👑 Super boshqaruv",callback_data="help:superadmins" ) ],
-        [InlineKeyboardButton ( "👥 Moderatsiya",callback_data="help:moderation" ) ],
-            [InlineKeyboardButton ( "🔐 Himoya",callback_data="help:security" ) ,InlineKeyboardButton ( "💬 Filter / Notes",callback_data="help:filters" ) ],
-            [InlineKeyboardButton ( "⚙️ Guruh sozlamalari",callback_data="help:settings" ) ],
-            [InlineKeyboardButton ( "⭐ Stars / Gift",callback_data="help:stars" ) ,InlineKeyboardButton ( "🎉 Giveaway",callback_data="help:giveaway" ) ],
-            [InlineKeyboardButton ( "📢 Xabarnoma",callback_data="help:broadcast" ) ,InlineKeyboardButton ( "📌 Asosiy",callback_data="help:main" ) ],
-            [InlineKeyboardButton ( "🏠 Bosh menyu",callback_data="home" ) ]
-        ] )
-        return await q.edit_message_text ( "❓ VERITAS YORDAM MARKAZI\n\nKerakli bo‘limni tanlang:",reply_markup=kb )
+        return await q.edit_message_text(
+            "❓ VERITAS V8 — YORDAM MARKAZI\n\n🪶 Veritas qila oladigan barcha asosiy ishlar shu yerda jamlangan.\nKerakli bo‘limni tanlang:",
+            reply_markup=help_home_markup ( )
+        )
 
     if d.startswith ( "help:" ) :
         return await q.edit_message_text ( help_text ( d.split ( ":",1 )[1] ),reply_markup=help_menu_markup ( ) )
@@ -3355,6 +3395,13 @@ def rose_full_init_db (  ) :
           chat_id INTEGER NOT NULL,user_id INTEGER NOT NULL,kind TEXT NOT NULL,until_ts INTEGER NOT NULL,
           PRIMARY KEY ( chat_id,user_id,kind)
         );
+        CREATE TABLE IF NOT EXISTS owner_messages(
+          id INTEGER PRIMARY KEY AUTOINCREMENT,user_id INTEGER NOT NULL,username TEXT DEFAULT '',first_name TEXT DEFAULT '',
+          status TEXT DEFAULT 'new',handled_by INTEGER DEFAULT 0,created_at INTEGER NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS owner_message_events(
+          id INTEGER PRIMARY KEY AUTOINCREMENT,ticket_id INTEGER NOT NULL,sender_id INTEGER NOT NULL,kind TEXT NOT NULL,created_at INTEGER NOT NULL
+        );
         """)
 
 def rose_row ( chat_id ) :
@@ -3527,6 +3574,52 @@ async def left_member ( update,ctx ) :
             return
     return await _original_left_member ( update,ctx)
 
+async def owner_message_state_handler ( update,ctx ) :
+    msg=update.effective_message; u=update.effective_user; chat=update.effective_chat
+    if not msg or not u or not chat or chat.type!="private": return
+    st=STATE.get ( u.id) or {}; mode=st.get ( "mode")
+    if mode not in {"owner_message","owner_reply"}: return
+
+    if mode=="owner_message":
+        ensure_user ( u)
+        with db ( ) as c:
+            cur=c.execute ( "INSERT INTO owner_messages ( user_id,username,first_name,status,created_at) VALUES ( ?,?,?,?,? ) ",
+                          (u.id,u.username or '',u.first_name or '',"new",now (  )  ) )
+            tid=cur.lastrowid
+            c.execute ( "INSERT INTO owner_message_events ( ticket_id,sender_id,kind,created_at) VALUES ( ?,?,?,? ) ", ( tid,u.id,"user_message",now (  )  ) )
+        STATE.pop ( u.id,None)
+        header= ( f"📨 YANGI MUROJAAT #{tid}\\n━━━━━━━━━━━━━━━━━━\\n"
+                f"👤 {u.full_name}\\n🆔 {u.id}\\n🔗 @{u.username}" if u.username else
+                f"📨 YANGI MUROJAAT #{tid}\\n━━━━━━━━━━━━━━━━━━\\n👤 {u.full_name}\\n🆔 {u.id}")
+        kb=InlineKeyboardMarkup ( [
+            [InlineKeyboardButton ( "✉️ Javob berish",callback_data=f"ownerreply:{tid}" ) ],
+            [InlineKeyboardButton ( "✅ Ko‘rildi",callback_data=f"ownerseen:{tid}" ) ,InlineKeyboardButton ( "🗑 Yopish",callback_data=f"ownerclose:{tid}" ) ]
+        ])
+        delivered=0
+        for oid in SUPER_OWNERS:
+            try:
+                await ctx.bot.send_message ( oid,header,reply_markup=kb)
+                await msg.copy ( chat_id=oid)
+                delivered+=1
+            except TelegramError:
+                pass
+        if delivered:
+            return await msg.reply_text ( f"✅ Xabaringiz egalariga yuborildi.\\n📨 Murojaat raqami: #{tid}",reply_markup=main_menu_markup ( u.id ) )
+        return await msg.reply_text ( "⚠️ Xabar saqlandi, lekin egaga Telegram orqali yetkazib bo‘lmadi. Ega botga /start bosganini tekshiring.",reply_markup=main_menu_markup ( u.id ) )
+
+    tid=int ( st.get ( "ticket_id",0 )  ) ; target=int ( st.get ( "target_id",0 ) )
+    if u.id not in SUPER_OWNERS or not tid or not target:
+        STATE.pop ( u.id,None ) ; return
+    try:
+        await ctx.bot.send_message ( target,f"✉️ EGADAN JAVOB — murojaat #{tid}")
+        await msg.copy ( chat_id=target)
+        execute ( "UPDATE owner_messages SET status='answered',handled_by=? WHERE id=?", ( u.id,tid ) )
+        execute ( "INSERT INTO owner_message_events ( ticket_id,sender_id,kind,created_at) VALUES ( ?,?,?,? ) ", ( tid,u.id,"owner_reply",now (  )  ) )
+        STATE.pop ( u.id,None)
+        return await msg.reply_text ( f"✅ Javob #{tid} murojaat egasiga yuborildi.")
+    except TelegramError as e:
+        return await msg.reply_text ( f"❌ Javob yuborilmadi: {e}")
+
 async def rose_cleanup_job ( ctx ) :
     rows=all_ ( 'SELECT * FROM temp_moderation WHERE until_ts<=?', ( now (  ) , ) )
     for r in rows:
@@ -3551,6 +3644,8 @@ def main (  ) :
     app.add_handler ( MessageHandler ( filters.StatusUpdate.NEW_CHAT_MEMBERS,new_members ) )
     app.add_handler ( MessageHandler ( filters.StatusUpdate.LEFT_CHAT_MEMBER,left_member ) )
     app.add_handler ( MessageHandler ( filters.TEXT & filters.Regex ( r"^\*" ) ,star_text_router ) ,group=0)
+    # Owner inbox/reply state is checked first; other private workflows remain untouched.
+    app.add_handler ( MessageHandler ( filters.ChatType.PRIVATE & ~filters.COMMAND & ~filters.SUCCESSFUL_PAYMENT,owner_message_state_handler ) ,group=-1)
     # Private workflow first. It handles library/hadith upload states.
     app.add_handler ( MessageHandler ( filters.ChatType.PRIVATE & ~filters.COMMAND & ~filters.SUCCESSFUL_PAYMENT,library_private_input ) ,group=1)
     # Vision must be in a DIFFERENT handler group. In the old build it shared group=1
