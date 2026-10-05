@@ -12,7 +12,7 @@
 
 import os, re, sqlite3, time, random, logging, json, asyncio, base64, io
 import urllib.request
-import urllib.error 
+import urllib.error
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
 
@@ -745,12 +745,15 @@ async def library_private_input ( update,ctx ) :
             else: return await msg.reply_text ( "🖼 Yangi rasm yuboring. Muqovani olib tashlash uchun «o‘chirish» yozing." )
             execute ( "UPDATE library_books SET cover_file_id=? WHERE id=?", ( fid,bid ) )
         elif field=="pdf":
-            if not msg.document: return await msg.reply_text ( "📄 Yangi PDFni Document sifatida yuboring." )
-            doc=msg.document; name= ( doc.file_name or "" ) .lower ( ); mime= ( doc.mime_type or "" ) .lower ( )
-            if not (name.endswith ( ".pdf" ) or mime=="application/pdf" ) : return await msg.reply_text ( "❌ Bu PDF emas." )
+            if not msg.document:
+                return await msg.reply_text ( "📄 Yangi kitob faylini Document sifatida yuboring.\nPDF, EPUB, DOCX, TXT, FB2, MOBI yoki DJVU." )
+            doc=msg.document; name= ( doc.file_name or "" ) .lower ( ).strip ( )
+            allowed= ( ".pdf",".epub",".docx",".txt",".fb2",".mobi",".djvu")
+            if not name.endswith ( allowed ) :
+                return await msg.reply_text ( "❌ Format qabul qilinmaydi.\nPDF, EPUB, DOCX, TXT, FB2, MOBI yoki DJVU yuboring." )
             uniq=doc.file_unique_id or ""
             dup=one ( "SELECT id FROM library_books WHERE pdf_unique_id=? AND id<>? AND status<>'deleted'", ( uniq,bid ) ) if uniq else None
-            if dup: return await msg.reply_text ( f"⚠️ Bu PDF boshqa kitobda mavjud. ID: {dup['id']}" )
+            if dup: return await msg.reply_text ( f"⚠️ Bu fayl boshqa kitobda mavjud. ID: {dup['id']}" )
             execute ( "UPDATE library_books SET pdf_file_id=?,pdf_unique_id=? WHERE id=?", ( doc.file_id,uniq,bid ) )
         elif field=="audio":
             af=None
@@ -3273,7 +3276,7 @@ async def callback ( update,ctx ) :
           [InlineKeyboardButton ( "📖 Nomi",callback_data=f"libeditfield:{bid}:title" ) ,InlineKeyboardButton ( "✍️ Muallif",callback_data=f"libeditfield:{bid}:author" ) ],
           [InlineKeyboardButton ( "🌐 Til",callback_data=f"libeditfield:{bid}:lang" ) ,InlineKeyboardButton ( "🗂 Kategoriya",callback_data=f"libeditfield:{bid}:categories" ) ],
           [InlineKeyboardButton ( "📝 Tavsif",callback_data=f"libeditfield:{bid}:description" ) ,InlineKeyboardButton ( "🖼 Muqova",callback_data=f"libeditfield:{bid}:cover" ) ],
-          [InlineKeyboardButton ( "📄 PDF",callback_data=f"libeditfield:{bid}:pdf" ) ,InlineKeyboardButton ( "🎧 Audio",callback_data=f"libeditfield:{bid}:audio" ) ],
+          [InlineKeyboardButton ( "📄 Kitob fayli",callback_data=f"libeditfield:{bid}:pdf" ) ,InlineKeyboardButton ( "🎧 Audio",callback_data=f"libeditfield:{bid}:audio" ) ],
           [InlineKeyboardButton ( "⬅️ Kitob",callback_data=f"libbook:{bid}" ) ] ] )
         txt=f"✏️ KITOBNI TAHRIRLASH\n\n📖 {r['title']}\nQaysi qismini o‘zgartirasiz?"
         try:
@@ -3290,7 +3293,7 @@ async def callback ( update,ctx ) :
         if field=="lang":
             kb=InlineKeyboardMarkup ( [[InlineKeyboardButton ( "🇺🇿 O‘zbekcha",callback_data=f"libeditlang:{bid}:uz" ) ,InlineKeyboardButton ( "🇷🇺 Русский",callback_data=f"libeditlang:{bid}:ru" ) ,InlineKeyboardButton ( "🇬🇧 English",callback_data=f"libeditlang:{bid}:en" ) ],[InlineKeyboardButton ( "⬅️ Orqaga",callback_data=f"libedit:{bid}" ) ]] )
             return await q.edit_message_text ( "🌐 Yangi tilni tanlang:",reply_markup=kb )
-        prompts={"title":"Yangi kitob nomini yuboring:","author":"Yangi muallif nomini yuboring:","categories":"Yangi kategoriyalarni vergul bilan yuboring:","description":"Yangi tavsifni yuboring:","cover":"Yangi muqova rasmini yuboring. Olib tashlash uchun: o‘chirish","pdf":"Yangi PDF faylni Document sifatida yuboring:","audio":"Yangi audio/voice/audio-fayl yuboring. Olib tashlash uchun: o‘chirish"}
+        prompts={"title":"Yangi kitob nomini yuboring:","author":"Yangi muallif nomini yuboring:","categories":"Yangi kategoriyalarni vergul bilan yuboring:","description":"Yangi tavsifni yuboring:","cover":"Yangi muqova rasmini yuboring. Olib tashlash uchun: o‘chirish","pdf":"Yangi kitob faylini yuboring (PDF/EPUB/DOCX/TXT/FB2/MOBI/DJVU ) :","audio":"Yangi audio/voice/audio-fayl yuboring. Olib tashlash uchun: o‘chirish"}
         if field not in prompts: return
         STATE[u.id]={"mode":f"lib_edit_{field}","data":{"book_id":bid}}
         return await q.edit_message_text ( "✏️ "+prompts[field],reply_markup=back_markup ( f"libedit:{bid}" ) )
