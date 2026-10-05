@@ -524,7 +524,7 @@ def library_book_markup ( uid,book_id,back="library" ) :
     r=one ( "SELECT pdf_file_id,audio_file_id FROM library_books WHERE id=?", ( book_id, ) )
     kb=[]
     row=[]
-    if r and r["pdf_file_id"]: row.append ( InlineKeyboardButton ( "📄 PDF",callback_data=f"libpdf:{book_id}" ) )
+    if r and r["pdf_file_id"]: row.append ( InlineKeyboardButton ( "📄 Kitob fayli",callback_data=f"libpdf:{book_id}" ) )
     if r and r["audio_file_id"]: row.append ( InlineKeyboardButton ( "🎧 Audio",callback_data=f"libaudio:{book_id}" ) )
     if row: kb.append ( row)
     if r and r["pdf_file_id"]:
@@ -767,6 +767,63 @@ async def library_private_input ( update,ctx ) :
         else: return
         STATE.pop ( uid,None ) ; audit ( uid,0,"library_edit",f"{bid}:{field}" )
         return await msg.reply_text ( "✅ Kitob ma’lumoti yangilandi.",reply_markup=InlineKeyboardMarkup ( [[InlineKeyboardButton ( "📖 Kitobni ochish",callback_data=f"libbook:{bid}" ) ,InlineKeyboardButton ( "📚 Kutubxona",callback_data="library" ) ]] ) )
+    if mode=="lib_quick_file":
+        doc=msg.document
+        if not doc:
+            return await msg.reply_text(
+                "📎 Kitob faylini Document/Fayl sifatida yuboring.\n\n"
+                "Qabul qilinadi: PDF, EPUB, DOCX, TXT, FB2, MOBI, DJVU."
+            )
+        filename= ( doc.file_name or "Nomsiz kitob" ) .strip ( )
+        low=filename.lower ( )
+        allowed= ( ".pdf",".epub",".docx",".txt",".fb2",".mobi",".djvu")
+        if not low.endswith ( allowed ) :
+            return await msg.reply_text(
+                "❌ Bu format hozir kutubxona uchun qabul qilinmaydi.\n"
+                "PDF, EPUB, DOCX, TXT, FB2, MOBI yoki DJVU yuboring."
+            )
+        uniq=doc.file_unique_id or ""
+        if uniq:
+            dup=one ( "SELECT id,title FROM library_books WHERE pdf_unique_id=? AND status<>'deleted'", (uniq, ) )
+            if dup:
+                STATE.pop ( uid,None)
+                return await msg.reply_text(
+                    f"⚠️ Bu fayl kutubxonada avval qo‘shilgan.\n📖 {dup['title']}\nID: {dup['id']}",
+                    reply_markup=library_home_markup ( uid)
+                )
+
+        # Fayl nomidan kitob nomini avtomatik chiqaramiz.
+        title=re.sub ( r"\. ( pdf|epub|docx|txt|fb2|mobi|djvu ) $", "", filename, flags=re.I)
+        title=title.replace ( "_"," " ) .replace ( "-"," ")
+        title=re.sub ( r"\s+"," ",title ) .strip (  ) [:250] or "Nomsiz kitob"
+
+        with db ( ) as c:
+            cur=c.execute(
+                """INSERT INTO library_books
+                (title,author,lang,description,cover_file_id,pdf_file_id,pdf_unique_id,
+                 audio_file_id,audio_unique_id,added_by,status,created_at)
+                VALUES (?,?,?,?,?,?,?,?,?,?,?,? ) """,
+                (title,"","uz","","",doc.file_id,uniq,"","",uid,"approved",now (  ) )
+            )
+            bid=cur.lastrowid
+
+        STATE.pop ( uid,None)
+        audit ( uid,0,"library_add_quick",str ( bid ) )
+        kb=InlineKeyboardMarkup ( [
+            [InlineKeyboardButton ( "✏️ Nomi / muallif / kategoriya", callback_data=f"libedit:{bid}" ) ],
+            [InlineKeyboardButton ( "📖 Kitobni ochish", callback_data=f"libbook:{bid}" ) ,
+             InlineKeyboardButton ( "➕ Yana kitob", callback_data="libadd" ) ],
+            [InlineKeyboardButton ( "📚 Kutubxona", callback_data="library" ) ]
+        ])
+        return await msg.reply_text(
+            "✅ KITOB QO‘SHILDI\n\n"
+            f"📖 Nomi avtomatik: {title}\n"
+            f"📎 Fayl: {filename}\n\n"
+            "Kerak bo‘lsa pastdagi ✏️ tugma orqali nomi, muallifi, tili, "
+            "kategoriyasi, tavsifi yoki muqovasini tahrirlang.",
+            reply_markup=kb
+        )
+
     if mode=="lib_add_title":
         if not msg.text: return await msg.reply_text ( "Kitob nomini matn qilib yuboring.")
         data["title"]=msg.text.strip (  ) [:250]; st["mode"]="lib_add_author"
@@ -3069,8 +3126,15 @@ async def callback ( update,ctx ) :
 
     if d=="libadd":
         if not is_library_admin ( u.id ) : return await q.edit_message_text ( "⛔ Ruxsat yo‘q.",reply_markup=back_markup ( "library" ) )
-        STATE[u.id]={"mode":"lib_add_title","data":{}}
-        return await q.edit_message_text ( "➕ KITOB QO‘SHISH\n\n1/7 — 📖 Kitob nomini yuboring:",reply_markup=back_markup ( "library" ) )
+        STATE[u.id]={"mode":"lib_quick_file","data":{}}
+        return await q.edit_message_text(
+            "➕ KITOB QO‘SHISH\n\n"
+            "📎 Kitob faylini yuboring — nomini Veritas avtomatik oladi va kitobni darhol saqlaydi.\n\n"
+            "✅ PDF • EPUB • DOCX • TXT • FB2 • MOBI • DJVU\n\n"
+            "Saqlangandan keyin nomi, muallifi, tili, kategoriya, tavsif va muqovani "
+            "✏️ Tahrirlash orqali o‘zgartirishingiz mumkin.",
+            reply_markup=back_markup ( "library" )
+        )
 
     if d.startswith ( "libaddlang:" ) :
         st=STATE.get ( u.id)
@@ -3188,7 +3252,7 @@ async def callback ( update,ctx ) :
 
     if d.startswith ( "libpdf:" ) :
         bid=int ( d.split ( ":" ) [1] ) ; r=one ( "SELECT title,pdf_file_id FROM library_books WHERE id=? AND status='approved'", ( bid, ) )
-        if not r or not r["pdf_file_id"]: return await q.answer ( "PDF mavjud emas",show_alert=True)
+        if not r or not r["pdf_file_id"]: return await q.answer ( "Kitob fayli mavjud emas",show_alert=True)
         execute ( "UPDATE library_books SET downloads=downloads+1 WHERE id=?", ( bid, ) )
         await ctx.bot.send_document ( u.id,r["pdf_file_id"],caption=f"📚 {r['title']}\nVasatiya kutubxonasi")
         return
