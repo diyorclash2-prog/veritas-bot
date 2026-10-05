@@ -316,6 +316,129 @@ def title_for ( uid,custom="" ) :
     if is_super_admin ( uid ): return "🛡 Super Admin"
     return custom or "A’zo"
 
+
+# =========================================================
+# VERITAS V9 — START
+# V8 MUZLATILGAN. V9 faqat v9_* jadvallar va v9:/root: callbacklaridan foydalanadi.
+# =========================================================
+def v9_init_db (  ) :
+    with db ( ) as c:
+        c.executescript ( """
+        CREATE TABLE IF NOT EXISTS v9_profiles ( user_id INTEGER PRIMARY KEY,institution_type TEXT DEFAULT '',role TEXT DEFAULT '',created_at INTEGER NOT NULL ) ;
+        CREATE TABLE IF NOT EXISTS v9_groups ( id INTEGER PRIMARY KEY AUTOINCREMENT,teacher_id INTEGER NOT NULL,institution_type TEXT NOT NULL,title TEXT NOT NULL,subject TEXT DEFAULT '',join_code TEXT NOT NULL UNIQUE,is_active INTEGER DEFAULT 1,created_at INTEGER NOT NULL ) ;
+        CREATE INDEX IF NOT EXISTS idx_v9_groups_teacher ON v9_groups ( teacher_id ) ;
+        CREATE TABLE IF NOT EXISTS v9_group_members ( group_id INTEGER NOT NULL,user_id INTEGER NOT NULL,joined_at INTEGER NOT NULL,is_active INTEGER DEFAULT 1,PRIMARY KEY ( group_id,user_id )  ) ;
+        CREATE INDEX IF NOT EXISTS idx_v9_members_user ON v9_group_members ( user_id ) ;
+        CREATE TABLE IF NOT EXISTS v9_lessons ( id INTEGER PRIMARY KEY AUTOINCREMENT,group_id INTEGER NOT NULL,teacher_id INTEGER NOT NULL,title TEXT NOT NULL,material_type TEXT DEFAULT 'text',material_file_id TEXT DEFAULT '',material_text TEXT DEFAULT '',ai_mode TEXT DEFAULT 'material_only',status TEXT DEFAULT 'draft',created_at INTEGER NOT NULL ) ;
+        CREATE TABLE IF NOT EXISTS v9_lesson_progress ( lesson_id INTEGER NOT NULL,user_id INTEGER NOT NULL,stage TEXT DEFAULT 'new',score INTEGER DEFAULT 0,updated_at INTEGER NOT NULL,PRIMARY KEY ( lesson_id,user_id )  ) ;
+        CREATE TABLE IF NOT EXISTS v9_points ( group_id INTEGER NOT NULL,user_id INTEGER NOT NULL,points INTEGER DEFAULT 0,updated_at INTEGER NOT NULL,PRIMARY KEY ( group_id,user_id )  ) ;
+        CREATE TABLE IF NOT EXISTS v9_test_results ( id INTEGER PRIMARY KEY AUTOINCREMENT,lesson_id INTEGER NOT NULL,group_id INTEGER NOT NULL,user_id INTEGER NOT NULL,score INTEGER DEFAULT 0,max_score INTEGER DEFAULT 100,correct_count INTEGER DEFAULT 0,total_count INTEGER DEFAULT 0,details TEXT DEFAULT '',created_at INTEGER NOT NULL ) ;
+        """)
+
+def root_choice_markup (  ) :
+    return InlineKeyboardMarkup ( [[InlineKeyboardButton ( "🛡 Veritas V8",callback_data="root:v8" ) ],[InlineKeyboardButton ( "🎓 O‘quv • Talaba",callback_data="root:v9" ) ]])
+
+def v9_entry_markup (  ) :
+    return InlineKeyboardMarkup ( [[InlineKeyboardButton ( "🏫 Maktab",callback_data="v9:inst:school" ) ],[InlineKeyboardButton ( "🏛 Institut",callback_data="v9:inst:institute" ) ,InlineKeyboardButton ( "🎓 Universitet",callback_data="v9:inst:university" ) ],[InlineKeyboardButton ( "⬅️ Veritas tanlash",callback_data="root:choose" ) ]])
+
+def v9_role_markup ( inst ) :
+    return InlineKeyboardMarkup ( [[InlineKeyboardButton ( "👨‍🏫 Ustoz",callback_data=f"v9:role:{inst}:teacher" ) ,InlineKeyboardButton ( "👨‍🎓 O‘quvchi / Talaba",callback_data=f"v9:role:{inst}:student" ) ],[InlineKeyboardButton ( "⬅️ Orqaga",callback_data="v9:home" ) ]])
+
+def v9_teacher_markup (  ) :
+    return InlineKeyboardMarkup ( [[InlineKeyboardButton ( "➕ Yangi guruh",callback_data="v9:teacher:newgroup" ) ],[InlineKeyboardButton ( "👥 Guruhlarim",callback_data="v9:teacher:groups" ) ],[InlineKeyboardButton ( "📊 Natijalar / Jurnal",callback_data="v9:teacher:journal" ) ],[InlineKeyboardButton ( "⬅️ Veritas tanlash",callback_data="root:choose" ) ]])
+
+def v9_student_markup (  ) :
+    return InlineKeyboardMarkup ( [[InlineKeyboardButton ( "➕ Guruhga qo‘shilish",callback_data="v9:student:join" ) ],[InlineKeyboardButton ( "📚 Guruhlarim / Darslarim",callback_data="v9:student:groups" ) ],[InlineKeyboardButton ( "🏆 Ballarim",callback_data="v9:student:points" ) ],[InlineKeyboardButton ( "⬅️ Veritas tanlash",callback_data="root:choose" ) ]])
+
+async def v9_start_selector ( update,ctx ) :
+    ensure_user ( update.effective_user)
+    await update.effective_message.reply_text ( "🪶 VERITAS\n\nQaysi bo‘limga kirishni xohlaysiz?",reply_markup=root_choice_markup (  ) )
+
+async def v9_callback ( update,ctx ) :
+    q=update.callback_query
+    if not q or not q.data:return
+    d=q.data; u=q.from_user
+    await q.answer (  ) ; ensure_user ( u)
+    if d=="root:choose": return await q.edit_message_text ( "🪶 VERITAS\n\nQaysi bo‘limga kirishni xohlaysiz?",reply_markup=root_choice_markup (  ) )
+    if d=="root:v8": return await q.edit_message_text ( "🛡 VERITAS V8\n\nAsosiy bo‘lim:",reply_markup=main_menu_markup ( u.id ) )
+    if d in ("root:v9","v9:home" ) : return await q.edit_message_text ( "🎓 VERITAS V9 — O‘QUV • TALABA\n\nTa’lim turini tanlang:",reply_markup=v9_entry_markup (  ) )
+    if d.startswith ( "v9:inst:" ) :
+        inst=d.rsplit ( ":",1 ) [1]
+        if inst in {"school","institute","university"}: return await q.edit_message_text ( "Sizning rolingiz:",reply_markup=v9_role_markup ( inst ) )
+    if d.startswith ( "v9:role:" ) :
+        _,_,inst,role=d.split ( ":",3)
+        if inst not in {"school","institute","university"} or role not in {"teacher","student"}: return
+        with db ( ) as c:c.execute ( "INSERT INTO v9_profiles ( user_id,institution_type,role,created_at) VALUES ( ?,?,?,?) ON CONFLICT ( user_id) DO UPDATE SET institution_type=excluded.institution_type,role=excluded.role", ( u.id,inst,role,now (  )  ) )
+        if role=="teacher": return await q.edit_message_text ( "👨‍🏫 USTOZ KABINETI\n\nGuruh yarating, dars materiallarini bering va natijalarni kuzating.",reply_markup=v9_teacher_markup (  ) )
+        return await q.edit_message_text ( "👨‍🎓 O‘QUVCHI / TALABA KABINETI\n\nGuruhga qo‘shiling, AI bilan dars o‘rganing va ball to‘plang.",reply_markup=v9_student_markup (  ) )
+    if d=="v9:teacher:home": return await q.edit_message_text ( "👨‍🏫 USTOZ KABINETI",reply_markup=v9_teacher_markup (  ) )
+    if d=="v9:student:home": return await q.edit_message_text ( "👨‍🎓 O‘QUVCHI / TALABA KABINETI",reply_markup=v9_student_markup (  ) )
+    if d=="v9:teacher:newgroup":
+        STATE[u.id]={"mode":"v9_new_group_title"}
+        return await q.edit_message_text ( "➕ YANGI GURUH\n\nGuruh nomini yozing.\nMasalan: Matematika — 1-kurs",reply_markup=InlineKeyboardMarkup ( [[InlineKeyboardButton ( "⬅️ Kabinet",callback_data="v9:teacher:home" ) ]] ) )
+    if d=="v9:student:join":
+        STATE[u.id]={"mode":"v9_join_group"}
+        return await q.edit_message_text ( "🔑 GURUHGA QO‘SHILISH\n\nUstoz bergan guruh kodini yuboring.",reply_markup=InlineKeyboardMarkup ( [[InlineKeyboardButton ( "⬅️ Kabinet",callback_data="v9:student:home" ) ]] ) )
+    if d=="v9:teacher:groups":
+        rows=all_ ( "SELECT id,title FROM v9_groups WHERE teacher_id=? AND is_active=1 ORDER BY id DESC", ( u.id, ) )
+        if not rows:return await q.edit_message_text ( "👥 Hali guruh yaratmagansiz.",reply_markup=v9_teacher_markup (  ) )
+        kb=[[InlineKeyboardButton ( "📚 "+r["title"][:45],callback_data=f"v9:group:{r['id']}" ) ] for r in rows[:30]]+[[InlineKeyboardButton ( "⬅️ Kabinet",callback_data="v9:teacher:home" ) ]]
+        return await q.edit_message_text ( "👥 GURUHLARIM",reply_markup=InlineKeyboardMarkup ( kb ) )
+    if d=="v9:student:groups":
+        rows=all_ ( "SELECT g.id,g.title FROM v9_groups g JOIN v9_group_members m ON m.group_id=g.id WHERE m.user_id=? AND m.is_active=1 AND g.is_active=1 ORDER BY g.id DESC", ( u.id, ) )
+        if not rows:return await q.edit_message_text ( "📚 Siz hali guruhga qo‘shilmagansiz.",reply_markup=v9_student_markup (  ) )
+        kb=[[InlineKeyboardButton ( "📚 "+r["title"][:45],callback_data=f"v9:group:{r['id']}" ) ] for r in rows[:30]]+[[InlineKeyboardButton ( "⬅️ Kabinet",callback_data="v9:student:home" ) ]]
+        return await q.edit_message_text ( "📚 GURUHLARIM / DARSLARIM",reply_markup=InlineKeyboardMarkup ( kb ) )
+    if d=="v9:student:points":
+        rows=all_ ( "SELECT g.title,p.points FROM v9_points p JOIN v9_groups g ON g.id=p.group_id WHERE p.user_id=? ORDER BY p.points DESC", ( u.id, ) )
+        body="\n".join ( f"🏆 {r['title']}: {r['points']} ball" for r in rows) or "Hozircha ball yo‘q."
+        return await q.edit_message_text ( "🏆 BALLARIM\n\n"+body,reply_markup=v9_student_markup (  ) )
+    if d.startswith ( "v9:group:" ) :
+        gid=int ( d.rsplit ( ":",1 ) [1] ) ; g=one ( "SELECT * FROM v9_groups WHERE id=? AND is_active=1", ( gid, ) )
+        if not g:return await q.answer ( "Guruh topilmadi.",show_alert=True)
+        teacher=int ( g["teacher_id"] ) ==u.id; member=one ( "SELECT 1 FROM v9_group_members WHERE group_id=? AND user_id=? AND is_active=1", ( gid,u.id ) )
+        if not teacher and not member:return await q.answer ( "Bu guruhga kirish huquqingiz yo‘q.",show_alert=True)
+        count=one ( "SELECT COUNT ( *) n FROM v9_group_members WHERE group_id=? AND is_active=1", ( gid, )  ) ["n"]
+        kb=InlineKeyboardMarkup ( [[InlineKeyboardButton ( "➕ Yangi dars",callback_data=f"v9:lesson:new:{gid}" ) ],[InlineKeyboardButton ( "📚 Darslar",callback_data=f"v9:lessons:{gid}" ) ,InlineKeyboardButton ( "📊 Natijalar",callback_data=f"v9:results:{gid}" ) ],[InlineKeyboardButton ( "⬅️ Guruhlarim",callback_data="v9:teacher:groups" ) ]]) if teacher else InlineKeyboardMarkup ( [[InlineKeyboardButton ( "📚 Darslar",callback_data=f"v9:lessons:{gid}" ) ],[InlineKeyboardButton ( "🏆 Guruh reytingi",callback_data=f"v9:ranking:{gid}" ) ],[InlineKeyboardButton ( "⬅️ Guruhlarim",callback_data="v9:student:groups" ) ]])
+        return await q.edit_message_text ( f"📚 {g['title']}\n📖 Fan: {g['subject'] or 'Kiritilmagan'}\n👥 Talabalar: {count}\n🔑 Guruh kodi: {g['join_code']}",reply_markup=kb)
+    if d.startswith (  ( "v9:lesson:new:","v9:lessons:","v9:results:","v9:ranking:" ) ) or d=="v9:teacher:journal": return await q.answer ( "Bu bo‘lim keyingi V9 bosqichida ulanadi.",show_alert=True)
+
+async def v9_private_input ( update,ctx ) :
+    msg=update.effective_message;u=update.effective_user
+    if not msg or not u or msg.chat.type!="private":return
+    st=STATE.get ( u.id) or {};mode=st.get ( "mode")
+    if mode=="v9_new_group_title":
+        if not msg.text or len ( msg.text.strip (  )  ) <2:return await msg.reply_text ( "Guruh nomini matn qilib yozing.")
+        st["title"]=msg.text.strip (  ) [:120];st["mode"]="v9_new_group_subject";STATE[u.id]=st
+        return await msg.reply_text ( "📖 Endi fan nomini yozing.\nMasalan: Matematika")
+    if mode=="v9_new_group_subject":
+        if not msg.text or len ( msg.text.strip (  )  ) <2:return await msg.reply_text ( "Fan nomini matn qilib yozing.")
+        import secrets
+        prof=one ( "SELECT institution_type FROM v9_profiles WHERE user_id=?", ( u.id, )  ) ;inst=prof["institution_type"] if prof else "school"
+        title=st.get ( "title","Yangi guruh" ) ;subject=msg.text.strip (  ) [:100];gid=None
+        for _ in range ( 10 ) :
+            code="V9-"+secrets.token_hex ( 3 ) .upper ( )
+            try:
+                with db ( ) as c:gid=c.execute ( "INSERT INTO v9_groups ( teacher_id,institution_type,title,subject,join_code,is_active,created_at) VALUES ( ?,?,?,?,?,1,? ) ", ( u.id,inst,title,subject,code,now (  )  )  ) .lastrowid
+                break
+            except sqlite3.IntegrityError:pass
+        if not gid:return await msg.reply_text ( "Guruh kodi yaratilmadi. Qayta urinib ko‘ring.")
+        STATE.pop ( u.id,None)
+        return await msg.reply_text ( f"✅ GURUH YARATILDI\n\n📚 {title}\n📖 {subject}\n🔑 Kod: {code}\n\nTalabalarga shu kodni bering.",reply_markup=InlineKeyboardMarkup ( [[InlineKeyboardButton ( "📚 Guruhni ochish",callback_data=f"v9:group:{gid}" ) ]] ) )
+    if mode=="v9_join_group":
+        if not msg.text:return await msg.reply_text ( "Ustoz bergan guruh kodini yozing.")
+        code=msg.text.strip (  ) .upper (  ) ;g=one ( "SELECT id,title,teacher_id FROM v9_groups WHERE upper ( join_code ) =? AND is_active=1", ( code, ) )
+        if not g:return await msg.reply_text ( "❌ Bunday faol guruh kodi topilmadi.")
+        if int ( g["teacher_id"] ) ==u.id:STATE.pop ( u.id,None ) ;return await msg.reply_text ( "Siz bu guruhning ustozisiz.")
+        with db ( ) as c:
+            c.execute ( "INSERT INTO v9_group_members ( group_id,user_id,joined_at,is_active) VALUES ( ?,?,?,1) ON CONFLICT ( group_id,user_id) DO UPDATE SET is_active=1", ( g["id"],u.id,now (  )  ) )
+            c.execute ( "INSERT INTO v9_points ( group_id,user_id,points,updated_at) VALUES ( ?,?,0,?) ON CONFLICT ( group_id,user_id) DO NOTHING", ( g["id"],u.id,now (  )  ) )
+        STATE.pop ( u.id,None)
+        return await msg.reply_text ( f"✅ {g['title']} guruhiga qo‘shildingiz.",reply_markup=InlineKeyboardMarkup ( [[InlineKeyboardButton ( "📚 Guruhni ochish",callback_data=f"v9:group:{g['id']}" ) ]] ) )
+# =========================================================
+# VERITAS V9 — END
+# =========================================================
+
 def main_menu_markup ( uid ) :
     kb=[
       [InlineKeyboardButton ( "👤 Profil",callback_data="me" ) ,InlineKeyboardButton ( "⭐ Hisob",callback_data="wallet" ) ],
@@ -4107,18 +4230,21 @@ def main (  ) :
     if not TOKEN: raise RuntimeError ( "BOT_TOKEN kiritilmagan.")
     init_db ( )
     rose_full_init_db ( )
+    v9_init_db ( )
     app=Application.builder (  ) .token ( TOKEN ) .build ( )
-    app.add_handler ( CommandHandler ( "start",start ) )
+    app.add_handler ( CommandHandler ( "start",v9_start_selector ) )
     app.add_handler ( CommandHandler ( "help",cmd_help ) )
     app.add_handler ( CommandHandler ( "id",cmd_id ) )
     app.add_handler ( CommandHandler ( "super",cmd_super ) )
     app.add_handler ( PreCheckoutQueryHandler ( precheckout ) )
     app.add_handler ( MessageHandler ( filters.SUCCESSFUL_PAYMENT,paid ) )
+    app.add_handler ( CallbackQueryHandler ( v9_callback,pattern=r"^ ( ?:v9:|root: ) " ),group=-2 )
     app.add_handler ( CallbackQueryHandler ( callback ) )
     app.add_handler ( MessageHandler ( filters.StatusUpdate.NEW_CHAT_MEMBERS,new_members ) )
     app.add_handler ( MessageHandler ( filters.StatusUpdate.LEFT_CHAT_MEMBER,left_member ) )
     app.add_handler ( MessageHandler ( filters.TEXT & filters.Regex ( r"^\*" ) ,star_text_router ) ,group=0)
     # Owner inbox/reply state is checked first; other private workflows remain untouched.
+    app.add_handler ( MessageHandler ( filters.ChatType.PRIVATE & ~filters.COMMAND & ~filters.SUCCESSFUL_PAYMENT,v9_private_input ) ,group=-3)
     app.add_handler ( MessageHandler ( filters.ChatType.PRIVATE & ~filters.COMMAND & ~filters.SUCCESSFUL_PAYMENT,owner_message_state_handler ) ,group=-1)
     # Private workflow first. It handles library/hadith upload states.
     app.add_handler ( MessageHandler ( filters.ChatType.PRIVATE & ~filters.COMMAND & ~filters.SUCCESSFUL_PAYMENT,library_private_input ) ,group=1)
