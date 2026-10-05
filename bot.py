@@ -343,7 +343,7 @@ def v9_init_db (  ) :
         """)
 
 def root_choice_markup (  ) :
-    return InlineKeyboardMarkup ( [[InlineKeyboardButton ( "🛡 Veritas V8",callback_data="root:v8" ) ],[InlineKeyboardButton ( "🎓 O‘quv • Talaba",callback_data="root:v9" ) ]])
+    return InlineKeyboardMarkup ( [[InlineKeyboardButton ( "🛡 Veritas",callback_data="root:v8" ) ],[InlineKeyboardButton ( "🎓 O‘quv • Talaba",callback_data="root:v9" ) ]])
 
 def v9_entry_markup (  ) :
     return InlineKeyboardMarkup ( [[InlineKeyboardButton ( "🏫 Maktab",callback_data="v9:inst:school" ) ],[InlineKeyboardButton ( "🏛 Institut",callback_data="v9:inst:institute" ) ,InlineKeyboardButton ( "🎓 Universitet",callback_data="v9:inst:university" ) ],[InlineKeyboardButton ( "⬅️ Veritas tanlash",callback_data="root:choose" ) ]])
@@ -359,7 +359,14 @@ def v9_student_markup (  ) :
 
 async def v9_start_selector ( update,ctx ) :
     ensure_user ( update.effective_user)
-    await update.effective_message.reply_text ( "🪶 VERITAS\n\nQaysi bo‘limga kirishni xohlaysiz?",reply_markup=root_choice_markup (  ) )
+    await update.effective_message.reply_text(
+        "🪶 VERITAS\n\nAsosiy menyu pastda doim turadi.",
+        reply_markup=veritas_global_keyboard ( )
+    )
+    await update.effective_message.reply_text(
+        "Qaysi bo‘limga kirishni xohlaysiz?",
+        reply_markup=root_choice_markup ( )
+    )
 
 async def v9_callback ( update,ctx ) :
     q=update.callback_query
@@ -367,7 +374,7 @@ async def v9_callback ( update,ctx ) :
     d=q.data; u=q.from_user
     await q.answer (  ) ; ensure_user ( u)
     if d=="root:choose": return await q.edit_message_text ( "🪶 VERITAS\n\nQaysi bo‘limga kirishni xohlaysiz?",reply_markup=root_choice_markup (  ) )
-    if d=="root:v8": return await q.edit_message_text ( "🛡 VERITAS V8\n\nAsosiy bo‘lim:",reply_markup=main_menu_markup ( u.id ) )
+    if d=="root:v8": return await q.edit_message_text ( "🛡 VERITAS\n\nAsosiy bo‘lim:",reply_markup=main_menu_markup ( u.id ) )
     if d in ("root:v9","v9:home" ) : return await q.edit_message_text ( "🎓 VERITAS V9 — O‘QUV • TALABA\n\nTa’lim turini tanlang:",reply_markup=v9_entry_markup (  ) )
     if d.startswith ( "v9:inst:" ) :
         inst=d.rsplit ( ":",1 ) [1]
@@ -599,17 +606,18 @@ async def v9_callback ( update,ctx ) :
         return await q.edit_message_text ( "📊 NATIJALAR / JURNAL\n\nGuruhni tanlang:",reply_markup=InlineKeyboardMarkup ( kb ) )
 
 
+def veritas_global_keyboard (  ) :
+    return ReplyKeyboardMarkup(
+        [[KeyboardButton ( "🛡 Veritas" ) , KeyboardButton ( "🎓 O‘quv • Talaba" ) ]],
+        resize_keyboard=True,
+        is_persistent=True
+    )
+
 def v9_teacher_keyboard (  ) :
-    return ReplyKeyboardMarkup ( [
-        [KeyboardButton ( "🏠 Bosh menyu" ) ,KeyboardButton ( "👥 Guruhlarim" ) ],
-        [KeyboardButton ( "➕ Dars berish" ) ,KeyboardButton ( "📊 Jurnal" ) ]
-    ],resize_keyboard=True,is_persistent=True)
+    return veritas_global_keyboard ( )
 
 def v9_student_keyboard (  ) :
-    return ReplyKeyboardMarkup ( [
-        [KeyboardButton ( "🏠 Bosh menyu" ) ,KeyboardButton ( "📚 Darslarim" ) ],
-        [KeyboardButton ( "🤖 AI Ustoz" ) ,KeyboardButton ( "⭐ Ballarim" ) ]
-    ],resize_keyboard=True,is_persistent=True)
+    return veritas_global_keyboard ( )
 
 def v9_lesson_context ( lid,limit=30000 ) :
     rows=all_ ( "SELECT extracted_text FROM v9_lesson_materials WHERE lesson_id=? ORDER BY id", ( lid, ) )
@@ -707,6 +715,19 @@ async def v9_private_input ( update,ctx ) :
     txt= ( msg.text or "" ) .strip ( )
     prof=one ( "SELECT role FROM v9_profiles WHERE user_id=?", ( u.id, ) )
     role=prof["role"] if prof else ""
+
+    # GLOBAL NAVIGATSIYA — V8/V9 ichida qayerda bo‘lishidan qat’i nazar.
+    if txt=="🛡 Veritas":
+        STATE.pop ( u.id,None)
+        ctx.user_data.pop ( "v9_consumed_message_id",None)
+        await msg.reply_text ( "🛡 VERITAS\n\nAsosiy bo‘lim:",reply_markup=main_menu_markup ( u.id ) )
+        return await msg.reply_text ( "Asosiy panel:",reply_markup=veritas_global_keyboard (  ) )
+
+    if txt=="🎓 O‘quv • Talaba":
+        STATE.pop ( u.id,None)
+        ctx.user_data.pop ( "v9_consumed_message_id",None)
+        await msg.reply_text ( "🎓 O‘QUV • TALABA\n\nTa’lim turini tanlang:",reply_markup=v9_entry_markup (  ) )
+        return await msg.reply_text ( "Asosiy panel:",reply_markup=veritas_global_keyboard (  ) )
 
     if txt=="🏠 Bosh menyu" and role:
         STATE.pop ( u.id,None)
