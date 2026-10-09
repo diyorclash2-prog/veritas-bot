@@ -1382,6 +1382,7 @@ async def send_ai_hadith_results ( msg, query ) :
     )
 
 async def library_private_input ( update,ctx ) :
+    if ctx.user_data.get ( "bayram_consumed_message_id" ) ==getattr ( update.effective_message,"message_id",None ) :return
     if update.effective_chat.type!="private": return
     uid=update.effective_user.id; st=STATE.get ( uid)
     if st: ctx.user_data["workflow_message_id"]=update.effective_message.message_id
@@ -3577,6 +3578,7 @@ async def group_ai_reply ( update,ctx ) :
     return True
 
 async def private_ai_reply ( update,ctx ) :
+    if ctx.user_data.get ( "bayram_consumed_message_id" ) ==getattr ( update.effective_message,"message_id",None ) :return
     if ctx.user_data.get ( "v9_consumed_message_id" ) ==getattr ( update.effective_message,"message_id",None ) :
         return
     if ctx.user_data.get ( "owner_consumed_message_id" ) ==getattr ( update.effective_message,"message_id",None ) :
@@ -4595,6 +4597,7 @@ async def left_member ( update,ctx ) :
     return await _original_left_member ( update,ctx)
 
 async def owner_message_state_handler ( update,ctx ) :
+    if ctx.user_data.get ( "bayram_consumed_message_id" ) ==getattr ( update.effective_message,"message_id",None ) :return
     msg=update.effective_message; u=update.effective_user; chat=update.effective_chat
     if not msg or not u or not chat or chat.type!="private": return
     st=STATE.get ( u.id) or {}; mode=st.get ( "mode")
@@ -4650,11 +4653,202 @@ async def rose_cleanup_job ( ctx ) :
         except TelegramError: pass
         execute ( 'DELETE FROM temp_moderation WHERE chat_id=? AND user_id=? AND kind=?', ( r['chat_id'],r['user_id'],r['kind'] ) )
 
+
+# ============================================================
+# VERITAS *BAYRAM — mustaqil qo‘shimcha; V8/V9 kodiga tegmaydi
+# ============================================================
+import html as _bayram_html
+
+BAYRAM_WINDOW_SECONDS = 10 * 3600
+
+def bayram_init_db (  ) :
+    with db ( ) as c:
+        c.executescript ( """
+        CREATE TABLE IF NOT EXISTS bayram_campaigns(
+            id INTEGER PRIMARY KEY AUTOINCREMENT,chat_id INTEGER NOT NULL,
+            creator_id INTEGER NOT NULL,winner_count INTEGER DEFAULT 0,
+            gift_price INTEGER DEFAULT 0,gift_id TEXT DEFAULT '',
+            greeting TEXT DEFAULT '',status TEXT DEFAULT 'draft',
+            created_at INTEGER NOT NULL,confirmed_at INTEGER DEFAULT 0 ) ;
+        CREATE TABLE IF NOT EXISTS bayram_winners(
+            campaign_id INTEGER NOT NULL,user_id INTEGER NOT NULL,
+            msg_count INTEGER NOT NULL,status TEXT DEFAULT 'pending',
+            error TEXT DEFAULT '',PRIMARY KEY ( campaign_id,user_id )  ) ;
+        CREATE INDEX IF NOT EXISTS idx_bayram_history_time
+            ON group_message_history ( chat_id,created_at,user_id ) ;
+        """)
+
+def bayram_candidates ( chat_id,limit ) :
+    # Bot va kanal nomidan yozilgan xabarlar original passive ( ) tomonidan saqlanmaydi.
+    return all_ ( """SELECT h.user_id,COUNT ( *) n,COALESCE ( u.first_name,'') name,
+                    COALESCE ( u.username,'') username
+                    FROM group_message_history h LEFT JOIN users u ON u.user_id=h.user_id
+                    WHERE h.chat_id=? AND h.created_at>=?
+                    GROUP BY h.user_id ORDER BY n DESC,h.user_id ASC LIMIT ?""",
+                (chat_id,now (  ) -BAYRAM_WINDOW_SECONDS,limit ) )
+
+def bayram_markup ( cid,kind ) :
+    if kind=='count':
+        return InlineKeyboardMarkup ( [[InlineKeyboardButton ( f'👥 {n} kishi',callback_data=f'bayram:count:{cid}:{n}') for n in (10,25,50 ) ],
+                                     [InlineKeyboardButton ( '❌ Bekor qilish',callback_data=f'bayram:cancel:{cid}' ) ]])
+    if kind=='price':
+        return InlineKeyboardMarkup ( [[InlineKeyboardButton ( f'🎁 {n} ⭐',callback_data=f'bayram:price:{cid}:{n}') for n in (25,50 ) ],
+                                     [InlineKeyboardButton ( '❌ Bekor qilish',callback_data=f'bayram:cancel:{cid}' ) ]])
+    if kind=='confirm':
+        return InlineKeyboardMarkup ( [[InlineKeyboardButton ( '🎁 TASDIQLAYMAN — YUBORISH',callback_data=f'bayram:send:{cid}' ) ],
+                                     [InlineKeyboardButton ( '❌ Bekor qilish',callback_data=f'bayram:cancel:{cid}' ) ]])
+    return None
+
+async def bayram_command ( update,ctx ) :
+    msg=update.effective_message; chat=update.effective_chat; u=update.effective_user
+    if not chat or chat.type not in ('group','supergroup' ) :
+        return await msg.reply_text ( '🎉 *bayram faqat guruhda ishlaydi.')
+    if not await can_manage ( ctx.bot,chat.id,u.id ) :
+        return await msg.reply_text ( '⛔ *bayram faqat guruh adminlari va Veritas boshqaruvchilariga ruxsat.')
+    candidates=bayram_candidates ( chat.id,50)
+    if not candidates:
+        return await msg.reply_text ( '⏳ Oxirgi 10 soat ichida qayd etilgan faol a’zolar topilmadi. Bot guruhda ishlagan va xabarlarni ko‘rgan bo‘lishi kerak.')
+    with db ( ) as c:
+        cid=c.execute ( 'INSERT INTO bayram_campaigns ( chat_id,creator_id,created_at) VALUES ( ?,?,? ) ', ( chat.id,u.id,now (  )  )  ) .lastrowid
+    return await msg.reply_text ( f'🎉 VERITAS BAYRAM\n\n⏱ Oxirgi 10 soat\n👥 Faol a’zolar: {len ( candidates ) } tagacha\n\nNechta g‘olibni taqdirlaymiz?',reply_markup=bayram_markup ( cid,'count' ) )
+
+async def bayram_callback ( update,ctx ) :
+    q=update.callback_query; u=q.from_user; d=q.data or ''
+    a=d.split ( ':')
+    if len ( a ) <3:return
+    action=a[1]
+    try:cid=int ( a[2])
+    except ValueError:return
+    camp=one ( 'SELECT * FROM bayram_campaigns WHERE id=?', ( cid, ) )
+    if not camp:return await q.answer ( 'Bayram topilmadi.',show_alert=True)
+    if u.id!=camp['creator_id'] and u.id not in SUPER_OWNERS:
+        return await q.answer ( 'Bu bayramni faqat tashkilotchi boshqaradi.',show_alert=True)
+    if camp['status']!='draft':return await q.answer ( 'Bu bayram allaqachon yakunlangan yoki boshlangan.',show_alert=True)
+    if action=='cancel':
+        execute ( "UPDATE bayram_campaigns SET status='cancelled' WHERE id=?", ( cid, ) )
+        await q.answer (  ) ;return await q.edit_message_text ( '❌ Bayram bekor qilindi.')
+    if action=='count':
+        n=int ( a[3] ) ;
+        if n not in (10,25,50 ) :return
+        execute ( 'UPDATE bayram_campaigns SET winner_count=? WHERE id=?', ( n,cid ) )
+        await q.answer (  ) ;return await q.edit_message_text ( f'🎉 G‘oliblar: {n} kishi\n\n🎁 Gift qiymatini tanlang:',reply_markup=bayram_markup ( cid,'price' ) )
+    if action=='price':
+        price=int ( a[3] ) ;
+        if price not in (25,50) or camp['winner_count'] not in (10,25,50 ) :return
+        try:
+            available=await ctx.bot.get_available_gifts ( )
+            gifts=[g for g in available.gifts if int ( g.star_count ) ==price and getattr ( g,'remaining_count',None ) !=0]
+        except Exception as e:
+            return await q.answer ( f'Gift katalogini olishda xato: {str ( e ) [:100]}',show_alert=True)
+        if not gifts:
+            return await q.answer ( f'Hozir {price} ⭐ narxli Gift mavjud emas.',show_alert=True)
+        execute ( 'UPDATE bayram_campaigns SET gift_price=?,gift_id=? WHERE id=?', ( price,str ( gifts[0].id ) ,cid ) )
+        STATE[u.id]={'mode':'bayram_greeting','bayram_id':cid}
+        await q.answer ( )
+        await q.edit_message_text ( '💌 TABRIKNOMA\n\nEndi shaxsiy chatda botga tabriknoma matnini yuboring.\nBotga /start bosib qo‘ying, agar avval yozmagan bo‘lsangiz.')
+        try:await ctx.bot.send_message ( u.id,f'🎉 BAYRAM #{cid}\n\nTabriknoma matnini shu yerga yozing. Matn sovg‘aga biriktiriladi va guruhda ham e’lon qilinadi.')
+        except TelegramError:
+            await q.message.reply_text ( '⚠️ Botga shaxsiy chatda /start bosing, keyin tabriknoma matnini yuboring.')
+        return
+    if action!='send':return
+    winners=all_ ( 'SELECT * FROM bayram_winners WHERE campaign_id=? ORDER BY msg_count DESC,user_id', ( cid, ) )
+    if not winners or not camp['greeting'] or not camp['gift_id']:
+        return await q.answer ( 'Tabriknoma yoki g‘oliblar tayyor emas.',show_alert=True)
+    try:
+        available=await ctx.bot.get_available_gifts ( )
+        valid=next (  ( g for g in available.gifts if str ( g.id ) ==camp['gift_id'] and int ( g.star_count ) ==camp['gift_price'] and getattr ( g,'remaining_count',None ) !=0 ) ,None)
+        if valid is None:return await q.answer ( 'Tanlangan Gift endi mavjud emas.',show_alert=True)
+        balance=await ctx.bot.get_my_star_balance ( )
+        if int ( balance.amount ) <len ( winners ) *int ( camp['gift_price'] ) :
+            return await q.answer ( 'Bot Stars balansida yetarli mablag‘ yo‘q.',show_alert=True)
+    except Exception as e:
+        return await q.answer ( f'Balans/Gift tekshiruvida xato: {str ( e ) [:110]}',show_alert=True)
+    # Atomik status: ikki marta tasdiqlansa takror gift ketmaydi.
+    with db ( ) as c:
+        changed=c.execute ( "UPDATE bayram_campaigns SET status='sending',confirmed_at=? WHERE id=? AND status='draft'", ( now (  ) ,cid )  ) .rowcount
+    if not changed:return await q.answer ( 'Bu bayram allaqachon boshlangan.',show_alert=True)
+    await q.answer ( 'Sovg‘alar yuborilmoqda...')
+    await q.edit_message_text ( '🎁 Bayram sovg‘alari yuborilmoqda. Natijalar tez orada shu guruhda chiqadi.')
+    success=[];failed=[]
+    for w in winners:
+        uid=int ( w['user_id'])
+        try:
+            await ctx.bot.send_gift ( user_id=uid,gift_id=camp['gift_id'],text=camp['greeting'][:120])
+            execute ( "UPDATE bayram_winners SET status='sent' WHERE campaign_id=? AND user_id=?", ( cid,uid ) )
+            success.append ( uid)
+            # Shaxsiy tabrik xabari: foydalanuvchi botni boshlamagan bo‘lsa bloklanishi mumkin.
+            try:await ctx.bot.send_message ( uid,'🎉 VERITAS BAYRAM\n\n'+camp['greeting'][:3500])
+            except TelegramError:pass
+        except Exception as e:
+            failed.append ( uid)
+            execute ( "UPDATE bayram_winners SET status='failed',error=? WHERE campaign_id=? AND user_id=?", ( str ( e ) [:250],cid,uid ) )
+        await asyncio.sleep ( 0.15)
+    execute ( "UPDATE bayram_campaigns SET status='completed' WHERE id=?", ( cid, ) )
+    # Faqat HAQIQATDA yuborilgan sovg‘alar g‘olib sifatida e’lon qilinadi.
+    lines=[]
+    for i,uid in enumerate ( success,1 ) :
+        row=one ( 'SELECT first_name,username FROM users WHERE user_id=?', ( uid, ) )
+        name= ( row['first_name'] or row['username'] or str ( uid ) ) if row else str ( uid)
+        lines.append ( f'{i}. <a href="tg://user?id={uid}">{_bayram_html.escape ( name ) }</a>')
+    header= ( f'🎉 VERITAS BAYRAM G‘OLIBLARI\n\n🎁 {camp["gift_price"]} ⭐ Gift\n'
+            f'✅ Sovg‘a yetkazildi: {len ( success ) } ta\n❌ Yuborilmadi: {len ( failed ) } ta\n\n')
+    text=header+'\n'.join ( lines ) +'\n\n💌 TABRIKNOMA\n'+_bayram_html.escape ( camp['greeting'])
+    # HTML teglarini bo‘lmasdan, har bir g‘olibni alohida satr sifatida joylaymiz.
+    batches=[]; chunk=header
+    for line in lines:
+        if len ( chunk ) +len ( line ) +2>3400:
+            batches.append ( chunk ) ;chunk=''
+        chunk+=line+'\n'
+    if chunk:batches.append ( chunk)
+    batches.append ( '💌 TABRIKNOMA\n'+_bayram_html.escape ( camp['greeting'] ) )
+    for part in batches:
+        await ctx.bot.send_message ( camp['chat_id'],part,parse_mode='HTML')
+    if failed:
+        await ctx.bot.send_message ( camp['chat_id'],f'⚠️ {len ( failed ) } kishiga Gift yuborilmadi. Sarflanmagan Stars bot balansida qoladi. Tafsilotlar Railway logida.')
+    return
+
+async def bayram_private_input ( update,ctx ) :
+    msg=update.effective_message;u=update.effective_user
+    if not msg or not u or msg.chat.type!='private':return
+    st=STATE.get ( u.id) or {}
+    if st.get ( 'mode' ) !='bayram_greeting':return
+    ctx.user_data['bayram_consumed_message_id']=msg.message_id
+    greeting= ( msg.text or '' ) .strip ( )
+    if not greeting or len ( greeting ) >120:
+        return await msg.reply_text ( '💌 Gift ichidagi tabriknoma 120 belgidan oshmasin. Iltimos, qisqaroq matn yozing.')
+    cid=st['bayram_id'];camp=one ( 'SELECT * FROM bayram_campaigns WHERE id=? AND creator_id=? AND status="draft"', ( cid,u.id ) )
+    if not camp:
+        STATE.pop ( u.id,None ) ;return await msg.reply_text ( 'Bu bayram sessiyasi tugagan.')
+    winners=bayram_candidates ( camp['chat_id'],camp['winner_count'])
+    if not winners:
+        return await msg.reply_text ( 'Oxirgi 10 soatda faol a’zolar topilmadi.')
+    with db ( ) as c:
+        c.execute ( 'DELETE FROM bayram_winners WHERE campaign_id=?', ( cid, ) )
+        c.executemany ( 'INSERT INTO bayram_winners ( campaign_id,user_id,msg_count) VALUES ( ?,?,? ) ',[ ( cid,r['user_id'],r['n']) for r in winners])
+        c.execute ( 'UPDATE bayram_campaigns SET greeting=? WHERE id=?', ( greeting,cid ) )
+    STATE.pop ( u.id,None)
+    count=len ( winners ) ;total=count*camp['gift_price']
+    await msg.reply_text ( f'🎉 BAYRAM TASDIQLASH\n\n👥 G‘oliblar: {count} kishi\n⏱ Oxirgi 10 soat\n🎁 Har biriga: {camp["gift_price"]} ⭐ Gift\n💰 Jami: {total} ⭐\n\n💌 {greeting}\n\n⚠️ TASDIQLASH bosilsa botning Stars balansidan haqiqiy Giftlar yuboriladi.',reply_markup=bayram_markup ( cid,'confirm' ) )
+
+_bayram_old_star_router=star_text_router
+async def star_text_router ( update,ctx ) :
+    msg=update.effective_message
+    if msg and (msg.text or '' ) .strip (  ) .lower (  ) =='*bayram':
+        return await bayram_command ( update,ctx)
+    return await _bayram_old_star_router ( update,ctx)
+
+_bayram_old_callback=callback
+async def callback ( update,ctx ) :
+    if (update.callback_query.data or '' ) .startswith ( 'bayram:' ) :
+        return await bayram_callback ( update,ctx)
+    return await _bayram_old_callback ( update,ctx)
+
 def main (  ) :
     if not TOKEN: raise RuntimeError ( "BOT_TOKEN kiritilmagan.")
     init_db ( )
     rose_full_init_db ( )
     v9_init_db ( )
+    bayram_init_db ( )
     app=Application.builder (  ) .token ( TOKEN ) .build ( )
     app.add_handler ( CommandHandler ( "start",v9_start_selector ) )
     app.add_handler ( CommandHandler ( "help",cmd_help ) )
@@ -4663,6 +4857,7 @@ def main (  ) :
     app.add_handler ( PreCheckoutQueryHandler ( precheckout ) )
     app.add_handler ( MessageHandler ( filters.SUCCESSFUL_PAYMENT,paid ) )
     app.add_handler ( CallbackQueryHandler ( callback ) )
+    app.add_handler ( MessageHandler ( filters.ChatType.PRIVATE & filters.TEXT & ~filters.COMMAND,bayram_private_input ) ,group=-5)
     app.add_handler ( MessageHandler ( filters.StatusUpdate.NEW_CHAT_MEMBERS,new_members ) )
     app.add_handler ( MessageHandler ( filters.StatusUpdate.LEFT_CHAT_MEMBER,left_member ) )
     app.add_handler ( MessageHandler ( filters.TEXT & filters.Regex ( r"^\*" ) ,star_text_router ) ,group=0)
