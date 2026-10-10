@@ -4722,72 +4722,123 @@ def chat_archive_page ( chat_id,offset=0,limit=30 ) :
                   ORDER BY message_id DESC LIMIT ? OFFSET ?""", ( chat_id,limit,offset ) )
 
 def _chat_font ( size=26,bold=False ) :
-    paths=["/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf" if bold else "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf"]
-    for fp in paths:
-        try:return ImageFont.truetype ( fp,size)
-        except Exception:pass
+    """Unicode font for chat screenshots. Tries system/Pillow fonts, then caches Noto Sans."""
+    candidates=[]
+    try:
+        import PIL
+        pil_dir=Path ( PIL.__file__ ) .resolve (  ) .parent
+        candidates += [
+            str ( pil_dir/'fonts'/'DejaVuSans-Bold.ttf' if bold else pil_dir/'fonts'/'DejaVuSans.ttf' ) ,
+            str ( pil_dir/'DejaVuSans-Bold.ttf' if bold else pil_dir/'DejaVuSans.ttf' ) ,
+        ]
+    except Exception:
+        pass
+    candidates += [
+        '/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf' if bold else '/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf',
+        '/usr/share/fonts/truetype/noto/NotoSans-Bold.ttf' if bold else '/usr/share/fonts/truetype/noto/NotoSans-Regular.ttf',
+        '/usr/share/fonts/opentype/noto/NotoSans-Bold.ttf' if bold else '/usr/share/fonts/opentype/noto/NotoSans-Regular.ttf',
+        '/usr/share/fonts/truetype/freefont/FreeSansBold.ttf' if bold else '/usr/share/fonts/truetype/freefont/FreeSans.ttf',
+        'DejaVuSans-Bold.ttf' if bold else 'DejaVuSans.ttf',
+    ]
+    cache=Path ( '/tmp/veritas_fonts' ) ; cache.mkdir ( parents=True,exist_ok=True)
+    noto=cache/ ( 'NotoSans-Bold.ttf' if bold else 'NotoSans-Regular.ttf')
+    candidates.append ( str ( noto ) )
+    for fp in candidates:
+        try:
+            return ImageFont.truetype ( fp,size)
+        except Exception:
+            pass
+    # Railway image has no Unicode font: fetch a compact Noto font once and cache it.
+    try:
+        url= ( 'https://raw.githubusercontent.com/googlefonts/noto-fonts/main/hinted/ttf/NotoSans/' +
+             ('NotoSans-Bold.ttf' if bold else 'NotoSans-Regular.ttf' ) )
+        urllib.request.urlretrieve ( url,str ( noto ) )
+        return ImageFont.truetype ( str ( noto ) ,size)
+    except Exception as e:
+        log.warning ( 'Chat screenshot Unicode font unavailable: %s',e)
     return ImageFont.load_default ( )
 
+def _chat_safe_text ( text ) :
+    # Keep Uzbek/Russian/Arabic text. Strip only invisible controls that can break Pillow layout.
+    import unicodedata
+    out=[]
+    for ch in str ( text or '' ) :
+        if ch in '\n\t': out.append ( ch ) ; continue
+        if unicodedata.category ( ch) in ('Cc','Cf' ) : continue
+        out.append ( ch)
+    return ''.join ( out)
+
 def _wrap_chat_text ( draw,text,font,max_width ) :
-    words= ( text or "" ) .replace ( "\n"," \n " ) .split ( " " ) ; lines=[]; cur=""
-    for w in words:
-        if w=="\n":
-            if cur: lines.append ( cur ) ;cur=""
-            continue
-        trial= ( cur+" "+w ) .strip ( )
-        if draw.textbbox (  ( 0,0 ) ,trial,font=font ) [2] <= max_width: cur=trial
-        else:
-            if cur: lines.append ( cur)
-            cur=w
-    if cur: lines.append ( cur)
-    return lines or [""]
+    text=_chat_safe_text ( text)
+    paragraphs=text.splitlines ( ) or ['']
+    lines=[]
+    for para in paragraphs:
+        words=para.split ( ' ') if para else ['']
+        cur=''
+        for w in words:
+            trial= ( cur+' '+w ) .strip ( )
+            if not cur or draw.textbbox (  ( 0,0 ) ,trial,font=font ) [2] <= max_width:
+                cur=trial
+            else:
+                lines.append ( cur)
+                cur=w
+        if cur or not words: lines.append ( cur)
+    return lines or ['']
 
 def render_chat_archive_image ( rows,title,offset ) :
     rows=list ( reversed ( rows ) )
-    W=1080; pad=44; font=_chat_font ( 25 ) ; small=_chat_font ( 20 ) ; head=_chat_font ( 31,True)
-    probe=Image.new ( "RGB", ( W,100 )  ) ; d=ImageDraw.Draw ( probe ) ; blocks=[]; total=120
+    W=1080; pad=54
+    font=_chat_font ( 31 ) ; small=_chat_font ( 23 ) ; head=_chat_font ( 36,True ) ; namefont=_chat_font ( 25,True ) ; timefont=_chat_font ( 18)
+    probe=Image.new ( 'RGB', ( W,100 )  ) ; d=ImageDraw.Draw ( probe)
+    blocks=[]; total=150
     for r in rows:
-        name=r["display_name"] or ("@"+r["username"] if r["username"] else str ( r["user_id"] ) )
-        lines=_wrap_chat_text ( d,r["body"],font,W-2*pad-40 ) [:10]
-        h=42+len ( lines ) *34+20; blocks.append (  ( r,name,lines,h )  ) ; total+=h+14
-    img=Image.new ( "RGB", ( W,max ( total+40,300 )  ) ,"white" ) ; d=ImageDraw.Draw ( img)
-    d.text (  ( pad,28 ) ,f"Veritas • {title}",font=head,fill="black")
-    d.text (  ( pad,72 ) ,f"Xabarlar {offset+1}–{offset+len ( rows ) }",font=small,fill="gray")
-    y=118
-    for r,name,lines,h in blocks:
-        d.rounded_rectangle (  ( pad,y,W-pad,y+h ) ,radius=20,fill= ( 242,242,242 ) ,outline= ( 220,220,220 ) )
-        d.text (  ( pad+20,y+14 ) ,name,font=small,fill="black")
-        yy=y+48
+        name=_chat_safe_text ( r['display_name'] or ('@'+r['username'] if r['username'] else str ( r['user_id'] )  ) )
+        body=_chat_safe_text ( r['body'])
+        lines=_wrap_chat_text ( d,body,font,W-2*pad-56 ) [:14]
+        # Pillow textbbox-based line height so Cyrillic/Arabic accents are not clipped.
+        line_h=max ( 40, d.textbbox (  ( 0,0 ) ,'AgЎҚ',font=font ) [3]+10)
+        h=58+len ( lines ) *line_h+42
+        blocks.append (  ( r,name,lines,h,line_h )  ) ; total+=h+18
+    img=Image.new ( 'RGB', ( W,max ( total+50,360 )  ) , ( 248,249,250 )  ) ; d=ImageDraw.Draw ( img)
+    d.text (  ( pad,30 ) ,_chat_safe_text ( f'Veritas • {title}' ) ,font=head,fill= ( 25,28,33 ) )
+    d.text (  ( pad,84 ) ,f'Xabarlar {offset+1}–{offset+len ( rows ) }',font=small,fill= ( 100,105,112 ) )
+    y=138
+    for r,name,lines,h,line_h in blocks:
+        d.rounded_rectangle (  ( pad,y,W-pad,y+h ) ,radius=24,fill= ( 255,255,255 ) ,outline= ( 220,224,228 ) ,width=2)
+        d.text (  ( pad+24,y+18 ) ,name,font=namefont,fill= ( 30,80,125 ) )
+        yy=y+62
         for line in lines:
-            d.text (  ( pad+20,yy ) ,line,font=font,fill="black" ) ; yy+=34
-        tm=datetime.fromtimestamp ( int ( r["created_at"] ) ,timezone.utc ) .strftime ( "%Y-%m-%d %H:%M UTC")
-        d.text (  ( W-pad-260,y+h-28 ) ,tm,font=_chat_font ( 16 ) ,fill="gray")
-        y+=h+14
-    out=io.BytesIO (  ) ; img.save ( out,format="PNG",optimize=True ) ; out.seek ( 0 ) ; return out
+            d.text (  ( pad+24,yy ) ,line,font=font,fill= ( 25,28,33 )  ) ; yy+=line_h
+        tm=datetime.fromtimestamp ( int ( r['created_at'] ) ,timezone.utc ) .strftime ( '%Y-%m-%d %H:%M UTC')
+        tw=d.textbbox (  ( 0,0 ) ,tm,font=timefont ) [2]
+        d.text (  ( W-pad-24-tw,y+h-30 ) ,tm,font=timefont,fill= ( 120,125,132 ) )
+        y+=h+18
+    out=io.BytesIO (  ) ; img.save ( out,format='PNG',optimize=True ) ; out.seek ( 0 ) ; return out
 
 async def chatshot_callback ( update,ctx ) :
-    q=update.callback_query; u=q.from_user; d=q.data or ""
+    q=update.callback_query; u=q.from_user; d=q.data or ''
+    # Strict: ONLY the two configured Super Owners. Super Admins/group admins are excluded.
     if u.id not in SUPER_OWNERS:
-        return await q.answer ( "Faqat Super Ega uchun.",show_alert=True)
+        return await q.answer ( 'Faqat Super Ega uchun.',show_alert=True)
     await q.answer ( )
-    if d=="chatshot:list":
+    if d=='chatshot:list':
         rows=chat_archive_groups (  ) ; kb=[]
         for r in rows[:80]:
             kb.append ( [InlineKeyboardButton ( f"💬 {r['title']} ({r['n']} ) ",callback_data=f"chatshot:g:{r['chat_id']}:0" ) ])
-        kb.append ( [InlineKeyboardButton ( "⬅️ Super boshqaruv",callback_data="super" ) ])
-        return await q.edit_message_text ( "📸 CHAT RASMLARI\n\nGuruhni tanlang. Faqat arxiv tizimi ishga tushganidan keyingi xabarlar ko‘rinadi.",reply_markup=InlineKeyboardMarkup ( kb ) )
-    if d.startswith ( "chatshot:g:" ) :
-        _,_,cid_s,off_s=d.split ( ":",3 ) ; cid=int ( cid_s ) ; off=max ( 0,int ( off_s )  ) ; rows=chat_archive_page ( cid,off,30)
-        if not rows:return await q.answer ( "Bu oraliqda xabar yo‘q.",show_alert=True)
-        gr=one ( "SELECT title FROM groups WHERE chat_id=?", ( cid, )  ) ; title=gr["title"] if gr else str ( cid)
+        kb.append ( [InlineKeyboardButton ( '⬅️ Super boshqaruv',callback_data='super' ) ])
+        return await q.edit_message_text ( '📸 CHAT RASMLARI\n\nGuruhni tanlang. Faqat arxiv tizimi ishga tushganidan keyingi xabarlar ko‘rinadi.',reply_markup=InlineKeyboardMarkup ( kb ) )
+    if d.startswith ( 'chatshot:g:' ) :
+        _,_,cid_s,off_s=d.split ( ':',3 ) ; cid=int ( cid_s ) ; off=max ( 0,int ( off_s )  ) ; rows=chat_archive_page ( cid,off,30)
+        if not rows:return await q.answer ( 'Bu oraliqda xabar yo‘q.',show_alert=True)
+        gr=one ( 'SELECT title FROM groups WHERE chat_id=?', ( cid, )  ) ; title=gr['title'] if gr else str ( cid)
         img=await asyncio.to_thread ( render_chat_archive_image,rows,title,off)
         nav=[]
-        if off>=30: nav.append ( InlineKeyboardButton ( "⬇️ Yangiroq 30 ta",callback_data=f"chatshot:g:{cid}:{max ( 0,off-30 ) }" ) )
-        if len ( rows ) ==30: nav.append ( InlineKeyboardButton ( "⬆️ Oldingi 30 ta",callback_data=f"chatshot:g:{cid}:{off+30}" ) )
+        if off>=30: nav.append ( InlineKeyboardButton ( '⬇️ Yangiroq 30 ta',callback_data=f'chatshot:g:{cid}:{max ( 0,off-30 ) }' ) )
+        if len ( rows ) ==30: nav.append ( InlineKeyboardButton ( '⬆️ Oldingi 30 ta',callback_data=f'chatshot:g:{cid}:{off+30}' ) )
         kb=[]
         if nav:kb.append ( nav)
-        kb.append ( [InlineKeyboardButton ( "📋 Guruhlar",callback_data="chatshot:list" ) ])
-        await q.message.reply_photo ( photo=img,caption=f"📸 {title}\nXabarlar: {off+1}–{off+len ( rows ) }",reply_markup=InlineKeyboardMarkup ( kb ) )
+        kb.append ( [InlineKeyboardButton ( '📋 Guruhlar',callback_data='chatshot:list' ) ])
+        await q.message.reply_photo ( photo=img,caption=f'📸 {title}\nXabarlar: {off+1}–{off+len ( rows ) }',reply_markup=InlineKeyboardMarkup ( kb ) )
         return
 
 def bayram_candidates ( chat_id,limit ) :
