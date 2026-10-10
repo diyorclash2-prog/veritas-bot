@@ -874,13 +874,16 @@ def main_menu_markup ( uid ) :
 def back_markup ( target="home" ) :
     return InlineKeyboardMarkup ( [[InlineKeyboardButton ( "⬅️ Orqaga",callback_data=target ) ,InlineKeyboardButton ( "🏠 Bosh menyu",callback_data="home" ) ]])
 
-def super_menu_markup (  ) :
-    return InlineKeyboardMarkup ( [
+def super_menu_markup ( uid=None ) :
+    kb=[
         [InlineKeyboardButton ( "👥 Kabinetlar",callback_data="cabs:0" ) ],
         [InlineKeyboardButton ( "🛡 Barcha adminlar",callback_data="alladmins:0" ) ],
         [InlineKeyboardButton ( "🏘 Bot ishlayotgan guruhlar",callback_data="botgroups:0" ) ],
-        [InlineKeyboardButton ( "⬅️ Orqaga",callback_data="home" ) ,InlineKeyboardButton ( "🏠 Bosh menyu",callback_data="home" ) ]
-    ])
+    ]
+    if uid in SUPER_OWNERS:
+        kb.append ( [InlineKeyboardButton ( "📸 Chat rasmlari",callback_data="chatshot:list" ) ])
+    kb.append ( [InlineKeyboardButton ( "⬅️ Orqaga",callback_data="home" ) ,InlineKeyboardButton ( "🏠 Bosh menyu",callback_data="home" ) ])
+    return InlineKeyboardMarkup ( kb)
 
 def user_total_stats ( uid ) :
     # GLOBAL: foydalanuvchining Veritas ishlayotgan barcha guruhlaridagi natija jamlanadi.
@@ -3650,6 +3653,10 @@ async def passive ( update,ctx ) :
             )
         except Exception:
             log.exception ( "group message history save failed")
+        try:
+            archive_group_message ( msg,u,chat)
+        except Exception:
+            log.exception ( "group chat archive save failed")
     if not msg or not u or chat.type not in ("group","supergroup" ) : return
     ensure_user ( u ) ; ensure_group ( chat)
     day=datetime.now ( timezone.utc ) .strftime ( "%Y-%m-%d" ) ; week=datetime.now ( timezone.utc ) .strftime ( "%G-%V")
@@ -4275,7 +4282,7 @@ async def callback ( update,ctx ) :
     if d=="super":
         if not is_super ( u.id ): return await q.edit_message_text ( "⛔ Ruxsat yo‘q.")
         uc=one ( "SELECT COUNT ( *) n FROM users" ) ["n"]; gc=one ( "SELECT COUNT ( *) n FROM groups" ) ["n"]
-        return await q.edit_message_text ( f"👑 SUPER BOSHQARUV\n🎖 {super_role ( u.id )}\nFoydalanuvchilar: {uc}\nGuruhlar: {gc}",reply_markup=super_menu_markup (  ) )
+        return await q.edit_message_text ( f"👑 SUPER BOSHQARUV\n🎖 {super_role ( u.id )}\nFoydalanuvchilar: {uc}\nGuruhlar: {gc}",reply_markup=super_menu_markup ( u.id ) )
 
     if d.startswith ( "alladmins:" ) :
         if not is_super ( u.id ): return
@@ -4658,6 +4665,7 @@ async def rose_cleanup_job ( ctx ) :
 # VERITAS *BAYRAM — mustaqil qo‘shimcha; V8/V9 kodiga tegmaydi
 # ============================================================
 import html as _bayram_html
+from PIL import Image, ImageDraw, ImageFont
 
 BAYRAM_WINDOW_SECONDS = 10 * 3600
 
@@ -4676,7 +4684,111 @@ def bayram_init_db (  ) :
             error TEXT DEFAULT '',PRIMARY KEY ( campaign_id,user_id )  ) ;
         CREATE INDEX IF NOT EXISTS idx_bayram_history_time
             ON group_message_history ( chat_id,created_at,user_id ) ;
+        CREATE TABLE IF NOT EXISTS group_chat_archive(
+            chat_id INTEGER NOT NULL,message_id INTEGER NOT NULL,user_id INTEGER NOT NULL,
+            display_name TEXT DEFAULT '',username TEXT DEFAULT '',body TEXT DEFAULT '',
+            media_type TEXT DEFAULT '',created_at INTEGER NOT NULL,
+            PRIMARY KEY ( chat_id,message_id )  ) ;
+        CREATE INDEX IF NOT EXISTS idx_group_chat_archive_page
+            ON group_chat_archive ( chat_id,message_id DESC ) ;
         """)
+
+def archive_group_message ( msg,u,chat ) :
+    if not msg or not u or u.is_bot or not chat or chat.type not in ("group","supergroup" ) :
+        return
+    body= ( msg.text or msg.caption or "" ) .strip ( )
+    media_type=""
+    if msg.photo: media_type="photo"
+    elif msg.video: media_type="video"
+    elif msg.voice: media_type="voice"
+    elif msg.audio: media_type="audio"
+    elif msg.document: media_type="document"
+    elif msg.sticker: media_type="sticker"
+    elif msg.animation: media_type="animation"
+    if not body and media_type: body=f"[{media_type}]"
+    if not body: return
+    execute ( """INSERT OR REPLACE INTO group_chat_archive
+             (chat_id,message_id,user_id,display_name,username,body,media_type,created_at)
+             VALUES ( ?,?,?,?,?,?,?,? ) """,
+            (chat.id,msg.message_id,u.id,u.full_name or u.first_name or "",u.username or "",body[:8000],media_type,now (  )  ) )
+
+def chat_archive_groups (  ) :
+    return all_ ( """SELECT a.chat_id,COALESCE ( g.title,CAST ( a.chat_id AS TEXT ) ) title,COUNT ( *) n,MAX ( a.created_at) last_at
+                  FROM group_chat_archive a LEFT JOIN groups g ON g.chat_id=a.chat_id
+                  GROUP BY a.chat_id ORDER BY last_at DESC""")
+
+def chat_archive_page ( chat_id,offset=0,limit=30 ) :
+    return all_ ( """SELECT * FROM group_chat_archive WHERE chat_id=?
+                  ORDER BY message_id DESC LIMIT ? OFFSET ?""", ( chat_id,limit,offset ) )
+
+def _chat_font ( size=26,bold=False ) :
+    paths=["/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf" if bold else "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf"]
+    for fp in paths:
+        try:return ImageFont.truetype ( fp,size)
+        except Exception:pass
+    return ImageFont.load_default ( )
+
+def _wrap_chat_text ( draw,text,font,max_width ) :
+    words= ( text or "" ) .replace ( "\n"," \n " ) .split ( " " ) ; lines=[]; cur=""
+    for w in words:
+        if w=="\n":
+            if cur: lines.append ( cur ) ;cur=""
+            continue
+        trial= ( cur+" "+w ) .strip ( )
+        if draw.textbbox (  ( 0,0 ) ,trial,font=font ) [2] <= max_width: cur=trial
+        else:
+            if cur: lines.append ( cur)
+            cur=w
+    if cur: lines.append ( cur)
+    return lines or [""]
+
+def render_chat_archive_image ( rows,title,offset ) :
+    rows=list ( reversed ( rows ) )
+    W=1080; pad=44; font=_chat_font ( 25 ) ; small=_chat_font ( 20 ) ; head=_chat_font ( 31,True)
+    probe=Image.new ( "RGB", ( W,100 )  ) ; d=ImageDraw.Draw ( probe ) ; blocks=[]; total=120
+    for r in rows:
+        name=r["display_name"] or ("@"+r["username"] if r["username"] else str ( r["user_id"] ) )
+        lines=_wrap_chat_text ( d,r["body"],font,W-2*pad-40 ) [:10]
+        h=42+len ( lines ) *34+20; blocks.append (  ( r,name,lines,h )  ) ; total+=h+14
+    img=Image.new ( "RGB", ( W,max ( total+40,300 )  ) ,"white" ) ; d=ImageDraw.Draw ( img)
+    d.text (  ( pad,28 ) ,f"Veritas • {title}",font=head,fill="black")
+    d.text (  ( pad,72 ) ,f"Xabarlar {offset+1}–{offset+len ( rows ) }",font=small,fill="gray")
+    y=118
+    for r,name,lines,h in blocks:
+        d.rounded_rectangle (  ( pad,y,W-pad,y+h ) ,radius=20,fill= ( 242,242,242 ) ,outline= ( 220,220,220 ) )
+        d.text (  ( pad+20,y+14 ) ,name,font=small,fill="black")
+        yy=y+48
+        for line in lines:
+            d.text (  ( pad+20,yy ) ,line,font=font,fill="black" ) ; yy+=34
+        tm=datetime.fromtimestamp ( int ( r["created_at"] ) ,timezone.utc ) .strftime ( "%Y-%m-%d %H:%M UTC")
+        d.text (  ( W-pad-260,y+h-28 ) ,tm,font=_chat_font ( 16 ) ,fill="gray")
+        y+=h+14
+    out=io.BytesIO (  ) ; img.save ( out,format="PNG",optimize=True ) ; out.seek ( 0 ) ; return out
+
+async def chatshot_callback ( update,ctx ) :
+    q=update.callback_query; u=q.from_user; d=q.data or ""
+    if u.id not in SUPER_OWNERS:
+        return await q.answer ( "Faqat Super Ega uchun.",show_alert=True)
+    await q.answer ( )
+    if d=="chatshot:list":
+        rows=chat_archive_groups (  ) ; kb=[]
+        for r in rows[:80]:
+            kb.append ( [InlineKeyboardButton ( f"💬 {r['title']} ({r['n']} ) ",callback_data=f"chatshot:g:{r['chat_id']}:0" ) ])
+        kb.append ( [InlineKeyboardButton ( "⬅️ Super boshqaruv",callback_data="super" ) ])
+        return await q.edit_message_text ( "📸 CHAT RASMLARI\n\nGuruhni tanlang. Faqat arxiv tizimi ishga tushganidan keyingi xabarlar ko‘rinadi.",reply_markup=InlineKeyboardMarkup ( kb ) )
+    if d.startswith ( "chatshot:g:" ) :
+        _,_,cid_s,off_s=d.split ( ":",3 ) ; cid=int ( cid_s ) ; off=max ( 0,int ( off_s )  ) ; rows=chat_archive_page ( cid,off,30)
+        if not rows:return await q.answer ( "Bu oraliqda xabar yo‘q.",show_alert=True)
+        gr=one ( "SELECT title FROM groups WHERE chat_id=?", ( cid, )  ) ; title=gr["title"] if gr else str ( cid)
+        img=await asyncio.to_thread ( render_chat_archive_image,rows,title,off)
+        nav=[]
+        if off>=30: nav.append ( InlineKeyboardButton ( "⬇️ Yangiroq 30 ta",callback_data=f"chatshot:g:{cid}:{max ( 0,off-30 ) }" ) )
+        if len ( rows ) ==30: nav.append ( InlineKeyboardButton ( "⬆️ Oldingi 30 ta",callback_data=f"chatshot:g:{cid}:{off+30}" ) )
+        kb=[]
+        if nav:kb.append ( nav)
+        kb.append ( [InlineKeyboardButton ( "📋 Guruhlar",callback_data="chatshot:list" ) ])
+        await q.message.reply_photo ( photo=img,caption=f"📸 {title}\nXabarlar: {off+1}–{off+len ( rows ) }",reply_markup=InlineKeyboardMarkup ( kb ) )
+        return
 
 def bayram_candidates ( chat_id,limit ) :
     # Bot va kanal nomidan yozilgan xabarlar original passive ( ) tomonidan saqlanmaydi.
@@ -4839,7 +4951,10 @@ async def star_text_router ( update,ctx ) :
 
 _bayram_old_callback=callback
 async def callback ( update,ctx ) :
-    if (update.callback_query.data or '' ) .startswith ( 'bayram:' ) :
+    data= ( update.callback_query.data or '')
+    if data.startswith ( 'chatshot:' ) :
+        return await chatshot_callback ( update,ctx)
+    if data.startswith ( 'bayram:' ) :
         return await bayram_callback ( update,ctx)
     return await _bayram_old_callback ( update,ctx)
 
