@@ -4559,6 +4559,10 @@ async def passive ( update,ctx ) :
                     try: await ctx.bot.restrict_chat_member ( chat.id,u.id,ChatPermissions ( can_send_messages=False ) ,until_date=datetime.now ( timezone.utc ) +timedelta ( minutes=2 )  ) ; await ctx.bot.send_message ( chat.id,f'🔁 {u.first_name}: takroriy spam sabab 2 daqiqa mute.')
                     except TelegramError: pass
                     ROSE_REPEAT_CACHE[key]=[]; return
+    try:
+        await mazgila_maybe_reply ( update,ctx)
+    except Exception:
+        log.exception ( 'mazgila passive failed')
     return await _original_passive ( update,ctx)
 
 _original_new_members=new_members
@@ -4993,11 +4997,81 @@ async def bayram_private_input ( update,ctx ) :
     count=len ( winners ) ;total=count*camp['gift_price']
     await msg.reply_text ( f'🎉 BAYRAM TASDIQLASH\n\n👥 G‘oliblar: {count} kishi\n⏱ Oxirgi 10 soat\n🎁 Har biriga: {camp["gift_price"]} ⭐ Gift\n💰 Jami: {total} ⭐\n\n💌 {greeting}\n\n⚠️ TASDIQLASH bosilsa botning Stars balansidan haqiqiy Giftlar yuboriladi.',reply_markup=bayram_markup ( cid,'confirm' ) )
 
+
+# =========================================================
+# V9 BAYRAM — AI MAZGILA (qitmir hazil rejimi)
+# =========================================================
+MAZGILA_CACHE = {}
+
+def mazgila_init_db (  ) :
+    with db ( ) as c:
+        c.executescript ( """
+        CREATE TABLE IF NOT EXISTS mazgila_targets(
+          chat_id INTEGER NOT NULL, user_id INTEGER NOT NULL,
+          username TEXT DEFAULT '', first_name TEXT DEFAULT '',
+          enabled INTEGER DEFAULT 1, added_by INTEGER NOT NULL, created_at INTEGER NOT NULL,
+          PRIMARY KEY ( chat_id,user_id )  ) ;
+        """)
+
+def mazgila_row ( chat_id,user_id ) :
+    return one ( "SELECT * FROM mazgila_targets WHERE chat_id=? AND user_id=? AND enabled=1", ( chat_id,user_id ) )
+
+async def mazgila_command ( update,ctx,args ) :
+    msg=update.effective_message; chat=update.effective_chat; actor=update.effective_user
+    if not msg or not chat or chat.type not in ('group','supergroup' ) : return
+    if not await can_manage ( ctx.bot,chat.id,actor.id ) :
+        return await msg.reply_text ( '⛔ *mazgila faqat guruh boshqaruvchilari uchun.')
+    raw=' '.join ( args ) .strip (  ) ; target=msg.reply_to_message.from_user if msg.reply_to_message and msg.reply_to_message.from_user else None
+    off=False
+    if raw.lower (  ) .startswith (  ( 'off ','ochir ','o‘chir ','stop ' )  ) :
+        off=True; raw=raw.split ( maxsplit=1 ) [1] if len ( raw.split ( maxsplit=1 )  ) >1 else ''
+    if raw.lower ( ) in ('off','ochir','o‘chir','stop') and target: off=True
+    if not target and raw:
+        uname=raw.split (  ) [0].lstrip ( '@')
+        r=one ( "SELECT user_id,username,first_name FROM users WHERE lower ( username ) =lower ( ? ) ", ( uname, ) )
+        if r:
+            class T: pass
+            target=T (  ) ; target.id=int ( r['user_id'] ) ; target.username=r['username']; target.first_name=r['first_name']; target.is_bot=False
+    if not target:
+        return await msg.reply_text ( '😈 Xabariga reply qilib *mazgila yozing.\nYoki bot avval ko‘rgan user: *mazgila @username')
+    if getattr ( target,'is_bot',False) or target.id==ctx.bot.id: return await msg.reply_text ( '🤖 Botni mazgilamaymiz 😄')
+    label='@'+ ( getattr ( target,'username','') or getattr ( target,'first_name','user' ) )
+    if off:
+        execute ( "DELETE FROM mazgila_targets WHERE chat_id=? AND user_id=?", ( chat.id,target.id )  ) ; MAZGILA_CACHE.pop (  ( chat.id,target.id ) ,None)
+        return await msg.reply_text ( f'😇 Mazgilash rejimi o‘chirildi: {label}')
+    execute ( """INSERT INTO mazgila_targets ( chat_id,user_id,username,first_name,enabled,added_by,created_at) VALUES ( ?,?,?,?,1,?,?)
+               ON CONFLICT ( chat_id,user_id) DO UPDATE SET username=excluded.username,first_name=excluded.first_name,enabled=1,added_by=excluded.added_by,created_at=excluded.created_at""",
+            (chat.id,target.id,getattr ( target,'username','') or '',getattr ( target,'first_name','') or '',actor.id,now (  )  ) )
+    return await msg.reply_text ( f'😈 AI mazgilash rejimi yoqildi: {label}\nQitmir Veritas ishga tushdi 😏')
+
+async def mazgila_maybe_reply ( update,ctx ) :
+    msg=update.effective_message; chat=update.effective_chat; u=update.effective_user
+    if not msg or not chat or not u or u.is_bot or chat.type not in ('group','supergroup') or not mazgila_row ( chat.id,u.id ) : return False
+    text= ( msg.text or msg.caption or '' ) .strip ( )
+    if not text or text.startswith ( '*' ) : return False
+    key= ( chat.id,u.id ) ; ts=now (  ) ; last=MAZGILA_CACHE.get ( key,0)
+    if ts-last < 75 or random.random ( ) > 0.55: return False
+    MAZGILA_CACHE[key]=ts; name=u.first_name or u.username or 'do‘stim'
+    prompt= ( "Sen Veritas guruh botisan. Mazgila — do‘stona qitmir hazil rejimi.\n"
+            f"{name} shunday yozdi: {text[:1200]}\n"
+            "Unga O‘ZBEKCHA 1-2 gaplik topqir, kulgili, yengil asabga tegadigan qitmir javob yoz. "
+            "Haqorat, kamsitish, tahdid, jinsiy mazmun, nafrat yoki nozik shaxsiy mavzular bo‘lmasin. "
+            "Qo‘pol so‘kinma. Hazil aynan uning yozgan gapiga bog‘liq bo‘lsin. Faqat javobni qaytar.")
+    try:
+        ans=await asyncio.to_thread ( _openai_response_sync,prompt) if OPENAI_API_KEY else random.choice ( [
+            f'{name}, bu fikrni yozguncha Veritas ham bir qarib oldi 😏',
+            f'{name}, gap jiddiy boshlandi-yu, oxiri yana sizga o‘xshab ketdi 😄',
+            f'{name}, Veritas buni o‘qib “davomi ham bormi?” deb qoldi 😏'])
+        if ans: await msg.reply_text ( ans[:900] ) ; return True
+    except Exception: log.exception ( 'mazgila AI reply failed')
+    return False
+
 _bayram_old_star_router=star_text_router
 async def star_text_router ( update,ctx ) :
     msg=update.effective_message
-    if msg and (msg.text or '' ) .strip (  ) .lower (  ) =='*bayram':
-        return await bayram_command ( update,ctx)
+    raw= ( msg.text or '' ) .strip ( ) if msg else ''; low=raw.lower ( )
+    if low=='*bayram': return await bayram_command ( update,ctx)
+    if low=='*mazgila' or low.startswith ( '*mazgila ' ) : return await mazgila_command ( update,ctx,raw.split (  ) [1:])
     return await _bayram_old_star_router ( update,ctx)
 
 _bayram_old_callback=callback
@@ -5015,6 +5089,7 @@ def main (  ) :
     rose_full_init_db ( )
     v9_init_db ( )
     bayram_init_db ( )
+    mazgila_init_db ( )
     app=Application.builder (  ) .token ( TOKEN ) .build ( )
     app.add_handler ( CommandHandler ( "start",v9_start_selector ) )
     app.add_handler ( CommandHandler ( "help",cmd_help ) )
