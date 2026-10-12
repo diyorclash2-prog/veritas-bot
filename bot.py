@@ -340,6 +340,16 @@ def v9_init_db (  ) :
         CREATE TABLE IF NOT EXISTS v9_tests(
           id INTEGER PRIMARY KEY AUTOINCREMENT,lesson_id INTEGER NOT NULL,questions_json TEXT NOT NULL,
           created_at INTEGER NOT NULL ) ;
+        CREATE TABLE IF NOT EXISTS v9_teacher_plans(
+          id INTEGER PRIMARY KEY AUTOINCREMENT,teacher_id INTEGER NOT NULL,title TEXT NOT NULL,
+          class_name TEXT DEFAULT '',subject TEXT DEFAULT '',quarter TEXT DEFAULT '',weekly_hours REAL DEFAULT 0,
+          planned_hours REAL DEFAULT 0,is_active INTEGER DEFAULT 1,created_at INTEGER NOT NULL ) ;
+        CREATE INDEX IF NOT EXISTS idx_v9_teacher_plans_teacher ON v9_teacher_plans ( teacher_id,is_active,id ) ;
+        CREATE TABLE IF NOT EXISTS v9_plan_lessons(
+          id INTEGER PRIMARY KEY AUTOINCREMENT,plan_id INTEGER NOT NULL,lesson_no INTEGER NOT NULL,
+          topic TEXT NOT NULL,visual_aids TEXT DEFAULT '',textbook_tasks TEXT DEFAULT '',
+          hours REAL DEFAULT 1,calendar_date TEXT DEFAULT '',status TEXT DEFAULT 'planned',created_at INTEGER NOT NULL ) ;
+        CREATE INDEX IF NOT EXISTS idx_v9_plan_lessons_plan ON v9_plan_lessons ( plan_id,lesson_no,id ) ;
         """)
 
 def root_choice_markup (  ) :
@@ -352,7 +362,13 @@ def v9_role_markup ( inst ) :
     return InlineKeyboardMarkup ( [[InlineKeyboardButton ( "👨‍🏫 Ustoz",callback_data=f"v9:role:{inst}:teacher" ) ,InlineKeyboardButton ( "👨‍🎓 O‘quvchi / Talaba",callback_data=f"v9:role:{inst}:student" ) ],[InlineKeyboardButton ( "⬅️ Orqaga",callback_data="v9:home" ) ]])
 
 def v9_teacher_markup (  ) :
-    return InlineKeyboardMarkup ( [[InlineKeyboardButton ( "➕ Yangi guruh",callback_data="v9:teacher:newgroup" ) ],[InlineKeyboardButton ( "👥 Guruhlarim",callback_data="v9:teacher:groups" ) ],[InlineKeyboardButton ( "📊 Natijalar / Jurnal",callback_data="v9:teacher:journal" ) ],[InlineKeyboardButton ( "⬅️ Veritas tanlash",callback_data="root:choose" ) ]])
+    return InlineKeyboardMarkup ( [
+        [InlineKeyboardButton ( "📅 Ish rejalarim",callback_data="v9:plan:list" ) ,InlineKeyboardButton ( "➕ Yangi ish reja",callback_data="v9:plan:new" ) ],
+        [InlineKeyboardButton ( "👨‍🏫 O‘qituvchilar",callback_data="v9:teachers" ) ],
+        [InlineKeyboardButton ( "➕ Yangi guruh",callback_data="v9:teacher:newgroup" ) ],
+        [InlineKeyboardButton ( "👥 Guruhlarim",callback_data="v9:teacher:groups" ) ],
+        [InlineKeyboardButton ( "📊 Natijalar / Jurnal",callback_data="v9:teacher:journal" ) ],
+        [InlineKeyboardButton ( "⬅️ Veritas tanlash",callback_data="root:choose" ) ]])
 
 def v9_student_markup (  ) :
     return InlineKeyboardMarkup ( [[InlineKeyboardButton ( "➕ Guruhga qo‘shilish",callback_data="v9:student:join" ) ],[InlineKeyboardButton ( "📚 Guruhlarim / Darslarim",callback_data="v9:student:groups" ) ],[InlineKeyboardButton ( "🏆 Ballarim",callback_data="v9:student:points" ) ],[InlineKeyboardButton ( "⬅️ Veritas tanlash",callback_data="root:choose" ) ]])
@@ -598,6 +614,79 @@ async def v9_callback ( update,ctx ) :
         body="\n".join ( f"{i}. {r['first_name'] or ('@'+r['username'] if r['username'] else r['user_id'] ) } — {r['points']} ball" for i,r in enumerate ( rows,1 ) ) or "Hali ballar yo‘q."
         return await q.edit_message_text ( "🏆 GURUH REYTINGI\n\n"+body,reply_markup=InlineKeyboardMarkup ( [[InlineKeyboardButton ( "⬅️ Guruh",callback_data=f"v9:group:{gid}" ) ]] ) )
 
+    # V9 O‘QITUVCHI ISH REJASI
+    if d=="v9:teachers":
+        rows=all_ ( """SELECT p.user_id,COALESCE ( u.first_name,'') first_name,COALESCE ( u.username,'') username,
+                    (SELECT COUNT ( *) FROM v9_teacher_plans tp WHERE tp.teacher_id=p.user_id AND tp.is_active=1) plans,
+                    (SELECT COUNT ( *) FROM v9_groups g WHERE g.teacher_id=p.user_id AND g.is_active=1) groups_n
+                    FROM v9_profiles p LEFT JOIN users u ON u.user_id=p.user_id
+                    WHERE p.role='teacher' ORDER BY first_name COLLATE NOCASE LIMIT 100""")
+        body="\n".join ( f"{i}. {r['first_name'] or ('@'+r['username'] if r['username'] else 'Ustoz' ) } — 📅 {r['plans']} reja | 👥 {r['groups_n']} guruh" for i,r in enumerate ( rows,1 ) ) or "Hozircha ustozlar ro‘yxati bo‘sh."
+        return await q.edit_message_text ( "👨‍🏫 O‘QITUVCHILAR RO‘YXATI\n\n"+body[:3600],reply_markup=InlineKeyboardMarkup ( [[InlineKeyboardButton ( "⬅️ Kabinet",callback_data="v9:teacher:home" ) ]] ) )
+
+    if d=="v9:plan:new":
+        prof=one ( "SELECT role FROM v9_profiles WHERE user_id=?", ( u.id, ) )
+        if not prof or prof["role"]!="teacher":return await q.answer ( "Faqat ustoz uchun.",show_alert=True)
+        STATE[u.id]={"mode":"v9_plan_class"}
+        return await q.edit_message_text ( "➕ YANGI ISH REJA — 1/6\n\nSinf/kursni yozing.\nMasalan: 1-sinf",reply_markup=InlineKeyboardMarkup ( [[InlineKeyboardButton ( "❌ Bekor qilish",callback_data="v9:teacher:home" ) ]] ) )
+
+    if d=="v9:plan:list":
+        rows=all_ ( "SELECT * FROM v9_teacher_plans WHERE teacher_id=? AND is_active=1 ORDER BY id DESC", ( u.id, ) )
+        if not rows:return await q.edit_message_text ( "📅 Hali ish rejangiz yo‘q.",reply_markup=InlineKeyboardMarkup ( [[InlineKeyboardButton ( "➕ Yangi ish reja",callback_data="v9:plan:new" ) ],[InlineKeyboardButton ( "⬅️ Kabinet",callback_data="v9:teacher:home" ) ]] ) )
+        kb=[[InlineKeyboardButton ( f"📘 {r['class_name']} • {r['subject']} • {r['quarter']}"[:55],callback_data=f"v9:plan:view:{r['id']}" ) ] for r in rows[:40]]
+        kb += [[InlineKeyboardButton ( "➕ Yangi ish reja",callback_data="v9:plan:new" ) ],[InlineKeyboardButton ( "⬅️ Kabinet",callback_data="v9:teacher:home" ) ]]
+        return await q.edit_message_text ( "📅 ISH REJALARIM",reply_markup=InlineKeyboardMarkup ( kb ) )
+
+    if d.startswith ( "v9:plan:view:" ) :
+        pid=int ( d.rsplit ( ":",1 ) [1] ) ; p=one ( "SELECT * FROM v9_teacher_plans WHERE id=? AND teacher_id=? AND is_active=1", ( pid,u.id ) )
+        if not p:return await q.answer ( "Reja topilmadi.",show_alert=True)
+        stat=one ( "SELECT COUNT ( *) n,COALESCE ( SUM ( hours ) ,0) total,COALESCE ( SUM ( CASE WHEN status='done' THEN hours ELSE 0 END ) ,0) done FROM v9_plan_lessons WHERE plan_id=?", ( pid, ) )
+        remaining=max ( float ( p['planned_hours'] or stat['total'] or 0 ) -float ( stat['done'] or 0 ) ,0)
+        text= ( f"📘 {p['title']}\n🏫 {p['class_name']} • 📚 {p['subject']}\n🗓 {p['quarter']}\n"
+              f"⏱ Haftasiga: {p['weekly_hours']:g} soat | Reja: {p['planned_hours']:g} soat\n"
+              f"📖 Darslar: {stat['n']} | ✅ O‘tilgan: {float ( stat['done'] ) :g} soat | ⏳ Qolgan: {remaining:g} soat")
+        kb=InlineKeyboardMarkup ( [[InlineKeyboardButton ( "➕ Dars qo‘shish",callback_data=f"v9:plan:addlesson:{pid}" ) ],[InlineKeyboardButton ( "📋 Darslar ro‘yxati",callback_data=f"v9:plan:lessons:{pid}" ) ],[InlineKeyboardButton ( "⬅️ Rejalar",callback_data="v9:plan:list" ) ]])
+        return await q.edit_message_text ( text,reply_markup=kb)
+
+    if d.startswith ( "v9:plan:addlesson:" ) :
+        pid=int ( d.rsplit ( ":",1 ) [1] ) ; p=one ( "SELECT id FROM v9_teacher_plans WHERE id=? AND teacher_id=? AND is_active=1", ( pid,u.id ) )
+        if not p:return await q.answer ( "Ruxsat yo‘q.",show_alert=True)
+        nxt=one ( "SELECT COALESCE ( MAX ( lesson_no ) ,0 ) +1 n FROM v9_plan_lessons WHERE plan_id=?", ( pid, )  ) ["n"]
+        STATE[u.id]={"mode":"v9_plan_lesson_topic","plan_id":pid,"lesson_no":int ( nxt ) }
+        return await q.edit_message_text ( f"➕ {nxt}-DARS — 1/5\n\nMavzu nomini yozing.")
+
+    if d.startswith ( "v9:plan:lessons:" ) :
+        pid=int ( d.rsplit ( ":",1 ) [1] ) ; p=one ( "SELECT * FROM v9_teacher_plans WHERE id=? AND teacher_id=?", ( pid,u.id ) )
+        if not p:return await q.answer ( "Ruxsat yo‘q.",show_alert=True)
+        rows=all_ ( "SELECT * FROM v9_plan_lessons WHERE plan_id=? ORDER BY lesson_no,id", ( pid, ) )
+        if not rows:return await q.edit_message_text ( "📋 Hali dars kiritilmagan.",reply_markup=InlineKeyboardMarkup ( [[InlineKeyboardButton ( "➕ Dars qo‘shish",callback_data=f"v9:plan:addlesson:{pid}" ) ],[InlineKeyboardButton ( "⬅️ Reja",callback_data=f"v9:plan:view:{pid}" ) ]] ) )
+        kb=[]
+        for r in rows[:50]:
+            icon="✅" if r['status']=="done" else "▫️"
+            kb.append ( [InlineKeyboardButton ( f"{icon} {r['lesson_no']}-dars • {r['topic'][:38]}",callback_data=f"v9:plan:lesson:{r['id']}" ) ])
+        kb.append ( [InlineKeyboardButton ( "⬅️ Reja",callback_data=f"v9:plan:view:{pid}" ) ])
+        return await q.edit_message_text ( f"📋 {p['class_name']} • {p['subject']} — DARSLAR",reply_markup=InlineKeyboardMarkup ( kb ) )
+
+    if d.startswith ( "v9:plan:lesson:" ) :
+        lid=int ( d.rsplit ( ":",1 ) [1] ) ; r=one ( """SELECT l.*,p.teacher_id,p.class_name,p.subject FROM v9_plan_lessons l JOIN v9_teacher_plans p ON p.id=l.plan_id WHERE l.id=? AND p.teacher_id=?""", ( lid,u.id ) )
+        if not r:return await q.answer ( "Ruxsat yo‘q.",show_alert=True)
+        text= ( f"📖 {r['lesson_no']}-DARS — {r['topic']}\n\n🎨 Ko‘rgazmali qurollar: {r['visual_aids'] or '—'}\n"
+              f"📚 Darslik/mashqlar: {r['textbook_tasks'] or '—'}\n⏱ Soat: {r['hours']:g}\n📅 Taqvimiy muddat: {r['calendar_date'] or '—'}\n"
+              f"Holat: {'✅ O‘tildi' if r['status']=='done' else '▫️ Rejada'}")
+        action="↩️ O‘tilmadi" if r['status']=="done" else "✅ O‘tildi"
+        return await q.edit_message_text ( text,reply_markup=InlineKeyboardMarkup ( [[InlineKeyboardButton ( action,callback_data=f"v9:plan:toggle:{lid}" ) ],[InlineKeyboardButton ( "⬅️ Darslar",callback_data=f"v9:plan:lessons:{r['plan_id']}" ) ]] ) )
+
+    if d.startswith ( "v9:plan:toggle:" ) :
+        lid=int ( d.rsplit ( ":",1 ) [1] ) ; r=one ( """SELECT l.id,l.plan_id,l.status FROM v9_plan_lessons l JOIN v9_teacher_plans p ON p.id=l.plan_id WHERE l.id=? AND p.teacher_id=?""", ( lid,u.id ) )
+        if not r:return await q.answer ( "Ruxsat yo‘q.",show_alert=True)
+        new="planned" if r['status']=="done" else "done";execute ( "UPDATE v9_plan_lessons SET status=? WHERE id=?", ( new,lid ) )
+        await q.answer ( "Holat yangilandi.")
+        # shu dars kartasini qayta ochish
+        r2=one ( """SELECT l.*,p.teacher_id,p.class_name,p.subject FROM v9_plan_lessons l JOIN v9_teacher_plans p ON p.id=l.plan_id WHERE l.id=?""", ( lid, ) )
+        text= ( f"📖 {r2['lesson_no']}-DARS — {r2['topic']}\n\n🎨 Ko‘rgazmali qurollar: {r2['visual_aids'] or '—'}\n📚 Darslik/mashqlar: {r2['textbook_tasks'] or '—'}\n⏱ Soat: {r2['hours']:g}\n📅 Taqvimiy muddat: {r2['calendar_date'] or '—'}\nHolat: {'✅ O‘tildi' if new=='done' else '▫️ Rejada'}")
+        action="↩️ O‘tilmadi" if new=="done" else "✅ O‘tildi"
+        return await q.edit_message_text ( text,reply_markup=InlineKeyboardMarkup ( [[InlineKeyboardButton ( action,callback_data=f"v9:plan:toggle:{lid}" ) ],[InlineKeyboardButton ( "⬅️ Darslar",callback_data=f"v9:plan:lessons:{r2['plan_id']}" ) ]] ) )
+
     if d=="v9:teacher:journal":
         rows=all_ ( "SELECT id,title FROM v9_groups WHERE teacher_id=? AND is_active=1 ORDER BY id DESC", ( u.id, ) )
         if not rows:return await q.edit_message_text ( "📊 Hali guruh yo‘q.",reply_markup=v9_teacher_markup (  ) )
@@ -775,6 +864,60 @@ async def v9_private_input ( update,ctx ) :
                      WHERE m.user_id=? AND m.is_active=1 AND l.status='published' ORDER BY l.id DESC LIMIT 20""", ( u.id, ) )
         kb=[[InlineKeyboardButton ( "🤖 "+r["title"][:45],callback_data=f"v9:learn:{r['id']}" ) ] for r in rows]
         return await msg.reply_text ( "🤖 Qaysi dars bo‘yicha AI Ustoz kerak?",reply_markup=InlineKeyboardMarkup ( kb) if kb else v9_student_keyboard (  ) )
+
+    # V9 o‘qituvchi ish rejasi — qo‘lda kiritish
+    if mode=="v9_plan_class":
+        if not txt:return await msg.reply_text ( "Sinf/kursni yozing.")
+        st.update ( class_name=txt[:80],mode="v9_plan_subject" ) ;STATE[u.id]=st
+        return await msg.reply_text ( "2/6 — Fan nomini yozing. Masalan: Alifbe")
+    if mode=="v9_plan_subject":
+        if not txt:return await msg.reply_text ( "Fan nomini yozing.")
+        st.update ( subject=txt[:100],mode="v9_plan_quarter" ) ;STATE[u.id]=st
+        return await msg.reply_text ( "3/6 — Davrni yozing. Masalan: I chorak")
+    if mode=="v9_plan_quarter":
+        if not txt:return await msg.reply_text ( "Chorak/semestrni yozing.")
+        st.update ( quarter=txt[:80],mode="v9_plan_weekly" ) ;STATE[u.id]=st
+        return await msg.reply_text ( "4/6 — Haftasiga necha soat? Masalan: 4")
+    if mode=="v9_plan_weekly":
+        try: val=float ( txt.replace ( ",","." ) )
+        except:return await msg.reply_text ( "Faqat soat sonini yozing. Masalan: 4")
+        if val<=0 or val>100:return await msg.reply_text ( "Soat 0 dan katta bo‘lsin.")
+        st.update ( weekly_hours=val,mode="v9_plan_total" ) ;STATE[u.id]=st
+        return await msg.reply_text ( "5/6 — Jami reja necha soat? Masalan: 36")
+    if mode=="v9_plan_total":
+        try: val=float ( txt.replace ( ",","." ) )
+        except:return await msg.reply_text ( "Jami soatni son bilan yozing. Masalan: 36")
+        if val<=0 or val>2000:return await msg.reply_text ( "Jami soat noto‘g‘ri.")
+        st.update ( planned_hours=val,mode="v9_plan_title" ) ;STATE[u.id]=st
+        return await msg.reply_text ( "6/6 — Rejaga nom bering.\nMasalan: 1-sinf Alifbe I chorak ish rejasi")
+    if mode=="v9_plan_title":
+        if not txt:return await msg.reply_text ( "Reja nomini yozing.")
+        with db ( ) as c:
+            pid=c.execute ( "INSERT INTO v9_teacher_plans ( teacher_id,title,class_name,subject,quarter,weekly_hours,planned_hours,is_active,created_at) VALUES ( ?,?,?,?,?,?,?,1,? ) ", ( u.id,txt[:160],st['class_name'],st['subject'],st['quarter'],st['weekly_hours'],st['planned_hours'],now (  )  )  ) .lastrowid
+        STATE.pop ( u.id,None)
+        return await msg.reply_text ( "✅ Ish reja yaratildi.",reply_markup=InlineKeyboardMarkup ( [[InlineKeyboardButton ( "📘 Rejani ochish",callback_data=f"v9:plan:view:{pid}" ) ]] ) )
+
+    if mode=="v9_plan_lesson_topic":
+        if not txt:return await msg.reply_text ( "Mavzu nomini yozing.")
+        st.update ( topic=txt[:300],mode="v9_plan_lesson_visual" ) ;STATE[u.id]=st
+        return await msg.reply_text ( "2/5 — Ko‘rgazmali qurollarni yozing. Yo‘q bo‘lsa — yozing.")
+    if mode=="v9_plan_lesson_visual":
+        st.update ( visual_aids="" if txt in {"-","—"} else txt[:500],mode="v9_plan_lesson_tasks" ) ;STATE[u.id]=st
+        return await msg.reply_text ( "3/5 — Darslik betlari va mashqlarni yozing. Masalan: Darslik 2–3-bet, Mashq 1–2")
+    if mode=="v9_plan_lesson_tasks":
+        st.update ( textbook_tasks="" if txt in {"-","—"} else txt[:500],mode="v9_plan_lesson_hours" ) ;STATE[u.id]=st
+        return await msg.reply_text ( "4/5 — Bu dars necha soat? Masalan: 1")
+    if mode=="v9_plan_lesson_hours":
+        try: val=float ( txt.replace ( ",","." ) )
+        except:return await msg.reply_text ( "Soatni son bilan yozing. Masalan: 1")
+        if val<=0 or val>24:return await msg.reply_text ( "Soat noto‘g‘ri.")
+        st.update ( hours=val,mode="v9_plan_lesson_date" ) ;STATE[u.id]=st
+        return await msg.reply_text ( "5/5 — Taqvimiy muddat/sanani yozing. Masalan: 15.10.2026. Hozircha belgilanmagan bo‘lsa — yozing.")
+    if mode=="v9_plan_lesson_date":
+        date="" if txt in {"-","—"} else txt[:80]
+        with db ( ) as c:c.execute ( "INSERT INTO v9_plan_lessons ( plan_id,lesson_no,topic,visual_aids,textbook_tasks,hours,calendar_date,status,created_at) VALUES ( ?,?,?,?,?,?,?,'planned',? ) ", ( st['plan_id'],st['lesson_no'],st['topic'],st.get ( 'visual_aids','' ) ,st.get ( 'textbook_tasks','' ) ,st['hours'],date,now (  )  ) )
+        pid=st['plan_id'];STATE.pop ( u.id,None)
+        return await msg.reply_text ( f"✅ {st['lesson_no']}-dars ish rejaga qo‘shildi.",reply_markup=InlineKeyboardMarkup ( [[InlineKeyboardButton ( "📋 Darslar",callback_data=f"v9:plan:lessons:{pid}" ) ],[InlineKeyboardButton ( "➕ Yana dars",callback_data=f"v9:plan:addlesson:{pid}" ) ]] ) )
 
     # Yangi dars: nom -> material -> AI rejimi
     if mode=="v9_lesson_title":
