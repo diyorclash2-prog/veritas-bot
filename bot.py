@@ -1102,6 +1102,9 @@ def main_menu_markup ( uid ) :
       [InlineKeyboardButton ( "🌐 Til / Язык / Language",callback_data="lang:menu" ) ],
       [InlineKeyboardButton ( "ℹ️ Veritas haqida",callback_data="about" ) ],
     ]
+    # AI Yangilik: faqat 2 ta haqiqiy Super Ega asosiy menyusida ko‘rinadi.
+    if uid in SUPER_OWNERS:
+        kb.append ( [InlineKeyboardButton ( "📢 Xabar jo‘natish", callback_data="news:menu" ) ])
     if is_super ( uid ):
         kb.append ( [InlineKeyboardButton ( "👑 Super Ega",callback_data="super" ) ])
     return InlineKeyboardMarkup ( kb)
