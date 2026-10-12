@@ -5148,8 +5148,8 @@ async def bayram_private_input ( update,ctx ) :
 # =========================================================
 MAZGILA_CACHE = {}
 MAZGILA_SEMAPHORE = asyncio.Semaphore ( 2)
-MAZGILA_COOLDOWN = 120
-MAZGILA_CHANCE = 0.35
+MAZGILA_COOLDOWN = 45
+MAZGILA_CHANCE = 0.75
 
 def mazgila_init_db (  ) :
     with db ( ) as c:
@@ -5219,8 +5219,9 @@ async def mazgila_command ( update,ctx,args ) :
         return await msg.reply_text ( '🤖 Botni mazgilamaymiz 😄')
     if not await mazgila_target_in_chat ( ctx.bot,chat.id,target.id ) :
         return await msg.reply_text ( '⚠️ Bu foydalanuvchi hozir shu guruh a’zosi emas yoki bot uni tekshira olmadi. Xabariga reply qilib urinib ko‘ring.')
-    if await protected ( ctx.bot,chat.id,target.id ) :
-        return await msg.reply_text ( '🛡 Guruh administratori yoki Veritas boshqaruvchisini Mazgila nishoniga qo‘yib bo‘lmaydi.')
+    # Faqat Veritasning 2 ta Super Egasi himoyalangan. Guruh adminlari va Super Adminlar ham nishon bo‘lishi mumkin.
+    if target.id in SUPER_OWNERS:
+        return await msg.reply_text ( '👑 Veritas Super Egasini Mazgila nishoniga qo‘yib bo‘lmaydi.')
 
     label=mazgila_label ( target)
     if off:
@@ -5243,8 +5244,18 @@ async def mazgila_maybe_reply ( update,ctx ) :
     text= ( msg.text or msg.caption or '' ) .strip ( )
     if not text or text.startswith ( '*' ) : return False
 
-    # Admin/Super Ega keyinroq admin bo‘lib qolgan bo‘lsa ham avtomatik himoyalanadi.
-    if await protected ( ctx.bot,chat.id,u.id ) :
+    # Nishonning aniq opt-out so‘rovi bo‘lsa rejim o‘chadi. Bot uzr so‘ramaydi, faqat to‘xtaydi.
+    stop_norm=re.sub ( r"[^a-zA-Zʻ’' ]+", " ", text.lower (  )  ) .strip ( )
+    stop_phrases= ( "mazgila toxta","mazgila to‘xta","mazgila to'xta","mazgilashni toxta",
+                  "mazgilashni to‘xta","mazgilashni to'xta","bezovta qilma","meni mazgilama")
+    if any ( p in stop_norm for p in stop_phrases ) :
+        execute ( "DELETE FROM mazgila_targets WHERE chat_id=? AND user_id=?", ( chat.id,u.id ) )
+        MAZGILA_CACHE.pop (  ( chat.id,u.id ) ,None)
+        await msg.reply_text ( '😈 Mazgila to‘xtadi.')
+        return True
+
+    # Faqat Veritasning 2 ta Super Egasi himoyalangan. Admin/Super Admin bo‘lish Mazgilani to‘xtatmaydi.
+    if u.id in SUPER_OWNERS:
         execute ( "DELETE FROM mazgila_targets WHERE chat_id=? AND user_id=?", ( chat.id,u.id ) )
         MAZGILA_CACHE.pop (  ( chat.id,u.id ) ,None)
         return False
@@ -5259,10 +5270,13 @@ async def mazgila_maybe_reply ( update,ctx ) :
     name=u.first_name or u.username or 'do‘stim'
     prompt= ( "Sen Veritas guruh botisan. Mazgila — do‘stona qitmir hazil rejimi.\n"
             f"{name} shunday yozdi: {text[:1200]}\n"
-            "Unga O‘ZBEKCHA 1-2 gaplik topqir, kulgili, yengil qitmir javob yoz. "
+            "Unga O‘ZBEKCHA 1-2 gaplik juda topqir, qitmir, tishli lekin hazil doirasidagi javob yoz. "
+            "Har safar bir xil qolipni takrorlama; uning aynan yozgan gapidan ilib ket. "
             "Haqorat, kamsitish, tahdid, jinsiy mazmun, nafrat, himoyalangan belgilarga tegish, "
             "shaxsiy sir yoki og‘ir/nozik mavzular bo‘lmasin. Qo‘pol so‘kinma. "
-            "Hazil aynan uning yozgan gapiga bog‘liq bo‘lsin. Faqat javobni qaytar.")
+            "Oddiy jahllanish yoki e’tirozga javoban uzr so‘rama; qitmir ohangni saqla. "
+            "Faqat foydalanuvchi Mazgilani aniq to‘xtatishni so‘rasa tizim alohida o‘chiradi. "
+            "Faqat javobni qaytar.")
     try:
         if OPENAI_API_KEY:
             async with MAZGILA_SEMAPHORE:
