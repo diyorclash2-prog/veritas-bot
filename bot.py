@@ -35,13 +35,13 @@ from telegram.constants import ChatMemberStatus
 from telegram.error import TelegramError
 from telegram.ext import (
     Application, ContextTypes, CommandHandler, MessageHandler, CallbackQueryHandler,
-    PreCheckoutQueryHandler, filters
+    PreCheckoutQueryHandler, ExtBot, filters
 )
 
 TOKEN = os.getenv ( "BOT_TOKEN", "" ) .strip ( )
 DB_PATH = os.getenv ( "DB_PATH", "veritas_v7.sqlite3")
 SUPER_OWNERS = {int ( x) for x in os.getenv ( "SUPER_OWNER_IDS","" ) .split ( ",") if x.strip (  ) .isdigit (  ) }
-VERSION = "8.0"
+VERSION = "9.1"
 OPENAI_API_KEY = os.getenv ( "OPENAI_API_KEY", "" ) .strip ( )
 OPENAI_MODEL = os.getenv ( "OPENAI_MODEL", "gpt-5.6-luna" ) .strip ( ) or "gpt-5.6-luna"
 REBUS_IMAGE_MODEL = os.getenv ( "REBUS_IMAGE_MODEL", "gpt-image-2" ) .strip ( ) or "gpt-image-2"
@@ -999,6 +999,190 @@ async def v9_private_input ( update,ctx ) :
 # =========================================================
 
 # =========================================================
+# VERITAS V9.1 — UNIVERSAL 3-LANGUAGE ENGINE
+# All outgoing bot text/UI is localized automatically.
+# Uzbek is source/default; Russian/English are translated and cached.
+# =========================================================
+I18N_LANGS={"uz":"O‘zbekcha","ru":"Русский","en":"English"}
+
+def i18n_init_db (  ) :
+    with db ( ) as c:
+        c.executescript ( """
+        CREATE TABLE IF NOT EXISTS i18n_cache(
+            lang TEXT NOT NULL,
+            source TEXT NOT NULL,
+            translated TEXT NOT NULL,
+            PRIMARY KEY ( lang,source)
+        );
+        CREATE TABLE IF NOT EXISTS group_languages(
+            chat_id INTEGER PRIMARY KEY,
+            lang TEXT NOT NULL DEFAULT 'uz',
+            updated_by INTEGER DEFAULT 0,
+            updated_at INTEGER DEFAULT 0
+        );
+        """)
+
+def chat_lang ( chat_id ) :
+    try:
+        cid=int ( chat_id)
+    except Exception:
+        return "uz"
+    # Telegram private chat id equals user id.
+    if cid > 0:
+        try:
+            r=one ( "SELECT lang FROM users WHERE user_id=?", ( cid, ) )
+            x= ( r["lang"] if r else "uz") or "uz"
+            return x if x in I18N_LANGS else "uz"
+        except Exception:
+            return "uz"
+    try:
+        r=one ( "SELECT lang FROM group_languages WHERE chat_id=?", ( cid, ) )
+        x= ( r["lang"] if r else "uz") or "uz"
+        return x if x in I18N_LANGS else "uz"
+    except Exception:
+        return "uz"
+
+def set_group_lang ( chat_id,lang,uid=0 ) :
+    if lang not in I18N_LANGS:return
+    with db ( ) as c:
+        c.execute ( """INSERT INTO group_languages ( chat_id,lang,updated_by,updated_at)
+                     VALUES ( ?,?,?,?)
+                     ON CONFLICT ( chat_id) DO UPDATE SET
+                     lang=excluded.lang,updated_by=excluded.updated_by,updated_at=excluded.updated_at""",
+                  (int ( chat_id ) ,lang,int ( uid or 0 ) ,now (  )  ) )
+
+def _i18n_translate_sync ( text,lang ) :
+    text=str ( text or "")
+    if not text or lang=="uz": return text
+    try:
+        r=one ( "SELECT translated FROM i18n_cache WHERE lang=? AND source=?", ( lang,text ) )
+        if r:return r["translated"]
+    except Exception:pass
+    if not OPENAI_API_KEY:
+        # Never break the bot if AI key is temporarily unavailable.
+        return text
+    target="Russian" if lang=="ru" else "English"
+    prompt=f"""Translate the following Telegram bot interface/message from Uzbek into natural {target}.
+STRICT RULES:
+- Return ONLY the translated text.
+- Preserve meaning exactly; do not add facts or commentary.
+- Preserve all URLs, @usernames, Telegram commands, IDs, numbers, emojis, Markdown/HTML tags and placeholders.
+- Do not translate proper product names: Veritas, Vasatiya, Telegram, AI.
+- Keep line breaks and compact UI style.
+TEXT:
+{text}"""
+    try:
+        out=_openai_response_sync ( prompt ) .strip ( )
+        if not out:return text
+        try:
+            with db ( ) as c:
+                c.execute ( "INSERT OR REPLACE INTO i18n_cache ( lang,source,translated) VALUES ( ?,?,? ) ", ( lang,text,out ) )
+        except Exception:pass
+        return out
+    except Exception:
+        log.exception ( "i18n translation failed")
+        return text
+
+async def i18n_text ( text,lang ) :
+    if not text or lang=="uz":return text
+    return await asyncio.to_thread ( _i18n_translate_sync,text,lang)
+
+async def i18n_markup ( markup,lang,bot ) :
+    if not markup or lang=="uz":return markup
+    try:
+        data=markup.to_dict ( )
+        if "inline_keyboard" in data:
+            for row in data["inline_keyboard"]:
+                for b in row:
+                    if b.get ( "text" ) :b["text"]=await i18n_text ( b["text"],lang)
+            return InlineKeyboardMarkup.de_json ( data,bot)
+        if "keyboard" in data:
+            for row in data["keyboard"]:
+                for b in row:
+                    if isinstance ( b,dict) and b.get ( "text" ) :b["text"]=await i18n_text ( b["text"],lang)
+            return ReplyKeyboardMarkup.de_json ( data,bot)
+    except Exception:
+        log.exception ( "i18n markup failed")
+    return markup
+
+class VeritasI18nBot ( ExtBot ) :
+    async def send_message ( self,chat_id,text,*args,**kwargs ) :
+        lang=chat_lang ( chat_id)
+        text=await i18n_text ( text,lang)
+        if kwargs.get ( "reply_markup" ) :
+            kwargs["reply_markup"]=await i18n_markup ( kwargs["reply_markup"],lang,self)
+        return await super (  ) .send_message ( chat_id,text,*args,**kwargs)
+
+    async def edit_message_text ( self,text,*args,**kwargs ) :
+        chat_id=kwargs.get ( "chat_id")
+        lang=chat_lang ( chat_id) if chat_id is not None else "uz"
+        text=await i18n_text ( text,lang)
+        if kwargs.get ( "reply_markup" ) :
+            kwargs["reply_markup"]=await i18n_markup ( kwargs["reply_markup"],lang,self)
+        return await super (  ) .edit_message_text ( text,*args,**kwargs)
+
+    async def send_photo ( self,chat_id,photo,*args,**kwargs ) :
+        lang=chat_lang ( chat_id)
+        if kwargs.get ( "caption" ) :kwargs["caption"]=await i18n_text ( kwargs["caption"],lang)
+        if kwargs.get ( "reply_markup" ) :kwargs["reply_markup"]=await i18n_markup ( kwargs["reply_markup"],lang,self)
+        return await super (  ) .send_photo ( chat_id,photo,*args,**kwargs)
+
+    async def send_video ( self,chat_id,video,*args,**kwargs ) :
+        lang=chat_lang ( chat_id)
+        if kwargs.get ( "caption" ) :kwargs["caption"]=await i18n_text ( kwargs["caption"],lang)
+        if kwargs.get ( "reply_markup" ) :kwargs["reply_markup"]=await i18n_markup ( kwargs["reply_markup"],lang,self)
+        return await super (  ) .send_video ( chat_id,video,*args,**kwargs)
+
+    async def send_document ( self,chat_id,document,*args,**kwargs ) :
+        lang=chat_lang ( chat_id)
+        if kwargs.get ( "caption" ) :kwargs["caption"]=await i18n_text ( kwargs["caption"],lang)
+        if kwargs.get ( "reply_markup" ) :kwargs["reply_markup"]=await i18n_markup ( kwargs["reply_markup"],lang,self)
+        return await super (  ) .send_document ( chat_id,document,*args,**kwargs)
+
+    async def edit_message_caption ( self,*args,**kwargs ) :
+        chat_id=kwargs.get ( "chat_id")
+        lang=chat_lang ( chat_id) if chat_id is not None else "uz"
+        if kwargs.get ( "caption" ) :kwargs["caption"]=await i18n_text ( kwargs["caption"],lang)
+        if kwargs.get ( "reply_markup" ) :kwargs["reply_markup"]=await i18n_markup ( kwargs["reply_markup"],lang,self)
+        return await super (  ) .edit_message_caption ( *args,**kwargs)
+
+def group_lang_markup ( chat_id ) :
+    return InlineKeyboardMarkup ( [
+        [InlineKeyboardButton ( "🇺🇿 O‘zbekcha",callback_data=f"glang:{chat_id}:uz" ) ,
+         InlineKeyboardButton ( "🇷🇺 Русский",callback_data=f"glang:{chat_id}:ru" ) ],
+        [InlineKeyboardButton ( "🇬🇧 English",callback_data=f"glang:{chat_id}:en" ) ]
+    ])
+
+async def group_lang_command ( update,ctx ) :
+    msg=update.effective_message;u=update.effective_user;chat=update.effective_chat
+    if not msg or not u or not chat or chat.type=="private":return
+    try:
+        cm=await ctx.bot.get_chat_member ( chat.id,u.id)
+        allowed= ( cm.status in (ChatMemberStatus.ADMINISTRATOR,ChatMemberStatus.OWNER ) ) or u.id in SUPER_OWNERS
+    except Exception:
+        allowed=u.id in SUPER_OWNERS
+    if not allowed:
+        return await msg.reply_text ( "⚠️ Guruh tilini faqat administrator o‘zgartira oladi.")
+    return await msg.reply_text ( "🌐 Guruh tilini tanlang:",reply_markup=group_lang_markup ( chat.id ) )
+
+async def group_lang_callback ( update,ctx ) :
+    q=update.callback_query;d=q.data or "";u=q.from_user
+    m=re.fullmatch ( r"glang: ( -?\d+ ) : ( uz|ru|en ) ",d)
+    if not m:return
+    chat_id=int ( m.group ( 1 )  ) ;lang=m.group ( 2)
+    try:
+        cm=await ctx.bot.get_chat_member ( chat_id,u.id)
+        allowed= ( cm.status in (ChatMemberStatus.ADMINISTRATOR,ChatMemberStatus.OWNER ) ) or u.id in SUPER_OWNERS
+    except Exception:
+        allowed=u.id in SUPER_OWNERS
+    if not allowed:return await q.answer ( "Faqat guruh administratori.",show_alert=True)
+    set_group_lang ( chat_id,lang,u.id)
+    await q.answer ( "✅")
+    text={"uz":"✅ Guruh tili: O‘zbekcha","ru":"✅ Язык группы: Русский","en":"✅ Group language: English"}[lang]
+    try:await q.edit_message_text ( text)
+    except TelegramError:pass
+
+# =========================================================
 # V9.1 — 3 TIL + AI YANGILIK MARKAZI
 # =========================================================
 LANG_NAMES={"uz":"🇺🇿 O‘zbekcha","ru":"🇷🇺 Русский","en":"🇬🇧 English"}
@@ -1063,30 +1247,36 @@ async def ai_news_private_input ( update,ctx ) :
     except Exception as e:log.exception ( "AI news prepare: %s",e ) ;return await wait.edit_text ( "⚠️ AI yangilikni tayyorlay olmadi. OPENAI_API_KEY va logni tekshiring.")
     with db ( ) as c:nid=c.execute ( "INSERT INTO ai_news_posts ( creator_id,source_text,uz_text,ru_text,en_text,media_type,media_file_id,status,created_at) VALUES ( ?,?,?,?,?,?,?,'draft',? ) ", ( u.id,source,data['uz'],data['ru'],data['en'],media_type,file_id,now (  )  )  ) .lastrowid
     STATE.pop ( u.id,None ) ; await wait.edit_text ( f"📢 YANGILIK #{nid} — PREVIEW\n\n{data['uz'][:3300]}",reply_markup=ai_news_preview_markup ( nid ) )
+async def _news_edit ( q,text,reply_markup=None ) :
+    try:
+        return await q.edit_message_text ( text=text,reply_markup=reply_markup)
+    except TelegramError:
+        return await q.message.reply_text ( text,reply_markup=reply_markup)
+
 async def ai_news_callback ( update,ctx ) :
     q=update.callback_query;u=q.from_user;d=q.data or ''
     if u.id not in SUPER_OWNERS:return await q.answer ( "Faqat Super Ega uchun.",show_alert=True)
-    if d=='news:menu':await q.answer (  ) ;return await q.edit_message_text ( "📢 AI YANGILIK MARKAZI",reply_markup=ai_news_super_markup (  ) )
-    if d=='news:new':await q.answer (  ) ;STATE[u.id]={'mode':'ai_news_input'};return await q.edit_message_text ( "📢 Yangilik matnini yuboring.\n\nMatn, rasm+caption, video+caption yoki hujjat+caption mumkin. AI imloni tuzatib, bezab, 🇺🇿 🇷🇺 🇬🇧 variant yaratadi.")
+    if d=='news:menu':await q.answer (  ) ;return await _news_edit ( q,"📢 AI YANGILIK MARKAZI",reply_markup=ai_news_super_markup (  ) )
+    if d=='news:new':await q.answer (  ) ;STATE[u.id]={'mode':'ai_news_input'};return await _news_edit ( q,"📢 Yangilik matnini yuboring.\n\nMatn, rasm+caption, video+caption yoki hujjat+caption mumkin. AI imloni tuzatib, bezab, 🇺🇿 🇷🇺 🇬🇧 variant yaratadi.")
     if d=='news:list':
-        await q.answer (  ) ;rows=all_ ( "SELECT id,status,sent_ok,sent_fail FROM ai_news_posts ORDER BY id DESC LIMIT 15" ) ;body='\n'.join ( f"#{r['id']} · {r['status']} · ✅{r['sent_ok']} ❌{r['sent_fail']}" for r in rows) or 'Hali yangilik yo‘q.';return await q.edit_message_text ( "📰 OXIRGI YANGILIKLAR\n\n"+body,reply_markup=ai_news_super_markup (  ) )
+        await q.answer (  ) ;rows=all_ ( "SELECT id,status,sent_ok,sent_fail FROM ai_news_posts ORDER BY id DESC LIMIT 15" ) ;body='\n'.join ( f"#{r['id']} · {r['status']} · ✅{r['sent_ok']} ❌{r['sent_fail']}" for r in rows) or 'Hali yangilik yo‘q.';return await _news_edit ( q,"📰 OXIRGI YANGILIKLAR\n\n"+body,reply_markup=ai_news_super_markup (  ) )
     m=re.match ( r'news:preview: ( \d+ ) : ( uz|ru|en ) $',d)
     if m:
-        await q.answer (  ) ;nid=int ( m.group ( 1 )  ) ;lang=m.group ( 2 ) ;r=one ( "SELECT * FROM ai_news_posts WHERE id=?", ( nid, )  ) ;return await q.edit_message_text ( f"{LANG_NAMES[lang]} · #{nid}\n\n{r[lang+'_text'][:3300]}",reply_markup=ai_news_preview_markup ( nid ) ) if r else None
+        await q.answer (  ) ;nid=int ( m.group ( 1 )  ) ;lang=m.group ( 2 ) ;r=one ( "SELECT * FROM ai_news_posts WHERE id=?", ( nid, )  ) ;return await _news_edit ( q,f"{LANG_NAMES[lang]} · #{nid}\n\n{r[lang+'_text'][:3300]}",reply_markup=ai_news_preview_markup ( nid ) ) if r else None
     m=re.match ( r'news: ( redo|edit|cancel|send ) : ( \d+ ) $',d)
     if not m:return
     action,n=m.group ( 1 ) ,int ( m.group ( 2 )  ) ;r=one ( "SELECT * FROM ai_news_posts WHERE id=?", ( n, ) )
     if not r:return await q.answer ( "Topilmadi",show_alert=True)
-    if action=='cancel':await q.answer (  ) ;execute ( "UPDATE ai_news_posts SET status='cancelled' WHERE id=?", ( n, )  ) ;return await q.edit_message_text ( "❌ Yangilik bekor qilindi.")
-    if action=='edit':await q.answer (  ) ;STATE[u.id]={'mode':'ai_news_input'};return await q.edit_message_text ( "✏️ Yangilikning yangi matnini yuboring.")
+    if action=='cancel':await q.answer (  ) ;execute ( "UPDATE ai_news_posts SET status='cancelled' WHERE id=?", ( n, )  ) ;return await _news_edit ( q,"❌ Yangilik bekor qilindi.")
+    if action=='edit':await q.answer (  ) ;STATE[u.id]={'mode':'ai_news_input'};return await _news_edit ( q,"✏️ Yangilikning yangi matnini yuboring.")
     if action=='redo':
-        await q.answer (  ) ;await q.edit_message_text ( "🤖 AI qayta bezamoqda...")
+        await q.answer (  ) ;await _news_edit ( q,"🤖 AI qayta bezamoqda...")
         try:data=await ai_news_prepare ( r['source_text'])
-        except Exception:return await q.edit_message_text ( "⚠️ AI qayta tayyorlay olmadi.",reply_markup=ai_news_preview_markup ( n ) )
-        execute ( "UPDATE ai_news_posts SET uz_text=?,ru_text=?,en_text=? WHERE id=?", ( data['uz'],data['ru'],data['en'],n )  ) ;return await q.edit_message_text ( f"📢 YANGILIK #{n} — YANGI PREVIEW\n\n{data['uz'][:3300]}",reply_markup=ai_news_preview_markup ( n ) )
+        except Exception:return await _news_edit ( q,"⚠️ AI qayta tayyorlay olmadi.",reply_markup=ai_news_preview_markup ( n ) )
+        execute ( "UPDATE ai_news_posts SET uz_text=?,ru_text=?,en_text=? WHERE id=?", ( data['uz'],data['ru'],data['en'],n )  ) ;return await _news_edit ( q,f"📢 YANGILIK #{n} — YANGI PREVIEW\n\n{data['uz'][:3300]}",reply_markup=ai_news_preview_markup ( n ) )
     if action=='send':
         if r['status']!='draft':return await q.answer ( "Bu yangilik allaqachon yuborilgan/bekor qilingan.",show_alert=True)
-        execute ( "UPDATE ai_news_posts SET status='sending' WHERE id=? AND status='draft'", ( n, )  ) ;await q.answer (  ) ;await q.edit_message_text ( "📤 Tarqatish boshlandi..." ) ;ok,fail=await ai_news_broadcast ( ctx,n ) ;return await q.edit_message_text ( f"✅ YANGILIK TARQATILDI\n\n📨 Yetkazildi: {ok}\n❌ Yetkazilmadi: {fail}\n🌐 Har bir a’zoga tanlagan tilida yuborildi.")
+        execute ( "UPDATE ai_news_posts SET status='sending' WHERE id=? AND status='draft'", ( n, )  ) ;await q.answer (  ) ;await _news_edit ( q,"📤 Tarqatish boshlandi..." ) ;ok,fail=await ai_news_broadcast ( ctx,n ) ;return await _news_edit ( q,f"✅ YANGILIK TARQATILDI\n\n📨 Yetkazildi: {ok}\n❌ Yetkazilmadi: {fail}\n🌐 Har bir a’zoga tanlagan tilida yuborildi.")
 
 def main_menu_markup ( uid ) :
     kb=[
@@ -3821,6 +4011,8 @@ async def group_ai_reply ( update,ctx ) :
     return True
 
 async def private_ai_reply ( update,ctx ) :
+    if ctx.user_data.get ( "news_consumed_message_id" ) ==getattr ( update.effective_message,"message_id",None ) :
+        return
     if ctx.user_data.get ( "bayram_consumed_message_id" ) ==getattr ( update.effective_message,"message_id",None ) :return
     if ctx.user_data.get ( "v9_consumed_message_id" ) ==getattr ( update.effective_message,"message_id",None ) :
         return
@@ -5394,6 +5586,7 @@ _bayram_old_star_router=star_text_router
 async def star_text_router ( update,ctx ) :
     msg=update.effective_message
     raw= ( msg.text or '' ) .strip ( ) if msg else ''; low=raw.lower ( )
+    if low in ('*til','*lang','*language' ) : return await group_lang_command ( update,ctx)
     if low=='*bayram': return await bayram_command ( update,ctx)
     if low=='*mazgila' or low.startswith ( '*mazgila ' ) : return await mazgila_command ( update,ctx,raw.split (  ) [1:])
     return await _bayram_old_star_router ( update,ctx)
@@ -5407,8 +5600,11 @@ async def callback ( update,ctx ) :
         q=update.callback_query;lang=data.rsplit ( ':',1 ) [1]
         if lang in LANG_NAMES:
             ensure_user ( q.from_user ) ;set_user_lang ( q.from_user.id,lang ) ;await q.answer ( '✅' ) ;return await q.edit_message_text ( {'uz':'✅ Til saqlandi.','ru':'✅ Язык сохранён.','en':'✅ Language saved.'}[lang],reply_markup=main_menu_markup ( q.from_user.id ) )
+    # news:* alohida yuqori-prioritet handlerda ishlanadi.
     if data.startswith ( 'news:' ) :
-        return await ai_news_callback ( update,ctx)
+        return
+    if data.startswith ( 'glang:' ) :
+        return
     if data.startswith ( 'chatshot:' ) :
         return await chatshot_callback ( update,ctx)
     if data.startswith ( 'bayram:' ) :
@@ -5423,14 +5619,18 @@ def main (  ) :
     bayram_init_db ( )
     mazgila_init_db ( )
     ai_news_init_db ( )
-    app=Application.builder (  ) .token ( TOKEN ) .build ( )
+    i18n_init_db ( )
+    app=Application.builder (  ) .bot ( VeritasI18nBot ( token=TOKEN )  ) .build ( )
     app.add_handler ( CommandHandler ( "start",v9_start_selector ) )
     app.add_handler ( CommandHandler ( "help",cmd_help ) )
     app.add_handler ( CommandHandler ( "id",cmd_id ) )
     app.add_handler ( CommandHandler ( "super",cmd_super ) )
     app.add_handler ( PreCheckoutQueryHandler ( precheckout ) )
     app.add_handler ( MessageHandler ( filters.SUCCESSFUL_PAYMENT,paid ) )
-    app.add_handler ( CallbackQueryHandler ( callback ) )
+    # AI Yangilik tugmalari generic callbackdan alohida ishlaydi.
+    app.add_handler ( CallbackQueryHandler ( ai_news_callback, pattern=r"^news:" ) , group=-10)
+    app.add_handler ( CallbackQueryHandler ( group_lang_callback, pattern=r"^glang:" ) , group=-10)
+    app.add_handler ( CallbackQueryHandler ( callback ) , group=0)
     app.add_handler ( MessageHandler ( filters.ChatType.PRIVATE & ~filters.COMMAND & ~filters.SUCCESSFUL_PAYMENT,ai_news_private_input ) ,group=-7)
     app.add_handler ( MessageHandler ( filters.ChatType.PRIVATE & filters.TEXT & ~filters.COMMAND,bayram_private_input ) ,group=-5)
     app.add_handler ( MessageHandler ( filters.StatusUpdate.NEW_CHAT_MEMBERS,new_members ) )
