@@ -1198,71 +1198,17 @@ def lang_markup ( back="home" ) :
 def ai_news_init_db (  ) :
     with db ( ) as c:c.executescript ( """CREATE TABLE IF NOT EXISTS ai_news_posts ( id INTEGER PRIMARY KEY AUTOINCREMENT,creator_id INTEGER NOT NULL,source_text TEXT DEFAULT '',uz_text TEXT DEFAULT '',ru_text TEXT DEFAULT '',en_text TEXT DEFAULT '',media_type TEXT DEFAULT '',media_file_id TEXT DEFAULT '',status TEXT DEFAULT 'draft',sent_ok INTEGER DEFAULT 0,sent_fail INTEGER DEFAULT 0,created_at INTEGER NOT NULL,sent_at INTEGER DEFAULT 0 ) ; CREATE INDEX IF NOT EXISTS idx_ai_news_status ON ai_news_posts ( status,id ) ;""")
 def _ai_news_prepare_sync ( source ) :
-    if not OPENAI_API_KEY:
-        raise RuntimeError ( "OPENAI_API_KEY sozlanmagan")
-
-    source= ( source or "" ) .strip ( )
-    if not source:
-        raise ValueError ( "Yangilik matni bo‘sh")
-
-    # 1. O‘zbekcha rasmiy postni tayyorlash.
-    uz_prompt=f"""Siz Veritas rasmiy Telegram yangilik muharririsiz.
-Quyidagi xabarni O‘ZBEK TILIDA tayyorlang.
-- Imlo va uslub xatolarini tuzating.
-- Ma’noni o‘zgartirmang va yangi fakt qo‘shmang.
-- Telegram uchun ixcham, chiroyli va o‘qilishi oson qiling.
-- Mos sarlavha, abzas va me’yorida emoji ishlating.
-- Faqat tayyor post matnini qaytaring. Izoh bermang.
-
-XABAR:
-{source}"""
-    uz=_openai_response_sync ( uz_prompt ) .strip ( )
-    if not uz:
-        raise ValueError ( "AI o‘zbekcha variantni qaytarmadi")
-
-    # 2. Ruscha tarjima — alohida chaqiriq.
-    ru_prompt=f"""Quyidagi Veritas Telegram postini tabiiy va ravon RUS TILIGA tarjima qiling.
-QAT’IY:
-- Faqat ruscha tayyor postni qaytaring.
-- Mazmunni o‘zgartirmang, yangi fakt qo‘shmang.
-- Veritas, Vasatiya, Telegram, AI, @username, URL va raqamlarni o‘zgartirmang.
-- Emoji va post tuzilishini saqlang.
-- O‘zbekcha gaplarni tarjimasiz qoldirmang.
-
-POST:
-{uz}"""
-    ru=_openai_response_sync ( ru_prompt ) .strip ( )
-
-    # 3. Inglizcha tarjima — alohida chaqiriq.
-    en_prompt=f"""Translate the following Veritas Telegram post into natural ENGLISH.
-STRICT:
-- Return only the finished English post.
-- Preserve the exact meaning; add no new facts.
-- Keep Veritas, Vasatiya, Telegram, AI, @usernames, URLs and numbers unchanged.
-- Preserve emojis and post structure.
-- Do not leave Uzbek sentences untranslated.
-
-POST:
-{uz}"""
-    en=_openai_response_sync ( en_prompt ) .strip ( )
-
-    if not ru or not en:
-        raise ValueError ( "AI ruscha yoki inglizcha variantni qaytarmadi")
-
-    # Oddiy tekshiruv: RU/EN aynan UZ bilan bir xil bo‘lib qolsa yuborishga ruxsat bermaymiz.
-    def norm ( x ) : return re.sub ( r"\s+"," ",x ) .strip (  ) .lower ( )
-    if norm ( ru ) ==norm ( uz ) :
-        raise ValueError ( "Ruscha tarjima o‘zbekcha bilan bir xil qaytdi")
-    if norm ( en ) ==norm ( uz ) :
-        raise ValueError ( "Inglizcha tarjima o‘zbekcha bilan bir xil qaytdi")
-
-    return {"uz":uz,"ru":ru,"en":en}
-
+    if not OPENAI_API_KEY: raise RuntimeError ( "OPENAI_API_KEY sozlanmagan")
+    prompt= ( "Siz Veritas rasmiy yangilik muharririsiz. Quyidagi xabarni ma'nosini o'zgartirmasdan imlo va uslub jihatdan tuzating, Telegram posti uchun ixcham va chiroyli bezang. So'ng tabiiy ruscha va inglizcha tarjima qiling. Hech qanday yangi fakt uydirmang. JSONdan boshqa hech narsa qaytarmang. JSON aynan: {\\\"uz\\\":\\\"...\\\",\\\"ru\\\":\\\"...\\\",\\\"en\\\":\\\"...\\\"}. Har bir variantda mos sarlavha va me'yorida emoji bo'lsin.\n\nXABAR:\n"+source)
+    raw=_openai_response_sync ( prompt ) ; m=re.search ( r'\{[\s\S]*\}',raw ) ; data=json.loads ( m.group ( 0) if m else raw)
+    out={k:str ( data.get ( k,'' )  ) .strip ( ) for k in ('uz','ru','en' ) }
+    if not all ( out.values (  )  ) : raise ValueError ( "AI uch tilni to'liq qaytarmadi")
+    return out
 async def ai_news_prepare ( source ) : return await asyncio.to_thread ( _ai_news_prepare_sync,source)
 def ai_news_super_markup (  ) :
     return InlineKeyboardMarkup ( [[InlineKeyboardButton ( "📢 AI Yangilik joylash",callback_data="news:new" ) ],[InlineKeyboardButton ( "📰 Oxirgi yangiliklar",callback_data="news:list" ) ],[InlineKeyboardButton ( "⬅️ Orqaga",callback_data="super" ) ]])
 def ai_news_preview_markup ( nid ) :
-    return InlineKeyboardMarkup ( [[InlineKeyboardButton ( "🇺🇿",callback_data=f"news:preview:{nid}:uz" ) ,InlineKeyboardButton ( "🇷🇺",callback_data=f"news:preview:{nid}:ru" ) ,InlineKeyboardButton ( "🇬🇧",callback_data=f"news:preview:{nid}:en" ) ],[InlineKeyboardButton ( "🔄 AI qayta bezasin",callback_data=f"news:redo:{nid}" ) ,InlineKeyboardButton ( "✏️ Qayta yozish",callback_data=f"news:edit:{nid}" ) ],[InlineKeyboardButton ( "✅ HAMMAGA YUBORISH",callback_data=f"news:send:{nid}" ) ],[InlineKeyboardButton ( "❌ Bekor qilish",callback_data=f"news:cancel:{nid}" ) ]])
+    return InlineKeyboardMarkup ( [[InlineKeyboardButton ( "🇺🇿",callback_data=f"news:preview:{nid}:uz" ) ,InlineKeyboardButton ( "🇷🇺",callback_data=f"news:preview:{nid}:ru" ) ,InlineKeyboardButton ( "🇬🇧",callback_data=f"news:preview:{nid}:en" ) ],[InlineKeyboardButton ( "🔄 AI qayta bezasin",callback_data=f"news:redo:{nid}" ) ,InlineKeyboardButton ( "✏️ Qayta yozish",callback_data=f"news:edit:{nid}" ) ],[InlineKeyboardButton ( "🖼 POSTER YARATISH",callback_data=f"poster:styles:{nid}" ) ],[InlineKeyboardButton ( "✅ HAMMAGA YUBORISH",callback_data=f"news:send:{nid}" ) ],[InlineKeyboardButton ( "❌ Bekor qilish",callback_data=f"news:cancel:{nid}" ) ]])
 async def _news_send_one ( bot,uid,text,media_type='',file_id='' ) :
     async with NEWS_SEND_SEMAPHORE:
         try:
@@ -1275,8 +1221,6 @@ async def _news_send_one ( bot,uid,text,media_type='',file_id='' ) :
 async def ai_news_broadcast ( ctx,nid ) :
     post=one ( "SELECT * FROM ai_news_posts WHERE id=?", ( nid, )  ) ; users=all_ ( "SELECT user_id,COALESCE ( lang,'uz') lang FROM users WHERE blocked=0 ORDER BY user_id")
     if not post:return (0,0)
-    if not all (  ( post['uz_text'] or '' ) .strip ( ) and (post['ru_text'] or '' ) .strip ( ) and (post['en_text'] or '' ) .strip ( ) for _ in [0] ) :
-        raise ValueError ( "Yangilikning 3 til varianti to‘liq emas")
     ok=fail=0
     for pos in range ( 0,len ( users ) ,20 ) :
         tasks=[]
@@ -1299,16 +1243,8 @@ async def ai_news_private_input ( update,ctx ) :
     elif msg.video:media_type='video';file_id=msg.video.file_id
     elif msg.document:media_type='document';file_id=msg.document.file_id
     wait=await msg.reply_text ( "🤖 AI imlo, bezak va 3 til tarjimasini tayyorlamoqda...")
-    try:
-        data=await ai_news_prepare ( source)
-    except Exception as e:
-        log.exception ( "AI news prepare: %s",e)
-        STATE.pop ( u.id,None)
-        return await wait.edit_text(
-            "⚠️ Yangilik tayyorlanmadi va hech kimga yuborilmadi.\n\n"
-            f"Sabab: {str ( e ) [:500]}\n\n"
-            "📢 Xabar jo‘natish orqali qayta urinib ko‘ring."
-        )
+    try:data=await ai_news_prepare ( source)
+    except Exception as e:log.exception ( "AI news prepare: %s",e ) ;return await wait.edit_text ( "⚠️ AI yangilikni tayyorlay olmadi. OPENAI_API_KEY va logni tekshiring.")
     with db ( ) as c:nid=c.execute ( "INSERT INTO ai_news_posts ( creator_id,source_text,uz_text,ru_text,en_text,media_type,media_file_id,status,created_at) VALUES ( ?,?,?,?,?,?,?,'draft',? ) ", ( u.id,source,data['uz'],data['ru'],data['en'],media_type,file_id,now (  )  )  ) .lastrowid
     STATE.pop ( u.id,None ) ; await wait.edit_text ( f"📢 YANGILIK #{nid} — PREVIEW\n\n{data['uz'][:3300]}",reply_markup=ai_news_preview_markup ( nid ) )
 async def _news_edit ( q,text,reply_markup=None ) :
@@ -1316,6 +1252,115 @@ async def _news_edit ( q,text,reply_markup=None ) :
         return await q.edit_message_text ( text=text,reply_markup=reply_markup)
     except TelegramError:
         return await q.message.reply_text ( text,reply_markup=reply_markup)
+
+# =========================================================
+# V9.1 — AI POSTER STUDIO (faqat Super Egalar)
+# =========================================================
+POSTER_STYLES = {
+    "gold": ("🖤 Qora-oltin Veritas", "luxurious black and antique gold, Veritas monogram, premium editorial design" ) ,
+    "books": ("📚 Kitobiy", "warm library, beautiful books, cozy scholarly aesthetic, elegant typography" ) ,
+    "islam": ("🕌 Islomiy", "tasteful Islamic geometric ornament, elegant arches, warm lantern light, no human figures" ) ,
+    "school": ("🎓 Ta’lim", "modern educational infographic, academic symbols, readable hierarchy, welcoming school aesthetic" ) ,
+    "auto": ("✨ AI o‘zi tanlasin", "choose a suitable professional visual style for the announcement topic" ) ,
+}
+POSTER_LOCK = asyncio.Semaphore ( 2)
+
+def poster_init_db (  ) :
+    with db ( ) as c:
+        c.execute ( """CREATE TABLE IF NOT EXISTS ai_news_posters(
+            post_id INTEGER PRIMARY KEY,
+            style TEXT NOT NULL,
+            file_id TEXT NOT NULL,
+            created_at INTEGER NOT NULL
+        )""")
+
+def poster_style_markup ( nid ) :
+    return InlineKeyboardMarkup ( [
+        [InlineKeyboardButton ( name, callback_data=f"poster:make:{nid}:{key}" ) ]
+        for key, ( name,_) in POSTER_STYLES.items ( )
+    ] + [[InlineKeyboardButton ( "⬅️ Yangilikka qaytish",callback_data=f"news:preview:{nid}:uz" ) ]])
+
+def poster_confirm_markup ( nid,style ) :
+    return InlineKeyboardMarkup ( [
+        [InlineKeyboardButton ( "✅ POSTERNI TASDIQLASH",callback_data=f"poster:accept:{nid}" ) ],
+        [InlineKeyboardButton ( "🔄 Qayta yaratish",callback_data=f"poster:make:{nid}:{style}" ) ,
+         InlineKeyboardButton ( "🎨 Boshqa uslub",callback_data=f"poster:styles:{nid}" ) ],
+        [InlineKeyboardButton ( "❌ Rad etish",callback_data=f"poster:reject:{nid}" ) ],
+    ])
+
+def poster_generate_sync ( text,style ) :
+    if not OPENAI_API_KEY:
+        raise RuntimeError ( "OPENAI_API_KEY Railway'da sozlanmagan")
+    visual=POSTER_STYLES[style][1]
+    prompt=(
+        "Create a gorgeous, professionally designed TELEGRAM ANNOUNCEMENT POSTER, portrait 1024x1536. "
+        "Design: "+visual+". High-end polished infographic layout, strong visual hierarchy, legible text, "
+        "tasteful illustrations, sophisticated lighting and composition. "
+        "Use the following announcement as the ONLY factual source. "
+        "Do not invent dates, prices, phone numbers, claims, or links. "
+        "Use its original Uzbek language, with a short exact headline and 3-5 short key points. "
+        "Avoid long paragraphs, ensure Uzbek Latin letters and punctuation are correct. "
+        "Include brand name VERITAS only if relevant. No watermark. "
+        "ANNOUNCEMENT:\n"+text[:2200]
+    )
+    payload=json.dumps ( {"model":os.getenv ( "POSTER_IMAGE_MODEL",REBUS_IMAGE_MODEL ) ,
+                        "prompt":prompt,"size":"1024x1536","quality":"medium"},ensure_ascii=False ) .encode ( "utf-8")
+    req=urllib.request.Request ( "https://api.openai.com/v1/images/generations",data=payload,
+        headers={"Authorization":f"Bearer {OPENAI_API_KEY}","Content-Type":"application/json"},method="POST")
+    try:
+        with urllib.request.urlopen ( req,timeout=240) as response:
+            result=json.loads ( response.read (  ) .decode ( "utf-8" ) )
+    except urllib.error.HTTPError as exc:
+        detail=exc.read (  ) .decode ( "utf-8",errors="replace" ) [:400]
+        raise RuntimeError ( f"Image API HTTP {exc.code}: {detail}") from exc
+    item= ( result.get ( "data") or [{}] ) [0]
+    if item.get ( "b64_json" ) :
+        return base64.b64decode ( item["b64_json"])
+    if item.get ( "url" ) :
+        with urllib.request.urlopen ( item["url"],timeout=120) as response:
+            return response.read ( )
+    raise RuntimeError ( "Image API rasm qaytarmadi")
+
+async def poster_callback ( update,ctx ) :
+    q=update.callback_query; d=q.data or ""; uid=q.from_user.id
+    if uid not in SUPER_OWNERS:
+        return await q.answer ( "Faqat Super Ega uchun.",show_alert=True)
+    m=re.fullmatch ( r"poster: ( styles|make|accept|reject ) : ( \d+ )  ( ?:: ( gold|books|islam|school|auto )  ) ?",d)
+    if not m:
+        return await q.answer ( "Noto‘g‘ri tugma",show_alert=True)
+    action,nid,style=m.group ( 1 ) ,int ( m.group ( 2 )  ) ,m.group ( 3)
+    post=one ( "SELECT * FROM ai_news_posts WHERE id=?", ( nid, ) )
+    if not post or post['status']!='draft':
+        return await q.answer ( "Yangilik topilmadi yoki yuborilgan.",show_alert=True)
+    if action=='styles':
+        await q.answer ( )
+        return await ctx.bot.send_message ( uid,"🎨 Poster uchun uslubni tanlang:",reply_markup=poster_style_markup ( nid ) )
+    if action=='make':
+        await q.answer ( "🎨 Poster yaratilmoqda...")
+        status=await ctx.bot.send_message ( uid,"⏳ AI poster chizmoqda. Bu biroz vaqt olishi mumkin.")
+        try:
+            async with POSTER_LOCK:
+                image_bytes=await asyncio.to_thread ( poster_generate_sync,post['uz_text'],style)
+            bio=io.BytesIO ( image_bytes ) ;bio.name="veritas_poster.png";bio.seek ( 0)
+            photo=await ctx.bot.send_photo ( uid,bio,caption=f"🖼 Yangilik #{nid} — poster preview\n🎨 {POSTER_STYLES[style][0]}\n\nTasdiqlashdan oldin rasmdagi yozuvlarni tekshiring.",reply_markup=poster_confirm_markup ( nid,style ) )
+            file_id=photo.photo[-1].file_id
+            with db ( ) as c:
+                c.execute ( "INSERT OR REPLACE INTO ai_news_posters ( post_id,style,file_id,created_at) VALUES ( ?,?,?,? ) ", ( nid,style,file_id,now (  )  ) )
+            await status.delete ( )
+        except Exception as exc:
+            log.exception ( "poster generation failed")
+            await status.edit_text ( "⚠️ Poster yaratilmadi. Hech kimga yuborilmadi.\nSabab: "+str ( exc ) [:550])
+        return
+    if action=='reject':
+        await q.answer ( "Bekor qilindi")
+        execute ( "DELETE FROM ai_news_posters WHERE post_id=?", ( nid, ) )
+        return await ctx.bot.send_message ( uid,"❌ Poster rad etildi. Yangilik matni saqlandi.",reply_markup=ai_news_preview_markup ( nid ) )
+    if action=='accept':
+        candidate=one ( "SELECT * FROM ai_news_posters WHERE post_id=?", ( nid, ) )
+        if not candidate:return await q.answer ( "Poster topilmadi. Qayta yarating.",show_alert=True)
+        execute ( "UPDATE ai_news_posts SET media_type='photo',media_file_id=? WHERE id=? AND status='draft'", ( candidate['file_id'],nid ) )
+        await q.answer ( "Poster saqlandi!")
+        return await ctx.bot.send_message ( uid,f"✅ Poster #{nid} yangilikka biriktirildi.\n\nYuborishdan oldin uch tildagi matnni tekshiring.",reply_markup=ai_news_preview_markup ( nid ) )
 
 async def ai_news_callback ( update,ctx ) :
     q=update.callback_query;u=q.from_user;d=q.data or ''
@@ -1326,15 +1371,7 @@ async def ai_news_callback ( update,ctx ) :
         await q.answer (  ) ;rows=all_ ( "SELECT id,status,sent_ok,sent_fail FROM ai_news_posts ORDER BY id DESC LIMIT 15" ) ;body='\n'.join ( f"#{r['id']} · {r['status']} · ✅{r['sent_ok']} ❌{r['sent_fail']}" for r in rows) or 'Hali yangilik yo‘q.';return await _news_edit ( q,"📰 OXIRGI YANGILIKLAR\n\n"+body,reply_markup=ai_news_super_markup (  ) )
     m=re.match ( r'news:preview: ( \d+ ) : ( uz|ru|en ) $',d)
     if m:
-        await q.answer ( )
-        nid=int ( m.group ( 1 )  ) ;lang=m.group ( 2)
-        r=one ( "SELECT * FROM ai_news_posts WHERE id=?", ( nid, ) )
-        if not r:
-            return await _news_edit ( q,"⚠️ Yangilik topilmadi.")
-        body= ( r[lang+'_text'] or '' ) .strip ( )
-        if not body:
-            return await _news_edit ( q,"⚠️ Bu til varianti tayyor emas.",reply_markup=ai_news_preview_markup ( nid ) )
-        return await _news_edit ( q,f"{LANG_NAMES[lang]} · #{nid}\n\n{body[:3300]}",reply_markup=ai_news_preview_markup ( nid ) )
+        await q.answer (  ) ;nid=int ( m.group ( 1 )  ) ;lang=m.group ( 2 ) ;r=one ( "SELECT * FROM ai_news_posts WHERE id=?", ( nid, )  ) ;return await _news_edit ( q,f"{LANG_NAMES[lang]} · #{nid}\n\n{r[lang+'_text'][:3300]}",reply_markup=ai_news_preview_markup ( nid ) ) if r else None
     m=re.match ( r'news: ( redo|edit|cancel|send ) : ( \d+ ) $',d)
     if not m:return
     action,n=m.group ( 1 ) ,int ( m.group ( 2 )  ) ;r=one ( "SELECT * FROM ai_news_posts WHERE id=?", ( n, ) )
@@ -1348,16 +1385,7 @@ async def ai_news_callback ( update,ctx ) :
         execute ( "UPDATE ai_news_posts SET uz_text=?,ru_text=?,en_text=? WHERE id=?", ( data['uz'],data['ru'],data['en'],n )  ) ;return await _news_edit ( q,f"📢 YANGILIK #{n} — YANGI PREVIEW\n\n{data['uz'][:3300]}",reply_markup=ai_news_preview_markup ( n ) )
     if action=='send':
         if r['status']!='draft':return await q.answer ( "Bu yangilik allaqachon yuborilgan/bekor qilingan.",show_alert=True)
-        execute ( "UPDATE ai_news_posts SET status='sending' WHERE id=? AND status='draft'", ( n, ) )
-        await q.answer ( )
-        await _news_edit ( q,"📤 Tarqatish boshlandi...")
-        try:
-            ok,fail=await ai_news_broadcast ( ctx,n)
-        except Exception as e:
-            execute ( "UPDATE ai_news_posts SET status='draft' WHERE id=?", ( n, ) )
-            log.exception ( "AI news broadcast: %s",e)
-            return await _news_edit ( q,f"⚠️ Tarqatish boshlanmadi.\nSabab: {str ( e ) [:500]}",reply_markup=ai_news_preview_markup ( n ) )
-        return await _news_edit ( q,f"✅ YANGILIK TARQATILDI\n\n📨 Yetkazildi: {ok}\n❌ Yetkazilmadi: {fail}\n🌐 Har bir a’zoga tanlagan tilida yuborildi.")
+        execute ( "UPDATE ai_news_posts SET status='sending' WHERE id=? AND status='draft'", ( n, )  ) ;await q.answer (  ) ;await _news_edit ( q,"📤 Tarqatish boshlandi..." ) ;ok,fail=await ai_news_broadcast ( ctx,n ) ;return await _news_edit ( q,f"✅ YANGILIK TARQATILDI\n\n📨 Yetkazildi: {ok}\n❌ Yetkazilmadi: {fail}\n🌐 Har bir a’zoga tanlagan tilida yuborildi.")
 
 def main_menu_markup ( uid ) :
     kb=[
@@ -3424,9 +3452,6 @@ def _openai_image_response_sync ( image_bytes, mime_type, user_text ) :
     return _extract_response_text ( data) or "Rasm tahlil qilindi, lekin javob hosil bo‘lmadi."
 
 async def private_ai_media_reply ( update,ctx ) :
-    # AI Yangilikka yuborilgan media oddiy Veritas Vision AI ga tushmasin.
-    if ctx.user_data.get ( "news_consumed_message_id" ) ==getattr ( update.effective_message,"message_id",None ) :
-        return
     if ctx.user_data.get ( "owner_consumed_message_id" ) ==getattr ( update.effective_message,"message_id",None ) :
         return
 
@@ -5684,9 +5709,12 @@ async def callback ( update,ctx ) :
         q=update.callback_query;lang=data.rsplit ( ':',1 ) [1]
         if lang in LANG_NAMES:
             ensure_user ( q.from_user ) ;set_user_lang ( q.from_user.id,lang ) ;await q.answer ( '✅' ) ;return await q.edit_message_text ( {'uz':'✅ Til saqlandi.','ru':'✅ Язык сохранён.','en':'✅ Language saved.'}[lang],reply_markup=main_menu_markup ( q.from_user.id ) )
-    # news:* alohida yuqori-prioritet handlerda ishlanadi.
+    # V9.1 NEWS: barcha news:* callbacklar bitta asosiy router orqali ishlaydi.
+    # Alohida handler bilan to'qnashuv bo'lmasligi uchun shu yerdan bevosita yuboramiz.
+    if data.startswith ( 'poster:' ) :
+        return await poster_callback ( update,ctx)
     if data.startswith ( 'news:' ) :
-        return
+        return await ai_news_callback ( update,ctx)
     if data.startswith ( 'glang:' ) :
         return
     if data.startswith ( 'chatshot:' ) :
@@ -5703,6 +5731,7 @@ def main (  ) :
     bayram_init_db ( )
     mazgila_init_db ( )
     ai_news_init_db ( )
+    poster_init_db ( )
     i18n_init_db ( )
     app=Application.builder (  ) .bot ( VeritasI18nBot ( token=TOKEN )  ) .build ( )
     app.add_handler ( CommandHandler ( "start",v9_start_selector ) )
@@ -5711,8 +5740,7 @@ def main (  ) :
     app.add_handler ( CommandHandler ( "super",cmd_super ) )
     app.add_handler ( PreCheckoutQueryHandler ( precheckout ) )
     app.add_handler ( MessageHandler ( filters.SUCCESSFUL_PAYMENT,paid ) )
-    # AI Yangilik tugmalari generic callbackdan alohida ishlaydi.
-    app.add_handler ( CallbackQueryHandler ( ai_news_callback, pattern=r"^news:" ) , group=-10)
+    # news:* callbacklar asosiy callback router ichida ai_news_callback ga uzatiladi.
     app.add_handler ( CallbackQueryHandler ( group_lang_callback, pattern=r"^glang:" ) , group=-10)
     app.add_handler ( CallbackQueryHandler ( callback ) , group=0)
     app.add_handler ( MessageHandler ( filters.ChatType.PRIVATE & ~filters.COMMAND & ~filters.SUCCESSFUL_PAYMENT,ai_news_private_input ) ,group=-7)
