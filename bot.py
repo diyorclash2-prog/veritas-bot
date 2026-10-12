@@ -796,6 +796,7 @@ async def v9_show_student_home ( msg,uid ) :
 
 async def v9_private_input ( update,ctx ) :
     msg=update.effective_message;u=update.effective_user
+    if ctx.user_data.get ( "news_consumed_message_id" ) ==getattr ( msg,"message_id",None ) :return
     if not msg or not u or msg.chat.type!="private":return
     st=STATE.get ( u.id) or {};mode=st.get ( "mode")
     if str ( mode ) .startswith ( "v9_" ) :
@@ -997,6 +998,96 @@ async def v9_private_input ( update,ctx ) :
 # VERITAS V9 — END
 # =========================================================
 
+# =========================================================
+# V9.1 — 3 TIL + AI YANGILIK MARKAZI
+# =========================================================
+LANG_NAMES={"uz":"🇺🇿 O‘zbekcha","ru":"🇷🇺 Русский","en":"🇬🇧 English"}
+NEWS_SEND_SEMAPHORE=asyncio.Semaphore ( 12)
+def user_lang ( uid ) :
+    r=one ( "SELECT lang FROM users WHERE user_id=?", ( uid, )  ) ; x= ( r["lang"] if r else "uz") or "uz"
+    return x if x in LANG_NAMES else "uz"
+def set_user_lang ( uid,lang ) :
+    if lang in LANG_NAMES: execute ( "UPDATE users SET lang=? WHERE user_id=?", ( lang,uid ) )
+def L ( uid,uz,ru,en ) : return {"uz":uz,"ru":ru,"en":en}.get ( user_lang ( uid ) ,uz)
+def lang_markup ( back="home" ) :
+    return InlineKeyboardMarkup ( [[InlineKeyboardButton ( "🇺🇿 O‘zbekcha",callback_data="lang:set:uz" ) ,InlineKeyboardButton ( "🇷🇺 Русский",callback_data="lang:set:ru" ) ],[InlineKeyboardButton ( "🇬🇧 English",callback_data="lang:set:en" ) ],[InlineKeyboardButton ( "⬅️ Orqaga / Назад / Back",callback_data=back ) ]])
+def ai_news_init_db (  ) :
+    with db ( ) as c:c.executescript ( """CREATE TABLE IF NOT EXISTS ai_news_posts ( id INTEGER PRIMARY KEY AUTOINCREMENT,creator_id INTEGER NOT NULL,source_text TEXT DEFAULT '',uz_text TEXT DEFAULT '',ru_text TEXT DEFAULT '',en_text TEXT DEFAULT '',media_type TEXT DEFAULT '',media_file_id TEXT DEFAULT '',status TEXT DEFAULT 'draft',sent_ok INTEGER DEFAULT 0,sent_fail INTEGER DEFAULT 0,created_at INTEGER NOT NULL,sent_at INTEGER DEFAULT 0 ) ; CREATE INDEX IF NOT EXISTS idx_ai_news_status ON ai_news_posts ( status,id ) ;""")
+def _ai_news_prepare_sync ( source ) :
+    if not OPENAI_API_KEY: raise RuntimeError ( "OPENAI_API_KEY sozlanmagan")
+    prompt= ( "Siz Veritas rasmiy yangilik muharririsiz. Quyidagi xabarni ma'nosini o'zgartirmasdan imlo va uslub jihatdan tuzating, Telegram posti uchun ixcham va chiroyli bezang. So'ng tabiiy ruscha va inglizcha tarjima qiling. Hech qanday yangi fakt uydirmang. JSONdan boshqa hech narsa qaytarmang. JSON aynan: {\\\"uz\\\":\\\"...\\\",\\\"ru\\\":\\\"...\\\",\\\"en\\\":\\\"...\\\"}. Har bir variantda mos sarlavha va me'yorida emoji bo'lsin.\n\nXABAR:\n"+source)
+    raw=_openai_response_sync ( prompt ) ; m=re.search ( r'\{[\s\S]*\}',raw ) ; data=json.loads ( m.group ( 0) if m else raw)
+    out={k:str ( data.get ( k,'' )  ) .strip ( ) for k in ('uz','ru','en' ) }
+    if not all ( out.values (  )  ) : raise ValueError ( "AI uch tilni to'liq qaytarmadi")
+    return out
+async def ai_news_prepare ( source ) : return await asyncio.to_thread ( _ai_news_prepare_sync,source)
+def ai_news_super_markup (  ) :
+    return InlineKeyboardMarkup ( [[InlineKeyboardButton ( "📢 AI Yangilik joylash",callback_data="news:new" ) ],[InlineKeyboardButton ( "📰 Oxirgi yangiliklar",callback_data="news:list" ) ],[InlineKeyboardButton ( "⬅️ Orqaga",callback_data="super" ) ]])
+def ai_news_preview_markup ( nid ) :
+    return InlineKeyboardMarkup ( [[InlineKeyboardButton ( "🇺🇿",callback_data=f"news:preview:{nid}:uz" ) ,InlineKeyboardButton ( "🇷🇺",callback_data=f"news:preview:{nid}:ru" ) ,InlineKeyboardButton ( "🇬🇧",callback_data=f"news:preview:{nid}:en" ) ],[InlineKeyboardButton ( "🔄 AI qayta bezasin",callback_data=f"news:redo:{nid}" ) ,InlineKeyboardButton ( "✏️ Qayta yozish",callback_data=f"news:edit:{nid}" ) ],[InlineKeyboardButton ( "✅ HAMMAGA YUBORISH",callback_data=f"news:send:{nid}" ) ],[InlineKeyboardButton ( "❌ Bekor qilish",callback_data=f"news:cancel:{nid}" ) ]])
+async def _news_send_one ( bot,uid,text,media_type='',file_id='' ) :
+    async with NEWS_SEND_SEMAPHORE:
+        try:
+            if media_type=='photo' and file_id: await bot.send_photo ( uid,file_id,caption=text[:1024])
+            elif media_type=='video' and file_id: await bot.send_video ( uid,file_id,caption=text[:1024])
+            elif media_type=='document' and file_id: await bot.send_document ( uid,file_id,caption=text[:1024])
+            else: await bot.send_message ( uid,text[:4096])
+            return True
+        except TelegramError:return False
+async def ai_news_broadcast ( ctx,nid ) :
+    post=one ( "SELECT * FROM ai_news_posts WHERE id=?", ( nid, )  ) ; users=all_ ( "SELECT user_id,COALESCE ( lang,'uz') lang FROM users WHERE blocked=0 ORDER BY user_id")
+    if not post:return (0,0)
+    ok=fail=0
+    for pos in range ( 0,len ( users ) ,20 ) :
+        tasks=[]
+        for r in users[pos:pos+20]:
+            lang=r['lang'] if r['lang'] in LANG_NAMES else 'uz'; tasks.append ( _news_send_one ( ctx.bot,int ( r['user_id'] ) ,post[lang+'_text'],post['media_type'],post['media_file_id'] ) )
+        for x in await asyncio.gather ( *tasks,return_exceptions=True ) :
+            if x is True:ok+=1
+            else:fail+=1
+        await asyncio.sleep ( .35)
+    execute ( "UPDATE ai_news_posts SET status='sent',sent_ok=?,sent_fail=?,sent_at=? WHERE id=?", ( ok,fail,now (  ) ,nid )  ) ; return ok,fail
+async def ai_news_private_input ( update,ctx ) :
+    msg=update.effective_message;u=update.effective_user
+    if not msg or not u or msg.chat.type!='private' or u.id not in SUPER_OWNERS:return
+    st=STATE.get ( u.id) or {}
+    if st.get ( 'mode' ) !='ai_news_input':return
+    ctx.user_data['news_consumed_message_id']=msg.message_id; source= ( msg.text or msg.caption or '' ) .strip ( )
+    if not source:return await msg.reply_text ( "Yangilik matnini yozing. Rasm/video yuborsangiz caption ham yozing.")
+    media_type=file_id=''
+    if msg.photo:media_type='photo';file_id=msg.photo[-1].file_id
+    elif msg.video:media_type='video';file_id=msg.video.file_id
+    elif msg.document:media_type='document';file_id=msg.document.file_id
+    wait=await msg.reply_text ( "🤖 AI imlo, bezak va 3 til tarjimasini tayyorlamoqda...")
+    try:data=await ai_news_prepare ( source)
+    except Exception as e:log.exception ( "AI news prepare: %s",e ) ;return await wait.edit_text ( "⚠️ AI yangilikni tayyorlay olmadi. OPENAI_API_KEY va logni tekshiring.")
+    with db ( ) as c:nid=c.execute ( "INSERT INTO ai_news_posts ( creator_id,source_text,uz_text,ru_text,en_text,media_type,media_file_id,status,created_at) VALUES ( ?,?,?,?,?,?,?,'draft',? ) ", ( u.id,source,data['uz'],data['ru'],data['en'],media_type,file_id,now (  )  )  ) .lastrowid
+    STATE.pop ( u.id,None ) ; await wait.edit_text ( f"📢 YANGILIK #{nid} — PREVIEW\n\n{data['uz'][:3300]}",reply_markup=ai_news_preview_markup ( nid ) )
+async def ai_news_callback ( update,ctx ) :
+    q=update.callback_query;u=q.from_user;d=q.data or ''
+    if u.id not in SUPER_OWNERS:return await q.answer ( "Faqat Super Ega uchun.",show_alert=True)
+    if d=='news:menu':await q.answer (  ) ;return await q.edit_message_text ( "📢 AI YANGILIK MARKAZI",reply_markup=ai_news_super_markup (  ) )
+    if d=='news:new':await q.answer (  ) ;STATE[u.id]={'mode':'ai_news_input'};return await q.edit_message_text ( "📢 Yangilik matnini yuboring.\n\nMatn, rasm+caption, video+caption yoki hujjat+caption mumkin. AI imloni tuzatib, bezab, 🇺🇿 🇷🇺 🇬🇧 variant yaratadi.")
+    if d=='news:list':
+        await q.answer (  ) ;rows=all_ ( "SELECT id,status,sent_ok,sent_fail FROM ai_news_posts ORDER BY id DESC LIMIT 15" ) ;body='\n'.join ( f"#{r['id']} · {r['status']} · ✅{r['sent_ok']} ❌{r['sent_fail']}" for r in rows) or 'Hali yangilik yo‘q.';return await q.edit_message_text ( "📰 OXIRGI YANGILIKLAR\n\n"+body,reply_markup=ai_news_super_markup (  ) )
+    m=re.match ( r'news:preview: ( \d+ ) : ( uz|ru|en ) $',d)
+    if m:
+        await q.answer (  ) ;nid=int ( m.group ( 1 )  ) ;lang=m.group ( 2 ) ;r=one ( "SELECT * FROM ai_news_posts WHERE id=?", ( nid, )  ) ;return await q.edit_message_text ( f"{LANG_NAMES[lang]} · #{nid}\n\n{r[lang+'_text'][:3300]}",reply_markup=ai_news_preview_markup ( nid ) ) if r else None
+    m=re.match ( r'news: ( redo|edit|cancel|send ) : ( \d+ ) $',d)
+    if not m:return
+    action,n=m.group ( 1 ) ,int ( m.group ( 2 )  ) ;r=one ( "SELECT * FROM ai_news_posts WHERE id=?", ( n, ) )
+    if not r:return await q.answer ( "Topilmadi",show_alert=True)
+    if action=='cancel':await q.answer (  ) ;execute ( "UPDATE ai_news_posts SET status='cancelled' WHERE id=?", ( n, )  ) ;return await q.edit_message_text ( "❌ Yangilik bekor qilindi.")
+    if action=='edit':await q.answer (  ) ;STATE[u.id]={'mode':'ai_news_input'};return await q.edit_message_text ( "✏️ Yangilikning yangi matnini yuboring.")
+    if action=='redo':
+        await q.answer (  ) ;await q.edit_message_text ( "🤖 AI qayta bezamoqda...")
+        try:data=await ai_news_prepare ( r['source_text'])
+        except Exception:return await q.edit_message_text ( "⚠️ AI qayta tayyorlay olmadi.",reply_markup=ai_news_preview_markup ( n ) )
+        execute ( "UPDATE ai_news_posts SET uz_text=?,ru_text=?,en_text=? WHERE id=?", ( data['uz'],data['ru'],data['en'],n )  ) ;return await q.edit_message_text ( f"📢 YANGILIK #{n} — YANGI PREVIEW\n\n{data['uz'][:3300]}",reply_markup=ai_news_preview_markup ( n ) )
+    if action=='send':
+        if r['status']!='draft':return await q.answer ( "Bu yangilik allaqachon yuborilgan/bekor qilingan.",show_alert=True)
+        execute ( "UPDATE ai_news_posts SET status='sending' WHERE id=? AND status='draft'", ( n, )  ) ;await q.answer (  ) ;await q.edit_message_text ( "📤 Tarqatish boshlandi..." ) ;ok,fail=await ai_news_broadcast ( ctx,n ) ;return await q.edit_message_text ( f"✅ YANGILIK TARQATILDI\n\n📨 Yetkazildi: {ok}\n❌ Yetkazilmadi: {fail}\n🌐 Har bir a’zoga tanlagan tilida yuborildi.")
+
 def main_menu_markup ( uid ) :
     kb=[
       [InlineKeyboardButton ( "👤 Profil",callback_data="me" ) ,InlineKeyboardButton ( "⭐ Hisob",callback_data="wallet" ) ],
@@ -1008,6 +1099,7 @@ def main_menu_markup ( uid ) :
       [InlineKeyboardButton ( "🧩 AI Rebus",callback_data="rebus:start" ) ],
       [InlineKeyboardButton ( "📚 Vasatiya kutubxonasi",callback_data="library" ) ,InlineKeyboardButton ( "📜 Sahih Hadislar",callback_data="hadith" ) ],
       [InlineKeyboardButton ( "📨 Egaga xabar qoldirish",callback_data="owner:message" ) ],
+      [InlineKeyboardButton ( "🌐 Til / Язык / Language",callback_data="lang:menu" ) ],
       [InlineKeyboardButton ( "ℹ️ Veritas haqida",callback_data="about" ) ],
     ]
     if is_super ( uid ):
@@ -1025,6 +1117,7 @@ def super_menu_markup ( uid=None ) :
     ]
     if uid in SUPER_OWNERS:
         kb.append ( [InlineKeyboardButton ( "📸 Chat rasmlari",callback_data="chatshot:list" ) ])
+        kb.append ( [InlineKeyboardButton ( "📢 AI Yangilik",callback_data="news:menu" ) ])
     kb.append ( [InlineKeyboardButton ( "⬅️ Orqaga",callback_data="home" ) ,InlineKeyboardButton ( "🏠 Bosh menyu",callback_data="home" ) ])
     return InlineKeyboardMarkup ( kb)
 
@@ -1528,6 +1621,7 @@ async def send_ai_hadith_results ( msg, query ) :
     )
 
 async def library_private_input ( update,ctx ) :
+    if ctx.user_data.get ( "news_consumed_message_id" ) ==getattr ( update.effective_message,"message_id",None ) :return
     if ctx.user_data.get ( "bayram_consumed_message_id" ) ==getattr ( update.effective_message,"message_id",None ) :return
     if update.effective_chat.type!="private": return
     uid=update.effective_user.id; st=STATE.get ( uid)
@@ -5304,6 +5398,14 @@ async def star_text_router ( update,ctx ) :
 _bayram_old_callback=callback
 async def callback ( update,ctx ) :
     data= ( update.callback_query.data or '')
+    if data=='lang:menu':
+        q=update.callback_query;await q.answer (  ) ;return await q.edit_message_text ( L ( q.from_user.id,'🌐 Tilni tanlang:','🌐 Выберите язык:','🌐 Choose language:' ) ,reply_markup=lang_markup (  ) )
+    if data.startswith ( 'lang:set:' ) :
+        q=update.callback_query;lang=data.rsplit ( ':',1 ) [1]
+        if lang in LANG_NAMES:
+            ensure_user ( q.from_user ) ;set_user_lang ( q.from_user.id,lang ) ;await q.answer ( '✅' ) ;return await q.edit_message_text ( {'uz':'✅ Til saqlandi.','ru':'✅ Язык сохранён.','en':'✅ Language saved.'}[lang],reply_markup=main_menu_markup ( q.from_user.id ) )
+    if data.startswith ( 'news:' ) :
+        return await ai_news_callback ( update,ctx)
     if data.startswith ( 'chatshot:' ) :
         return await chatshot_callback ( update,ctx)
     if data.startswith ( 'bayram:' ) :
@@ -5317,6 +5419,7 @@ def main (  ) :
     v9_init_db ( )
     bayram_init_db ( )
     mazgila_init_db ( )
+    ai_news_init_db ( )
     app=Application.builder (  ) .token ( TOKEN ) .build ( )
     app.add_handler ( CommandHandler ( "start",v9_start_selector ) )
     app.add_handler ( CommandHandler ( "help",cmd_help ) )
@@ -5325,6 +5428,7 @@ def main (  ) :
     app.add_handler ( PreCheckoutQueryHandler ( precheckout ) )
     app.add_handler ( MessageHandler ( filters.SUCCESSFUL_PAYMENT,paid ) )
     app.add_handler ( CallbackQueryHandler ( callback ) )
+    app.add_handler ( MessageHandler ( filters.ChatType.PRIVATE & ~filters.COMMAND & ~filters.SUCCESSFUL_PAYMENT,ai_news_private_input ) ,group=-7)
     app.add_handler ( MessageHandler ( filters.ChatType.PRIVATE & filters.TEXT & ~filters.COMMAND,bayram_private_input ) ,group=-5)
     app.add_handler ( MessageHandler ( filters.StatusUpdate.NEW_CHAT_MEMBERS,new_members ) )
     app.add_handler ( MessageHandler ( filters.StatusUpdate.LEFT_CHAT_MEMBER,left_member ) )
