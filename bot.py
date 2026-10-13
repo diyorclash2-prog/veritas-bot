@@ -32,11 +32,11 @@ from telegram import (
     LabeledPrice
 )
 from telegram.constants import ChatMemberStatus
-from telegram.error import TelegramError, BadRequest
+from telegram.error import TelegramError, BadRequest, RetryAfter, ChatMigrated, Forbidden
 from telegram import CallbackQuery
 from telegram.ext import (
     Application, ContextTypes, CommandHandler, MessageHandler, CallbackQueryHandler,
-    PreCheckoutQueryHandler, ExtBot, filters
+    PreCheckoutQueryHandler, ExtBot, filters, ApplicationHandlerStop, ChatMemberHandler
 )
 
 TOKEN = os.getenv ( "BOT_TOKEN", "" ) .strip ( )
@@ -1153,6 +1153,9 @@ async def i18n_markup(markup,lang,bot):
                     if b.get("text"):b["text"]=await i18n_text(b["text"],lang)
             return InlineKeyboardMarkup.de_json(data,bot)
         if "keyboard" in data:
+            # Reply-klaviatura matnlari handlerlarda aynan solishtiriladi ("ðŸ›¡ Veritas" va h.k.).
+            # Tarjima qilinsa tugmalar ishlamay qoladi, shuning uchun o'zgartirmaymiz.
+            return markup
             for row in data["keyboard"]:
                 for b in row:
                     if isinstance(b,dict) and b.get("text"):b["text"]=await i18n_text(b["text"],lang)
@@ -1319,15 +1322,15 @@ async def _news_send_one(bot,uid,text,media_type='',file_id=''):
     async with NEWS_SEND_SEMAPHORE:
         try:
             if media_type=='photo' and file_id:
-                await bot.send_photo(uid,file_id,_skip_i18n=True)
+                uid=await _news_call(bot.send_photo,uid,photo=file_id,_skip_i18n=True)
             elif media_type=='video' and file_id:
-                await bot.send_video(uid,file_id,_skip_i18n=True)
+                uid=await _news_call(bot.send_video,uid,video=file_id,_skip_i18n=True)
             elif media_type=='document' and file_id:
-                await bot.send_document(uid,file_id,_skip_i18n=True)
+                uid=await _news_call(bot.send_document,uid,document=file_id,_skip_i18n=True)
             if text:
                 # Telegram message limit is 4096. Split safely if AI made a longer post.
                 for pos in range(0,len(text),4000):
-                    await bot.send_message(uid,text[pos:pos+4000],_skip_i18n=True)
+                    uid=await _news_call(bot.send_message,uid,text=text[pos:pos+4000],_skip_i18n=True)
             return True
         except TelegramError as exc:
             log.warning("AI news delivery failed uid=%s: %s",uid,exc)
@@ -5970,6 +5973,41 @@ async def ai_news_menu_direct(update, ctx):
     STATE.pop(u.id,None)
     return await _news_edit(q,"ðŸ“¢ AI YANGILIK MARKAZI",reply_markup=ai_news_super_markup())
 
+# =========================================================
+# V9.1.1 â€” GURUHLARGA ISHONCHLI YUBORISH
+# =========================================================
+NEWS_SENDING_NOW=set()   # shu jarayonda hozir yuborilayotgan postlar
+
+def _news_migrate_group(old_id,new_id):
+    """Guruh supergroupga aylanganda chat_id o'zgaradi â€” bazada yangilaymiz."""
+    try:
+        with db() as c:
+            if c.execute("SELECT 1 FROM groups WHERE chat_id=?",(new_id,)).fetchone():
+                c.execute("DELETE FROM groups WHERE chat_id=?",(old_id,))
+            else:
+                c.execute("UPDATE groups SET chat_id=? WHERE chat_id=?",(new_id,old_id))
+        log.warning("NEWS group migrated %s -> %s",old_id,new_id)
+    except Exception:
+        log.exception("group migrate update failed %s -> %s",old_id,new_id)
+
+async def _news_call(fn,cid,*args,**kwargs):
+    """Bitta Telegram chaqiruvi: flood-limit (RetryAfter) va migratsiyani hisobga oladi.
+    Qaytaradi: haqiqiy chat_id (migratsiyadan keyin yangisi bo'lishi mumkin)."""
+    for attempt in range(4):
+        try:
+            await fn(chat_id=cid,*args,**kwargs)
+            return cid
+        except RetryAfter as exc:
+            wait=float(getattr(exc,"retry_after",3) or 3)
+            if hasattr(wait,"total_seconds"):wait=wait.total_seconds()
+            log.warning("NEWS flood limit chat=%s, %ss kutiladi",cid,wait)
+            await asyncio.sleep(min(float(wait),60)+0.5)
+        except ChatMigrated as exc:
+            new_id=int(exc.new_chat_id)
+            _news_migrate_group(cid,new_id)
+            cid=new_id
+    raise RuntimeError("Telegram flood limit: qayta urinishlar tugadi")
+
 async def ai_news_send_direct(update, ctx):
     """Dedicated, retry-safe news broadcaster for all registered Telegram groups."""
     q = update.callback_query
@@ -6001,6 +6039,10 @@ async def ai_news_send_direct(update, ctx):
     if not post:
         return await ctx.bot.send_message(u.id, "âš ï¸ Yangilik topilmadi.", _skip_i18n=True)
 
+    # Bot qayta ishga tushgan bo'lsa, 'sending' holatida qotib qolgan postni tiklaymiz.
+    if post["status"] == "sending" and nid not in NEWS_SENDING_NOW:
+        execute("UPDATE ai_news_posts SET status='draft' WHERE id=? AND status='sending'", (nid,))
+        post = one("SELECT * FROM ai_news_posts WHERE id=?", (nid,))
     # Reject duplicate presses; a post can be sent globally only once.
     if post["status"] != "draft":
         return await ctx.bot.send_message(u.id, "âš ï¸ Bu post yuborilgan yoki yuborilmoqda. Takroriy joâ€˜natish toâ€˜xtatildi.", _skip_i18n=True)
@@ -6041,6 +6083,13 @@ async def ai_news_send_direct(update, ctx):
             return await ctx.bot.send_message(u.id, "âš ï¸ Bu post allaqachon yuborilmoqda.", _skip_i18n=True)
     except Exception:
         log.exception("NEWS_SEND_DIRECT could not mark sending post=%s", nid)
+    NEWS_SENDING_NOW.add(nid)
+    try:
+        return await _ai_news_send_direct_body(ctx, q, u, nid, text, media_type, media_file_id, groups)
+    finally:
+        NEWS_SENDING_NOW.discard(nid)
+
+async def _ai_news_send_direct_body(ctx, q, u, nid, text, media_type, media_file_id, groups):
 
     try:
         await _news_edit(q, f"ðŸ“¤ {len(groups)} TA GURUHGA YUBORILMOQDA...")
@@ -6053,14 +6102,14 @@ async def ai_news_send_direct(update, ctx):
         try:
             log.warning("NEWS_SEND_DIRECT SENDING post=%s chat=%s title=%s", nid, cid, title)
             if media_type == "photo" and media_file_id:
-                await ctx.bot.send_photo(chat_id=cid, photo=media_file_id, _skip_i18n=True)
+                cid = await _news_call(ctx.bot.send_photo, cid, photo=media_file_id, _skip_i18n=True)
             elif media_type == "video" and media_file_id:
-                await ctx.bot.send_video(chat_id=cid, video=media_file_id, _skip_i18n=True)
+                cid = await _news_call(ctx.bot.send_video, cid, video=media_file_id, _skip_i18n=True)
             elif media_type == "document" and media_file_id:
-                await ctx.bot.send_document(chat_id=cid, document=media_file_id, _skip_i18n=True)
+                cid = await _news_call(ctx.bot.send_document, cid, document=media_file_id, _skip_i18n=True)
             if text:
                 for pos in range(0, len(text), 4000):
-                    await ctx.bot.send_message(chat_id=cid, text=text[pos:pos+4000], _skip_i18n=True)
+                    cid = await _news_call(ctx.bot.send_message, cid, text=text[pos:pos+4000], _skip_i18n=True)
             log.warning("NEWS_SEND_DIRECT OK post=%s chat=%s", nid, cid)
             return True, cid, ""
         except Exception as exc:
@@ -6126,6 +6175,62 @@ async def ai_news_send_group_direct(update,ctx):
     execute("UPDATE ai_news_posts SET status='draft',sent_fail=1 WHERE id=?",(nid,))
     return await ctx.bot.send_message(q.message.chat_id,"âš ï¸ Yuborilmadi. Botning guruhda xabar yuborish huquqini tekshiring.",reply_markup=ai_news_group_ready_markup(nid),_skip_i18n=True)
 
+async def bot_membership_update(update,ctx):
+    """Bot guruhga qo'shilganda/admin qilinganda guruhni darhol bazaga yozadi.
+    Privacy mode yoqilgan botlar oddiy xabarlarni ko'rmaydi, shuning uchun
+    avval guruhlar faqat buyruq yozilganda ro'yxatga tushardi va yangilik ularga yetmasdi."""
+    cmu=update.my_chat_member
+    if not cmu:return
+    chat=cmu.chat
+    if not chat or chat.type not in ("group","supergroup"):return
+    status=cmu.new_chat_member.status
+    if status in (ChatMemberStatus.MEMBER,ChatMemberStatus.ADMINISTRATOR,ChatMemberStatus.RESTRICTED):
+        try:ensure_group(chat);log.warning("GROUP registered chat=%s title=%s",chat.id,chat.title)
+        except Exception:log.exception("group register failed")
+
+async def group_migration_update(update,ctx):
+    msg=update.effective_message
+    if msg and msg.migrate_to_chat_id:
+        _news_migrate_group(msg.chat.id,int(msg.migrate_to_chat_id))
+
+# =========================================================
+# V9.1.1 â€” GLOBAL NAVIGATSIYA (eng yuqori ustuvorlik)
+# "ðŸ›¡ Veritas" va "ðŸŽ“ Oâ€˜quv â€¢ Talaba" tugmalari boshqa hech qaysi handlerga
+# (AI javob, yangilik kiritish, bayram, kutubxona...) o'tmaydi.
+# =========================================================
+def _nav_norm(t):
+    t=(t or "").replace("\ufe0f","").replace("\u200d","").replace("â€™","'").replace("â€˜","'").replace("`","'")
+    return re.sub(r"\s+"," ",t).strip().lower()
+
+async def _nav_send(ctx,chat_id,text,markup):
+    try:
+        return await ctx.bot.send_message(chat_id,text,reply_markup=markup)
+    except Exception:
+        log.exception("global nav send failed, retrying without i18n")
+        return await ctx.bot.send_message(chat_id,text,reply_markup=markup,_skip_i18n=True)
+
+async def global_nav_input(update,ctx):
+    msg=update.effective_message;u=update.effective_user
+    if not msg or not u or not msg.chat or msg.chat.type!="private" or not msg.text:return
+    t=_nav_norm(msg.text)
+    is_veritas = t=="ðŸ›¡ veritas" or (t.startswith("ðŸ›¡") and "veritas" in t and len(t)<=24)
+    is_v9 = t=="ðŸŽ“ o'quv â€¢ talaba" or (t.startswith("ðŸŽ“") and "â€¢" in t and len(t)<=32)
+    if not (is_veritas or is_v9):return
+    ctx.user_data["v9_consumed_message_id"]=msg.message_id
+    STATE.pop(u.id,None)
+    try:ensure_user(u)
+    except Exception:log.exception("global nav ensure_user failed")
+    try:
+        if is_veritas:
+            await _nav_send(ctx,msg.chat.id,"ðŸ›¡ VERITAS\n\nAsosiy boâ€˜lim:",main_menu_markup(u.id))
+        else:
+            await _nav_send(ctx,msg.chat.id,"ðŸŽ“ Oâ€˜QUV â€¢ TALABA\n\nTaâ€™lim turini tanlang:",v9_entry_markup())
+            await _nav_send(ctx,msg.chat.id,"Asosiy panel:",veritas_global_keyboard())
+    except Exception:
+        log.exception("global nav failed")
+    # Bu xabar to'liq qayta ishlandi â€” keyingi guruhlar (AI va boshqalar) ishlamasin.
+    raise ApplicationHandlerStop
+
 def main (  ) :
     if not TOKEN: raise RuntimeError ( "BOT_TOKEN kiritilmagan.")
     init_db ( )
@@ -6142,6 +6247,9 @@ def main (  ) :
     app.add_handler ( CommandHandler ( "id",cmd_id ) )
     app.add_handler ( CommandHandler ( "super",cmd_super ) )
     app.add_handler ( PreCheckoutQueryHandler ( precheckout ) )
+    app.add_handler ( MessageHandler ( filters.ChatType.PRIVATE & filters.TEXT & ~filters.COMMAND,global_nav_input ) ,group=-1000)
+    app.add_handler ( ChatMemberHandler ( bot_membership_update, ChatMemberHandler.MY_CHAT_MEMBER ) ,group=-900)
+    app.add_handler ( MessageHandler ( filters.StatusUpdate.MIGRATE,group_migration_update ) ,group=-900)
     app.add_handler ( MessageHandler ( filters.SUCCESSFUL_PAYMENT,paid ) )
     # NEWS callbacks get a dedicated highest-priority route.
     # This prevents the broad callback router from swallowing the send button.
