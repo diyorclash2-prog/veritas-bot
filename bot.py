@@ -1453,46 +1453,30 @@ async def ai_news_callback ( update,ctx ) :
         if r['status']!='draft':
             return await q.answer ( "Bu yangilik allaqachon yuborilgan/bekor qilingan.",show_alert=True)
 
-        # 3 ta til tugmasini bosish SHART EMAS. Agar tarjima bo'sh qolgan bo'lsa,
-        # yuborish to'xtamasligi uchun o'zbekcha matn fallback bo'ladi.
+        # 3 til preview tugmalarini bosish SHART EMAS.
         for lang in ('ru','en' ) :
             if not (r[lang+'_text'] or '' ) .strip (  ) :
                 execute ( f"UPDATE ai_news_posts SET {lang}_text=? WHERE id=?",
                         (r['uz_text'] or r['source_text'] or '',n ) )
 
-        # Atomik qulflash: tugma ikki marta bosilsa ikki marta broadcast ketmaydi.
-        with db ( ) as c:
-            changed=c.execute(
-                "UPDATE ai_news_posts SET status='sending' WHERE id=? AND status='draft'",
-                (n,)
-            ).rowcount
-        if not changed:
+        # Muhim: sqlite Cursor truthy bo'ladi. Haqiqiy rowcountni tekshiramiz.
+        cur=execute ( "UPDATE ai_news_posts SET status='sending' WHERE id=? AND status='draft'", ( n, ) )
+        if getattr ( cur,'rowcount',0) != 1:
             return await q.answer ( "Yuborish allaqachon boshlangan.",show_alert=True)
 
-        # Telegram callbackni DARHOL yopamiz. Broadcast uzoq davom etsa ham tugma
-        # 'ishlamayapti' bo'lib qolmaydi.
-        await q.answer ( "📤 Yuborish boshlandi",show_alert=False)
+        # Telegram callback spinnerini darhol yopamiz.
+        await q.answer ( "📤 Yuborish boshlandi")
         try:
-            await _news_edit(
-                q,
-                "📤 HAMMAGA YUBORILMOQDA...\n\n"
-                "🇺🇿 🇷🇺 🇬🇧 tugmalarini tanlash shart emas.\n"
-                "Har bir foydalanuvchiga uning saqlangan tilida yuboriladi."
-            )
+            await _news_edit ( q,"📤 HAMMAGA YUBORILMOQDA...\n\nTil tugmalarini tanlash shart emas.")
         except Exception:
-            pass
+            log.exception ( "News progress message failed post=%s",n)
 
-        owner_id=u.id
-
-        async def _broadcast_in_background (  ) :
+        async def _broadcast_job (  ) :
             try:
                 ok,fail=await ai_news_broadcast ( ctx,n)
                 await ctx.bot.send_message(
-                    owner_id,
-                    f"✅ YANGILIK TARQATILDI\n\n"
-                    f"📨 Yetkazildi: {ok}\n"
-                    f"❌ Yetkazilmadi: {fail}\n"
-                    "🌐 Har bir a’zoga saqlangan tilida avtomatik yuborildi.",
+                    chat_id=u.id,
+                    text=f"✅ YANGILIK TARQATILDI\n\n📨 Yetkazildi: {ok}\n❌ Yetkazilmadi: {fail}\n🌐 Har bir a’zoga saqlangan tilida avtomatik yuborildi.",
                     _skip_i18n=True
                 )
             except Exception as exc:
@@ -1500,20 +1484,16 @@ async def ai_news_callback ( update,ctx ) :
                 execute ( "UPDATE ai_news_posts SET status='draft' WHERE id=?", ( n, ) )
                 try:
                     await ctx.bot.send_message(
-                        owner_id,
-                        "⚠️ Yuborishda xato yuz berdi. Yangilik draft holatiga qaytarildi.\n"
-                        "Sabab: "+str ( exc ) [:500],
+                        chat_id=u.id,
+                        text="⚠️ Yuborishda xato yuz berdi. Yangilik draft holatiga qaytarildi.\nSabab: "+str ( exc ) [:500],
                         reply_markup=ai_news_ready_markup ( n ) ,
                         _skip_i18n=True
                     )
                 except Exception:
-                    pass
+                    log.exception ( "News error notification failed post=%s",n)
 
-        # Callback handlerni band qilmaymiz.
-        ctx.application.create_task(
-            _broadcast_in_background (  ) ,
-            name=f"news-broadcast-{n}"
-        )
+        # Callback handlerni uzoq broadcast bilan band qilmaymiz.
+        ctx.application.create_task ( _broadcast_job (  ) , update=update, name=f"news-broadcast-{n}")
         return
 
 def main_menu_markup ( uid ) :
