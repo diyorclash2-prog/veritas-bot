@@ -1207,7 +1207,13 @@ def L ( uid,uz,ru,en ) : return {"uz":uz,"ru":ru,"en":en}.get ( user_lang ( uid 
 def lang_markup ( back="home" ) :
     return InlineKeyboardMarkup ( [[InlineKeyboardButton ( "🇺🇿 O‘zbekcha",callback_data="lang:set:uz" ) ,InlineKeyboardButton ( "🇷🇺 Русский",callback_data="lang:set:ru" ) ],[InlineKeyboardButton ( "🇬🇧 English",callback_data="lang:set:en" ) ],[InlineKeyboardButton ( "⬅️ Orqaga / Назад / Back",callback_data=back ) ]])
 def ai_news_init_db (  ) :
-    with db ( ) as c:c.executescript ( """CREATE TABLE IF NOT EXISTS ai_news_posts ( id INTEGER PRIMARY KEY AUTOINCREMENT,creator_id INTEGER NOT NULL,source_text TEXT DEFAULT '',uz_text TEXT DEFAULT '',ru_text TEXT DEFAULT '',en_text TEXT DEFAULT '',media_type TEXT DEFAULT '',media_file_id TEXT DEFAULT '',status TEXT DEFAULT 'draft',sent_ok INTEGER DEFAULT 0,sent_fail INTEGER DEFAULT 0,created_at INTEGER NOT NULL,sent_at INTEGER DEFAULT 0 ) ; CREATE INDEX IF NOT EXISTS idx_ai_news_status ON ai_news_posts ( status,id ) ;""")
+    with db ( ) as c:
+        c.executescript ( """CREATE TABLE IF NOT EXISTS ai_news_posts ( id INTEGER PRIMARY KEY AUTOINCREMENT,creator_id INTEGER NOT NULL,source_text TEXT DEFAULT '',uz_text TEXT DEFAULT '',ru_text TEXT DEFAULT '',en_text TEXT DEFAULT '',media_type TEXT DEFAULT '',media_file_id TEXT DEFAULT '',status TEXT DEFAULT 'draft',sent_ok INTEGER DEFAULT 0,sent_fail INTEGER DEFAULT 0,created_at INTEGER NOT NULL,sent_at INTEGER DEFAULT 0 ) ; CREATE INDEX IF NOT EXISTS idx_ai_news_status ON ai_news_posts ( status,id ) ;""")
+        cols={r[1] for r in c.execute ( "PRAGMA table_info ( ai_news_posts ) " ) .fetchall (  ) }
+        if "target_chat_id" not in cols:
+            c.execute ( "ALTER TABLE ai_news_posts ADD COLUMN target_chat_id INTEGER DEFAULT 0")
+        if "scope" not in cols:
+            c.execute ( "ALTER TABLE ai_news_posts ADD COLUMN scope TEXT DEFAULT 'global'")
 def _ai_news_prepare_sync ( source ) :
     if not OPENAI_API_KEY: raise RuntimeError ( "OPENAI_API_KEY sozlanmagan")
     prompt= ( "Siz Veritas rasmiy yangilik muharririsiz. Quyidagi xabarni AYNAN O'Z TILIDA saqlang. "
@@ -1236,6 +1242,20 @@ def ai_news_ready_markup ( nid ) :
         [InlineKeyboardButton ( "✏️ Matnni qayta yozish",callback_data=f"news:edit:{nid}" ) ],
         [InlineKeyboardButton ( "❌ Bekor qilish",callback_data=f"news:cancel:{nid}" ) ],
     ])
+def ai_news_group_preview_markup ( nid ) :
+    return InlineKeyboardMarkup ( [
+        [InlineKeyboardButton ( "🖼 POSTER YARATISH",callback_data=f"poster:styles:{nid}" ) ],
+        [InlineKeyboardButton ( "📢 SHU GURUHGA YUBORISH",callback_data=f"news:sendgroup:{nid}" ) ],
+        [InlineKeyboardButton ( "❌ Bekor qilish",callback_data=f"news:cancel:{nid}" ) ],
+    ])
+
+def ai_news_group_ready_markup ( nid ) :
+    return InlineKeyboardMarkup ( [
+        [InlineKeyboardButton ( "📢 SHU GURUHGA YUBORISH",callback_data=f"news:sendgroup:{nid}" ) ],
+        [InlineKeyboardButton ( "🔄 Posterni qayta yaratish",callback_data=f"poster:styles:{nid}" ) ],
+        [InlineKeyboardButton ( "❌ Bekor qilish",callback_data=f"news:cancel:{nid}" ) ],
+    ])
+
 async def _news_send_one ( bot,uid,text,media_type='',file_id='' ) :
     """Send one news item. Poster/media and full text are sent separately.
     This avoids Telegram's 1024-char media-caption limit and does not require
@@ -1374,8 +1394,8 @@ def poster_generate_sync ( text,style ) :
 
 async def poster_callback ( update,ctx ) :
     q=update.callback_query; d=q.data or ""; uid=q.from_user.id
-    if uid not in SUPER_OWNERS:
-        return await q.answer ( "Faqat Super Ega uchun.",show_alert=True)
+    # Super Ega global postlarni; guruh admini esa faqat o‘z guruhiga tegishli postni boshqaradi.
+    # Post yuklangach target_chat_id bo‘yicha yana tekshiriladi.
     # Callbackni regexsiz qat’iy parse qilamiz. Telegram callback_data uchun ishonchliroq.
     parts=d.split ( ":")
     if len ( parts) not in (3,4) or parts[0] != "poster":
@@ -1392,17 +1412,23 @@ async def poster_callback ( update,ctx ) :
     post=one ( "SELECT * FROM ai_news_posts WHERE id=?", ( nid, ) )
     if not post or post['status']!='draft':
         return await q.answer ( "Yangilik topilmadi yoki yuborilgan.",show_alert=True)
+    target_chat_id=int ( post["target_chat_id"] or 0)
+    if target_chat_id:
+        if post["creator_id"] != uid or not await can_manage ( ctx.bot,target_chat_id,uid ) :
+            return await q.answer ( "Bu poster sizning guruhingizga tegishli emas.",show_alert=True)
+    elif uid not in SUPER_OWNERS:
+        return await q.answer ( "Faqat Super Ega uchun.",show_alert=True)
     if action=='styles':
         await q.answer ( )
-        return await ctx.bot.send_message ( uid,"🎨 Poster uchun uslubni tanlang:",reply_markup=poster_style_markup ( nid ) )
+        return await ctx.bot.send_message ( q.message.chat_id,"🎨 Poster uchun uslubni tanlang:",reply_markup=poster_style_markup ( nid ) ,_skip_i18n=True)
     if action=='make':
         await q.answer ( "🎨 Poster yaratilmoqda...")
-        status=await ctx.bot.send_message ( uid,"⏳ AI poster chizmoqda. Bu biroz vaqt olishi mumkin.")
+        status=await ctx.bot.send_message ( q.message.chat_id,"⏳ AI poster chizmoqda. Bu biroz vaqt olishi mumkin.",_skip_i18n=True)
         try:
             async with POSTER_LOCK:
                 image_bytes=await asyncio.to_thread ( poster_generate_sync,post['uz_text'],style)
             bio=io.BytesIO ( image_bytes ) ;bio.name="veritas_poster.png";bio.seek ( 0)
-            photo=await ctx.bot.send_photo ( uid,bio,caption=f"🖼 Yangilik #{nid} — poster preview\n🎨 {POSTER_STYLES[style][0]}\n\nTasdiqlashdan oldin rasmdagi yozuvlarni tekshiring.",reply_markup=poster_confirm_markup ( nid,style ) )
+            photo=await ctx.bot.send_photo ( q.message.chat_id,bio,caption=f"🖼 Yangilik #{nid} — poster preview\n🎨 {POSTER_STYLES[style][0]}\n\nTasdiqlashdan oldin rasmdagi yozuvlarni tekshiring.",reply_markup=poster_confirm_markup ( nid,style ) ,_skip_i18n=True)
             file_id=photo.photo[-1].file_id
             with db ( ) as c:
                 c.execute ( "INSERT OR REPLACE INTO ai_news_posters ( post_id,style,file_id,created_at) VALUES ( ?,?,?,? ) ", ( nid,style,file_id,now (  )  ) )
@@ -1414,13 +1440,15 @@ async def poster_callback ( update,ctx ) :
     if action=='reject':
         await q.answer ( "Bekor qilindi")
         execute ( "DELETE FROM ai_news_posters WHERE post_id=?", ( nid, ) )
-        return await ctx.bot.send_message ( uid,"❌ Poster rad etildi. Yangilik matni saqlandi.",reply_markup=ai_news_preview_markup ( nid ) )
+        return await ctx.bot.send_message ( q.message.chat_id,"❌ Poster rad etildi. Yangilik matni saqlandi.",reply_markup=ai_news_group_preview_markup ( nid) if target_chat_id else ai_news_preview_markup ( nid ) ,_skip_i18n=True)
     if action=='accept':
         candidate=one ( "SELECT * FROM ai_news_posters WHERE post_id=?", ( nid, ) )
         if not candidate:return await q.answer ( "Poster topilmadi. Qayta yarating.",show_alert=True)
         execute ( "UPDATE ai_news_posts SET media_type='photo',media_file_id=? WHERE id=? AND status='draft'", ( candidate['file_id'],nid ) )
         await q.answer ( "Poster saqlandi!")
-        return await ctx.bot.send_message ( uid,f"✅ Poster #{nid} yangilikka biriktirildi.\n\n📢 BARCHA GURUHLARGA YUBORISH bosilganda shu bitta post va poster bot qo‘shilgan barcha guruhlarga yuboriladi.",reply_markup=ai_news_ready_markup ( nid ) ,_skip_i18n=True)
+        if target_chat_id:
+            return await ctx.bot.send_message ( q.message.chat_id,f"✅ Poster #{nid} tayyor.\n\n📢 SHU GURUHGA YUBORISH tugmasi faqat shu guruhga yuboradi.",reply_markup=ai_news_group_ready_markup ( nid ) ,_skip_i18n=True)
+        return await ctx.bot.send_message ( q.message.chat_id,f"✅ Poster #{nid} yangilikka biriktirildi.\n\n📢 BARCHA GURUHLARGA YUBORISH bosilganda shu bitta post va poster bot qo‘shilgan barcha guruhlarga yuboriladi.",reply_markup=ai_news_ready_markup ( nid ) ,_skip_i18n=True)
 
 async def ai_news_callback ( update,ctx ) :
     q=update.callback_query;u=q.from_user;d=q.data or ''
@@ -5198,6 +5226,7 @@ _original_new_members=new_members
 async def new_members ( update,ctx ) :
     chat=update.effective_chat; msg=update.effective_message
     if chat and chat.type in ('group','supergroup' ) :
+        ensure_group ( chat)
         rr=rose_row ( chat.id ) ; ts=now (  ) ; arr=[x for x in ROSE_JOIN_CACHE.get ( chat.id,[]) if ts-x<=rr['raid_window']]
         arr += [ts]*len ( msg.new_chat_members or [] ) ; ROSE_JOIN_CACHE[chat.id]=arr
         if rr['anti_raid'] and len ( arr ) >=rr['raid_join_limit']:
@@ -5777,6 +5806,31 @@ async def mazgila_maybe_reply ( update,ctx ) :
         log.exception ( 'mazgila AI reply failed')
     return False
 
+async def group_poster_command ( update,ctx,args ) :
+    msg=update.effective_message; chat=update.effective_chat; u=update.effective_user
+    if not msg or not chat or not u or chat.type not in ("group","supergroup" ) :
+        return False
+    if not await can_manage ( ctx.bot,chat.id,u.id ) :
+        await msg.reply_text ( "❌ Poster tayyorlash faqat shu guruh adminlari uchun.")
+        return True
+    ensure_group ( chat ) ; ensure_user ( u)
+    source=" ".join ( args ) .strip ( )
+    if not source:
+        await msg.reply_text ( "🖼 Poster uchun matnni shu ko‘rinishda yozing:\n*poster E'lon matni")
+        return True
+    wait=await msg.reply_text ( "🤖 AI post matnini tayyorlamoqda...")
+    try:
+        data=await ai_news_prepare ( source)
+    except Exception as exc:
+        log.exception ( "group poster prepare failed chat=%s",chat.id)
+        await wait.edit_text ( "⚠️ AI postni tayyorlay olmadi: "+str ( exc ) [:300])
+        return True
+    with db ( ) as c:
+        nid=c.execute ( "INSERT INTO ai_news_posts ( creator_id,source_text,uz_text,ru_text,en_text,status,created_at,target_chat_id,scope) VALUES ( ?,?,?,?,?,'draft',?,?,? ) ",
+                      (u.id,source,data['uz'],'','',now (  ) ,chat.id,'group' )  ) .lastrowid
+    await wait.edit_text ( f"📢 POST #{nid} — PREVIEW\n\n{data['uz'][:3300]}",reply_markup=ai_news_group_preview_markup ( nid ) )
+    return True
+
 _bayram_old_star_router=star_text_router
 async def star_text_router ( update,ctx ) :
     msg=update.effective_message
@@ -5784,6 +5838,7 @@ async def star_text_router ( update,ctx ) :
     if low in ('*til','*lang','*language' ) : return await group_lang_command ( update,ctx)
     if low=='*bayram': return await bayram_command ( update,ctx)
     if low=='*mazgila' or low.startswith ( '*mazgila ' ) : return await mazgila_command ( update,ctx,raw.split (  ) [1:])
+    if low=='*poster' or low.startswith ( '*poster ' ) : return await group_poster_command ( update,ctx,raw.split (  ) [1:])
     return await _bayram_old_star_router ( update,ctx)
 
 _bayram_old_callback=callback
@@ -5798,7 +5853,7 @@ async def callback ( update,ctx ) :
     # V9.1 NEWS: barcha news:* callbacklar bitta asosiy router orqali ishlaydi.
     # Alohida handler bilan to'qnashuv bo'lmasligi uchun shu yerdan bevosita yuboramiz.
     if data.startswith ( 'poster:' ) :
-        return await poster_callback ( update,ctx)
+        return
     # news:* has its own high-priority CallbackQueryHandler (group=-100 ) .
     # Do not process it again in the generic callback router.
     if data.startswith ( 'news:' ) :
@@ -5948,6 +6003,28 @@ async def ai_news_send_direct ( update, ctx ) :
         _skip_i18n=True,
     )
 
+async def ai_news_send_group_direct ( update,ctx ) :
+    q=update.callback_query
+    if not q:return
+    m=re.fullmatch ( r"news:sendgroup: ( \d+ ) ",q.data or "")
+    if not m:return
+    u=q.from_user; nid=int ( m.group ( 1 ) )
+    post=one ( "SELECT * FROM ai_news_posts WHERE id=?", ( nid, ) )
+    if not post:return await q.answer ( "Post topilmadi.",show_alert=True)
+    cid=int ( post["target_chat_id"] or 0)
+    if not cid or post["creator_id"]!=u.id or not await can_manage ( ctx.bot,cid,u.id ) :
+        return await q.answer ( "Bu guruhga yuborish huquqingiz yo‘q.",show_alert=True)
+    if post["status"] not in ("draft","sending" ) :
+        return await q.answer ( "Bu post allaqachon yuborilgan yoki bekor qilingan.",show_alert=True)
+    await q.answer ( "📤 Guruhga yuborilmoqda")
+    text= ( post["uz_text"] or post["source_text"] or "" ) .strip ( )
+    ok=await _news_send_one ( ctx.bot,cid,text,post["media_type"],post["media_file_id"])
+    if ok:
+        execute ( "UPDATE ai_news_posts SET status='sent',sent_ok=1,sent_fail=0,sent_at=? WHERE id=?", ( now (  ) ,nid ) )
+        return await ctx.bot.send_message ( q.message.chat_id,"✅ Post shu guruhga yuborildi.",_skip_i18n=True)
+    execute ( "UPDATE ai_news_posts SET status='draft',sent_fail=1 WHERE id=?", ( nid, ) )
+    return await ctx.bot.send_message ( q.message.chat_id,"⚠️ Yuborilmadi. Botning guruhda xabar yuborish huquqini tekshiring.",reply_markup=ai_news_group_ready_markup ( nid ) ,_skip_i18n=True)
+
 def main (  ) :
     if not TOKEN: raise RuntimeError ( "BOT_TOKEN kiritilmagan.")
     init_db ( )
@@ -5969,9 +6046,11 @@ def main (  ) :
     # This prevents the broad callback router from swallowing the send button.
     # Exact send callback has its own route and cannot be swallowed by any broad callback handler.
     app.add_handler ( CallbackQueryHandler ( ai_news_menu_direct, pattern=r"^news:menu$" ) , group=-300)
+    app.add_handler ( CallbackQueryHandler ( ai_news_send_group_direct, pattern=r"^news:sendgroup:\d+$" ) , group=-250)
+    app.add_handler ( CallbackQueryHandler ( poster_callback, pattern=r"^poster:" ) , group=-240)
     app.add_handler ( CallbackQueryHandler ( ai_news_send_direct, pattern=r"^news:send:\d+$" ) , group=-200)
     # Other news callbacks use the normal news controller; send is deliberately excluded.
-    app.add_handler ( CallbackQueryHandler ( ai_news_callback, pattern=r"^news: ( ?!send:|menu$ ) " ) , group=-100)
+    app.add_handler ( CallbackQueryHandler ( ai_news_callback, pattern=r"^news: ( ?!send:|sendgroup:|menu$ ) " ) , group=-100)
     app.add_handler ( CallbackQueryHandler ( group_lang_callback, pattern=r"^glang:" ) , group=-10)
     app.add_handler ( CallbackQueryHandler ( callback ) , group=0)
     app.add_handler ( MessageHandler ( filters.ChatType.PRIVATE & ~filters.COMMAND & ~filters.SUCCESSFUL_PAYMENT,ai_news_private_input ) ,group=-7)
@@ -5995,7 +6074,7 @@ def main (  ) :
         app.job_queue.run_repeating ( giveaway_job,60,first=10)
         app.job_queue.run_repeating ( rose_cleanup_job,30,first=15)
     app.add_error_handler ( error_handler)
-    log.info ( "VERITAS v8 starting")
+    log.info ( "VERITAS v9.1 FINAL GROUP POSTER starting")
     app.run_polling ( allowed_updates=Update.ALL_TYPES)
 
 if __name__=="__main__":
