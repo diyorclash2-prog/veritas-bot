@@ -1423,6 +1423,7 @@ async def poster_callback ( update,ctx ) :
 
 async def ai_news_callback ( update,ctx ) :
     q=update.callback_query;u=q.from_user;d=q.data or ''
+    log.warning ( "NEWS CALLBACK RECEIVED uid=%s data=%s", u.id, d)
     if u.id not in SUPER_OWNERS:return await q.answer ( "Faqat Super Ega uchun.",show_alert=True)
     if d=='news:menu':await q.answer (  ) ;return await _news_edit ( q,"📢 AI YANGILIK MARKAZI",reply_markup=ai_news_super_markup (  ) )
     if d=='news:new':await q.answer (  ) ;STATE[u.id]={'mode':'ai_news_input'};return await _news_edit ( q,"📢 Yangilik matnini yuboring.\n\nMatn, rasm+caption, video+caption yoki hujjat+caption mumkin. AI matnni o‘z tilida tuzatib, bitta tayyor post yaratadi.")
@@ -5797,8 +5798,10 @@ async def callback ( update,ctx ) :
     # Alohida handler bilan to'qnashuv bo'lmasligi uchun shu yerdan bevosita yuboramiz.
     if data.startswith ( 'poster:' ) :
         return await poster_callback ( update,ctx)
+    # news:* has its own high-priority CallbackQueryHandler (group=-100 ) .
+    # Do not process it again in the generic callback router.
     if data.startswith ( 'news:' ) :
-        return await ai_news_callback ( update,ctx)
+        return
     if data.startswith ( 'glang:' ) :
         return
     if data.startswith ( 'chatshot:' ) :
@@ -5824,7 +5827,9 @@ def main (  ) :
     app.add_handler ( CommandHandler ( "super",cmd_super ) )
     app.add_handler ( PreCheckoutQueryHandler ( precheckout ) )
     app.add_handler ( MessageHandler ( filters.SUCCESSFUL_PAYMENT,paid ) )
-    # news:* callbacklar asosiy callback router ichida ai_news_callback ga uzatiladi.
+    # NEWS callbacks get a dedicated highest-priority route.
+    # This prevents the broad callback router from swallowing the send button.
+    app.add_handler ( CallbackQueryHandler ( ai_news_callback, pattern=r"^news:" ) , group=-100)
     app.add_handler ( CallbackQueryHandler ( group_lang_callback, pattern=r"^glang:" ) , group=-10)
     app.add_handler ( CallbackQueryHandler ( callback ) , group=0)
     app.add_handler ( MessageHandler ( filters.ChatType.PRIVATE & ~filters.COMMAND & ~filters.SUCCESSFUL_PAYMENT,ai_news_private_input ) ,group=-7)
