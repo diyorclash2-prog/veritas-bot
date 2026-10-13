@@ -1218,7 +1218,18 @@ async def ai_news_prepare ( source ) : return await asyncio.to_thread ( _ai_news
 def ai_news_super_markup (  ) :
     return InlineKeyboardMarkup ( [[InlineKeyboardButton ( "📢 AI Yangilik joylash",callback_data="news:new" ) ],[InlineKeyboardButton ( "📰 Oxirgi yangiliklar",callback_data="news:list" ) ],[InlineKeyboardButton ( "⬅️ Orqaga",callback_data="super" ) ]])
 def ai_news_preview_markup ( nid ) :
+    # 3 til tugmalari faqat ixtiyoriy preview. Ularni bosish yuborish uchun SHART EMAS.
     return InlineKeyboardMarkup ( [[InlineKeyboardButton ( "🇺🇿",callback_data=f"news:preview:{nid}:uz" ) ,InlineKeyboardButton ( "🇷🇺",callback_data=f"news:preview:{nid}:ru" ) ,InlineKeyboardButton ( "🇬🇧",callback_data=f"news:preview:{nid}:en" ) ],[InlineKeyboardButton ( "🔄 AI qayta bezasin",callback_data=f"news:redo:{nid}" ) ,InlineKeyboardButton ( "✏️ Qayta yozish",callback_data=f"news:edit:{nid}" ) ],[InlineKeyboardButton ( "🖼 POSTER YARATISH",callback_data=f"poster:styles:{nid}" ) ],[InlineKeyboardButton ( "✅ HAMMAGA YUBORISH",callback_data=f"news:send:{nid}" ) ],[InlineKeyboardButton ( "❌ Bekor qilish",callback_data=f"news:cancel:{nid}" ) ]])
+
+def ai_news_poster_ready_markup ( nid ) :
+    # Poster tasdiqlangach eng asosiy amal darhol ko‘rinadi.
+    # Til tanlash talab qilinmaydi: broadcast users.lang bo‘yicha o‘zi tanlaydi.
+    return InlineKeyboardMarkup ( [
+        [InlineKeyboardButton ( "✅ HAMMAGA YUBORISH",callback_data=f"news:send:{nid}" ) ],
+        [InlineKeyboardButton ( "🔄 Posterni qayta yaratish",callback_data=f"poster:styles:{nid}" ) ],
+        [InlineKeyboardButton ( "✏️ Matnni qayta yozish",callback_data=f"news:edit:{nid}" ) ],
+        [InlineKeyboardButton ( "❌ Bekor qilish",callback_data=f"news:cancel:{nid}" ) ],
+    ])
 async def _news_send_one ( bot,uid,text,media_type='',file_id='' ) :
     async with NEWS_SEND_SEMAPHORE:
         try:
@@ -1386,7 +1397,14 @@ async def poster_callback ( update,ctx ) :
         if not candidate:return await q.answer ( "Poster topilmadi. Qayta yarating.",show_alert=True)
         execute ( "UPDATE ai_news_posts SET media_type='photo',media_file_id=? WHERE id=? AND status='draft'", ( candidate['file_id'],nid ) )
         await q.answer ( "Poster saqlandi!")
-        return await ctx.bot.send_message ( uid,f"✅ Poster #{nid} yangilikka biriktirildi.\n\n🇺🇿 🇷🇺 🇬🇧 tugmalari — faqat 3 tildagi previewni tekshirish uchun.\n✅ HAMMAGA YUBORISH bosilganda har bir a’zoga uning tanlagan tilida avtomatik yuboriladi.",reply_markup=ai_news_preview_markup ( nid ) ,_skip_i18n=True)
+        return await ctx.bot.send_message(
+            uid,
+            f"✅ Poster #{nid} tayyor va yangilikka biriktirildi.\n\n"
+            "Til tanlash shart emas. ✅ HAMMAGA YUBORISH ni bosing — "
+            "har bir a’zoga uning saqlangan tilida avtomatik yuboriladi.",
+            reply_markup=ai_news_poster_ready_markup ( nid ) ,
+            _skip_i18n=True
+        )
 
 async def ai_news_callback ( update,ctx ) :
     q=update.callback_query;u=q.from_user;d=q.data or ''
@@ -1425,8 +1443,20 @@ async def ai_news_callback ( update,ctx ) :
         except Exception:return await _news_edit ( q,"⚠️ AI qayta tayyorlay olmadi.",reply_markup=ai_news_preview_markup ( n ) )
         execute ( "UPDATE ai_news_posts SET uz_text=?,ru_text=?,en_text=? WHERE id=?", ( data['uz'],data['ru'],data['en'],n )  ) ;return await _news_edit ( q,f"📢 YANGILIK #{n} — YANGI PREVIEW\n\n{data['uz'][:3300]}",reply_markup=ai_news_preview_markup ( n ) )
     if action=='send':
-        if r['status']!='draft':return await q.answer ( "Bu yangilik allaqachon yuborilgan/bekor qilingan.",show_alert=True)
-        execute ( "UPDATE ai_news_posts SET status='sending' WHERE id=? AND status='draft'", ( n, )  ) ;await q.answer (  ) ;await _news_edit ( q,"📤 Tarqatish boshlandi..." ) ;ok,fail=await ai_news_broadcast ( ctx,n ) ;return await _news_edit ( q,f"✅ YANGILIK TARQATILDI\n\n📨 Yetkazildi: {ok}\n❌ Yetkazilmadi: {fail}\n🌐 Har bir a’zoga tanlagan tilida yuborildi.")
+        if r['status']!='draft':
+            return await q.answer ( "Bu yangilik allaqachon yuborilgan/bekor qilingan.",show_alert=True)
+        if not all (  ( r[k] or '' ) .strip ( ) for k in ('uz_text','ru_text','en_text' )  ) :
+            return await q.answer ( "3 tildagi matn hali tayyor emas. AI qayta bezasin tugmasini bosing.",show_alert=True)
+        execute ( "UPDATE ai_news_posts SET status='sending' WHERE id=? AND status='draft'", ( n, ) )
+        await q.answer ( "📤 Yuborilmoqda...")
+        await _news_edit ( q,"📤 Tarqatish boshlandi...")
+        try:
+            ok,fail=await ai_news_broadcast ( ctx,n)
+        except Exception as exc:
+            log.exception ( "AI news broadcast failed: %s",exc)
+            execute ( "UPDATE ai_news_posts SET status='draft' WHERE id=? AND status='sending'", ( n, ) )
+            return await _news_edit ( q,"⚠️ Yuborishda xato bo‘ldi. Yangilik draft holatiga qaytarildi.\n\n"+str ( exc ) [:500],reply_markup=ai_news_poster_ready_markup ( n) if r['media_type']=='photo' else ai_news_preview_markup ( n ) )
+        return await _news_edit ( q,f"✅ YANGILIK TARQATILDI\n\n📨 Yetkazildi: {ok}\n❌ Yetkazilmadi: {fail}\n🌐 Har bir a’zoga uning saqlangan tilida yuborildi.")
 
 def main_menu_markup ( uid ) :
     kb=[
