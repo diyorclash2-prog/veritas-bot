@@ -5810,6 +5810,128 @@ async def callback ( update,ctx ) :
         return await bayram_callback ( update,ctx)
     return await _bayram_old_callback ( update,ctx)
 
+async def ai_news_send_direct ( update, ctx ) :
+    """Dedicated, retry-safe news broadcaster for all registered Telegram groups."""
+    q = update.callback_query
+    if not q:
+        return
+    u = q.from_user
+    d = q.data or ""
+    m = re.fullmatch ( r"news:send: ( \d+ ) ", d)
+    if not m:
+        return
+
+    # Answer Telegram immediately, before any DB/network work.
+    try:
+        await q.answer ( "📤 Guruhlarga yuborish boshlandi")
+    except Exception:
+        log.exception ( "NEWS_SEND answerCallbackQuery failed")
+
+    if not u or u.id not in SUPER_OWNERS:
+        return
+
+    nid = int ( m.group ( 1 ) )
+    log.warning ( "NEWS_SEND_DIRECT START post=%s uid=%s", nid, u.id)
+
+    try:
+        post = one ( "SELECT * FROM ai_news_posts WHERE id=?", (nid, ) )
+    except Exception as exc:
+        log.exception ( "NEWS_SEND_DIRECT post DB error post=%s", nid)
+        return await ctx.bot.send_message ( u.id, f"⚠️ Post bazadan olinmadi: {str ( exc ) [:300]}", _skip_i18n=True)
+    if not post:
+        return await ctx.bot.send_message ( u.id, "⚠️ Yangilik topilmadi.", _skip_i18n=True)
+
+    # One-language mode: exactly the prepared Uzbek/source text is sent to every group.
+    text = (post["uz_text"] or post["source_text"] or "" ) .strip ( )
+    media_type = (post["media_type"] or "" ) .strip ( )
+    media_file_id = (post["media_file_id"] or "" ) .strip ( )
+
+    try:
+        groups = all_ ( "SELECT chat_id,title FROM groups ORDER BY chat_id")
+    except Exception as exc:
+        log.exception ( "NEWS_SEND_DIRECT groups DB error post=%s", nid)
+        return await ctx.bot.send_message ( u.id, f"⚠️ Guruhlar bazadan olinmadi: {str ( exc ) [:300]}", _skip_i18n=True)
+
+    log.warning ( "NEWS_SEND_DIRECT GROUPS_FOUND post=%s count=%s", nid, len ( groups ) )
+    if not groups:
+        try:
+            execute ( "UPDATE ai_news_posts SET status='draft' WHERE id=?", (nid, ) )
+        except Exception:
+            pass
+        return await ctx.bot.send_message(
+            u.id,
+            "⚠️ Bazada yuborish uchun guruh topilmadi. Bot avval guruhda ishlagan bo‘lishi kerak.",
+            reply_markup=ai_news_ready_markup ( nid ) ,
+            _skip_i18n=True,
+        )
+
+    try:
+        execute ( "UPDATE ai_news_posts SET status='sending' WHERE id=?", (nid, ) )
+    except Exception:
+        log.exception ( "NEWS_SEND_DIRECT could not mark sending post=%s", nid)
+
+    try:
+        await _news_edit ( q, f"📤 {len ( groups ) } TA GURUHGA YUBORILMOQDA...")
+    except Exception:
+        log.exception ( "NEWS_SEND_DIRECT preview edit failed post=%s", nid)
+
+    async def send_group ( row ) :
+        cid = int ( row["chat_id"])
+        title = row["title"] or str ( cid)
+        try:
+            log.warning ( "NEWS_SEND_DIRECT SENDING post=%s chat=%s title=%s", nid, cid, title)
+            if media_type == "photo" and media_file_id:
+                await ctx.bot.send_photo ( chat_id=cid, photo=media_file_id, _skip_i18n=True)
+            elif media_type == "video" and media_file_id:
+                await ctx.bot.send_video ( chat_id=cid, video=media_file_id, _skip_i18n=True)
+            elif media_type == "document" and media_file_id:
+                await ctx.bot.send_document ( chat_id=cid, document=media_file_id, _skip_i18n=True)
+            if text:
+                for pos in range ( 0, len ( text ) , 4000 ) :
+                    await ctx.bot.send_message ( chat_id=cid, text=text[pos:pos+4000], _skip_i18n=True)
+            log.warning ( "NEWS_SEND_DIRECT OK post=%s chat=%s", nid, cid)
+            return True, cid, ""
+        except Exception as exc:
+            log.exception ( "NEWS_SEND_DIRECT FAIL post=%s chat=%s: %s", nid, cid, exc)
+            return False, cid, str ( exc ) [:180]
+
+    ok = 0
+    fail = 0
+    failures = []
+    # Small batches are deliberately used to avoid Telegram flood limits.
+    for pos in range ( 0, len ( groups ) , 8 ) :
+        results = await asyncio.gather ( * ( send_group ( r) for r in groups[pos:pos+8] ) )
+        for success, cid, err in results:
+            if success:
+                ok += 1
+            else:
+                fail += 1
+                failures.append ( f"{cid}: {err}")
+        if pos + 8 < len ( groups ) :
+            await asyncio.sleep ( 0.8)
+
+    final_status = "sent" if ok > 0 else "draft"
+    try:
+        execute(
+            "UPDATE ai_news_posts SET status=?,sent_ok=?,sent_fail=?,sent_at=? WHERE id=?",
+            (final_status, ok, fail, now ( ) if ok else 0, nid ) ,
+        )
+    except Exception:
+        log.exception ( "NEWS_SEND_DIRECT final DB update failed post=%s", nid)
+
+    log.warning ( "NEWS_SEND_DIRECT DONE post=%s ok=%s fail=%s", nid, ok, fail)
+    result = f"✅ YUBORISH TUGADI\n\n🏘 Yetkazildi: {ok}\n❌ Yetkazilmadi: {fail}"
+    if failures:
+        result += "\n\n⚠️ Birinchi xatolar:\n" + "\n".join ( failures[:5])
+    if ok == 0:
+        result += "\n\nPost draft holatida qoldi — qayta yuborish mumkin."
+    await ctx.bot.send_message(
+        u.id,
+        result,
+        reply_markup=ai_news_ready_markup ( nid) if ok == 0 else None,
+        _skip_i18n=True,
+    )
+
 def main (  ) :
     if not TOKEN: raise RuntimeError ( "BOT_TOKEN kiritilmagan.")
     init_db ( )
@@ -5829,7 +5951,10 @@ def main (  ) :
     app.add_handler ( MessageHandler ( filters.SUCCESSFUL_PAYMENT,paid ) )
     # NEWS callbacks get a dedicated highest-priority route.
     # This prevents the broad callback router from swallowing the send button.
-    app.add_handler ( CallbackQueryHandler ( ai_news_callback, pattern=r"^news:" ) , group=-100)
+    # Exact send callback has its own route and cannot be swallowed by any broad callback handler.
+    app.add_handler ( CallbackQueryHandler ( ai_news_send_direct, pattern=r"^news:send:\d+$" ) , group=-200)
+    # Other news callbacks use the normal news controller; send is deliberately excluded.
+    app.add_handler ( CallbackQueryHandler ( ai_news_callback, pattern=r"^news: ( ?!send: ) " ) , group=-100)
     app.add_handler ( CallbackQueryHandler ( group_lang_callback, pattern=r"^glang:" ) , group=-10)
     app.add_handler ( CallbackQueryHandler ( callback ) , group=0)
     app.add_handler ( MessageHandler ( filters.ChatType.PRIVATE & ~filters.COMMAND & ~filters.SUCCESSFUL_PAYMENT,ai_news_private_input ) ,group=-7)
