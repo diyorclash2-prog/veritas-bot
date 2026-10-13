@@ -809,9 +809,10 @@ async def v9_private_input ( update,ctx ) :
     # GLOBAL NAVIGATSIYA — V8/V9 ichida qayerda bo‘lishidan qat’i nazar.
     if txt=="🛡 Veritas":
         STATE.pop ( u.id,None)
-        ctx.user_data.pop ( "v9_consumed_message_id",None)
-        await msg.reply_text ( "🛡 VERITAS\n\nAsosiy bo‘lim:",reply_markup=main_menu_markup ( u.id ) )
-        return await msg.reply_text ( "Asosiy panel:",reply_markup=veritas_global_keyboard (  ) )
+        # This navigation message is fully consumed here. Prevent private AI from
+        # treating the same button text as a normal AI prompt in a later handler group.
+        ctx.user_data["v9_consumed_message_id"]=msg.message_id
+        return await msg.reply_text ( "🛡 VERITAS\n\nAsosiy bo‘lim:",reply_markup=main_menu_markup ( u.id ) )
 
     if txt=="🎓 O‘quv • Talaba":
         STATE.pop ( u.id,None)
@@ -5810,6 +5811,21 @@ async def callback ( update,ctx ) :
         return await bayram_callback ( update,ctx)
     return await _bayram_old_callback ( update,ctx)
 
+async def ai_news_menu_direct ( update, ctx ) :
+    """Open the Super Owner news sender without passing through broad callback routers."""
+    q=update.callback_query
+    if not q or (q.data or "" ) !="news:menu":
+        return
+    u=q.from_user
+    try:
+        await q.answer ( )
+    except Exception:
+        pass
+    if not u or u.id not in SUPER_OWNERS:
+        return
+    STATE.pop ( u.id,None)
+    return await _news_edit ( q,"📢 AI YANGILIK MARKAZI",reply_markup=ai_news_super_markup (  ) )
+
 async def ai_news_send_direct ( update, ctx ) :
     """Dedicated, retry-safe news broadcaster for all registered Telegram groups."""
     q = update.callback_query
@@ -5952,9 +5968,10 @@ def main (  ) :
     # NEWS callbacks get a dedicated highest-priority route.
     # This prevents the broad callback router from swallowing the send button.
     # Exact send callback has its own route and cannot be swallowed by any broad callback handler.
+    app.add_handler ( CallbackQueryHandler ( ai_news_menu_direct, pattern=r"^news:menu$" ) , group=-300)
     app.add_handler ( CallbackQueryHandler ( ai_news_send_direct, pattern=r"^news:send:\d+$" ) , group=-200)
     # Other news callbacks use the normal news controller; send is deliberately excluded.
-    app.add_handler ( CallbackQueryHandler ( ai_news_callback, pattern=r"^news: ( ?!send: ) " ) , group=-100)
+    app.add_handler ( CallbackQueryHandler ( ai_news_callback, pattern=r"^news: ( ?!send:|menu$ ) " ) , group=-100)
     app.add_handler ( CallbackQueryHandler ( group_lang_callback, pattern=r"^glang:" ) , group=-10)
     app.add_handler ( CallbackQueryHandler ( callback ) , group=0)
     app.add_handler ( MessageHandler ( filters.ChatType.PRIVATE & ~filters.COMMAND & ~filters.SUCCESSFUL_PAYMENT,ai_news_private_input ) ,group=-7)
