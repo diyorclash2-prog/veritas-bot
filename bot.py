@@ -1219,12 +1219,12 @@ def ai_news_super_markup (  ) :
     return InlineKeyboardMarkup ( [[InlineKeyboardButton ( "📢 AI Yangilik joylash",callback_data="news:new" ) ],[InlineKeyboardButton ( "📰 Oxirgi yangiliklar",callback_data="news:list" ) ],[InlineKeyboardButton ( "⬅️ Orqaga",callback_data="super" ) ]])
 def ai_news_preview_markup ( nid ) :
     # Language buttons are OPTIONAL previews only. Sending never depends on them.
-    return InlineKeyboardMarkup ( [[InlineKeyboardButton ( "🇺🇿",callback_data=f"news:preview:{nid}:uz" ) ,InlineKeyboardButton ( "🇷🇺",callback_data=f"news:preview:{nid}:ru" ) ,InlineKeyboardButton ( "🇬🇧",callback_data=f"news:preview:{nid}:en" ) ],[InlineKeyboardButton ( "🔄 AI qayta bezasin",callback_data=f"news:redo:{nid}" ) ,InlineKeyboardButton ( "✏️ Qayta yozish",callback_data=f"news:edit:{nid}" ) ],[InlineKeyboardButton ( "🖼 POSTER YARATISH",callback_data=f"poster:styles:{nid}" ) ],[InlineKeyboardButton ( "✅ HAMMAGA YUBORISH",callback_data=f"news:send:{nid}" ) ],[InlineKeyboardButton ( "❌ Bekor qilish",callback_data=f"news:cancel:{nid}" ) ]])
+    return InlineKeyboardMarkup ( [[InlineKeyboardButton ( "🇺🇿",callback_data=f"news:preview:{nid}:uz" ) ,InlineKeyboardButton ( "🇷🇺",callback_data=f"news:preview:{nid}:ru" ) ,InlineKeyboardButton ( "🇬🇧",callback_data=f"news:preview:{nid}:en" ) ],[InlineKeyboardButton ( "🔄 AI qayta bezasin",callback_data=f"news:redo:{nid}" ) ,InlineKeyboardButton ( "✏️ Qayta yozish",callback_data=f"news:edit:{nid}" ) ],[InlineKeyboardButton ( "🖼 POSTER YARATISH",callback_data=f"poster:styles:{nid}" ) ],[InlineKeyboardButton ( "📢 BARCHA GURUHLARGA YUBORISH",callback_data=f"news:send:{nid}" ) ],[InlineKeyboardButton ( "❌ Bekor qilish",callback_data=f"news:cancel:{nid}" ) ]])
 
 def ai_news_ready_markup ( nid ) :
     # Poster confirmed: send button is immediately available; no language selection step.
     return InlineKeyboardMarkup ( [
-        [InlineKeyboardButton ( "✅ HAMMAGA YUBORISH",callback_data=f"news:send:{nid}" ) ],
+        [InlineKeyboardButton ( "📢 BARCHA GURUHLARGA YUBORISH",callback_data=f"news:send:{nid}" ) ],
         [InlineKeyboardButton ( "🔄 Posterni qayta yaratish",callback_data=f"poster:styles:{nid}" ) ],
         [InlineKeyboardButton ( "✏️ Matnni qayta yozish",callback_data=f"news:edit:{nid}" ) ],
         [InlineKeyboardButton ( "❌ Bekor qilish",callback_data=f"news:cancel:{nid}" ) ],
@@ -1254,18 +1254,25 @@ async def _news_send_one ( bot,uid,text,media_type='',file_id='' ) :
             log.exception ( "AI news unexpected delivery error uid=%s: %s",uid,exc)
             return False
 async def ai_news_broadcast ( ctx,nid ) :
-    post=one ( "SELECT * FROM ai_news_posts WHERE id=?", ( nid, )  ) ; users=all_ ( "SELECT user_id,COALESCE ( lang,'uz') lang FROM users WHERE blocked=0 ORDER BY user_id")
+    # V9.1: yangilik endi shaxsiy foydalanuvchilarga emas, bot ro'yxatidagi barcha guruhlarga yuboriladi.
+    post=one ( "SELECT * FROM ai_news_posts WHERE id=?", ( nid, ) )
+    groups=all_ ( """SELECT g.chat_id,COALESCE ( gl.lang,'uz') AS lang
+                   FROM groups g
+                   LEFT JOIN group_languages gl ON gl.chat_id=g.chat_id
+                   ORDER BY g.chat_id""")
     if not post:return (0,0)
     ok=fail=0
-    for pos in range ( 0,len ( users ) ,20 ) :
+    for pos in range ( 0,len ( groups ) ,20 ) :
         tasks=[]
-        for r in users[pos:pos+20]:
-            lang=r['lang'] if r['lang'] in LANG_NAMES else 'uz'; tasks.append ( _news_send_one ( ctx.bot,int ( r['user_id'] ) ,post[lang+'_text'],post['media_type'],post['media_file_id'] ) )
+        for r in groups[pos:pos+20]:
+            lang=r['lang'] if r['lang'] in LANG_NAMES else 'uz'
+            tasks.append ( _news_send_one ( ctx.bot,int ( r['chat_id'] ) ,post[lang+'_text'],post['media_type'],post['media_file_id'] ) )
         for x in await asyncio.gather ( *tasks,return_exceptions=True ) :
             if x is True:ok+=1
             else:fail+=1
         await asyncio.sleep ( .35)
-    execute ( "UPDATE ai_news_posts SET status='sent',sent_ok=?,sent_fail=?,sent_at=? WHERE id=?", ( ok,fail,now (  ) ,nid )  ) ; return ok,fail
+    execute ( "UPDATE ai_news_posts SET status='sent',sent_ok=?,sent_fail=?,sent_at=? WHERE id=?", ( ok,fail,now (  ) ,nid ) )
+    return ok,fail
 async def ai_news_private_input ( update,ctx ) :
     msg=update.effective_message;u=update.effective_user
     if not msg or not u or msg.chat.type!='private' or u.id not in SUPER_OWNERS:return
@@ -1411,7 +1418,7 @@ async def poster_callback ( update,ctx ) :
         if not candidate:return await q.answer ( "Poster topilmadi. Qayta yarating.",show_alert=True)
         execute ( "UPDATE ai_news_posts SET media_type='photo',media_file_id=? WHERE id=? AND status='draft'", ( candidate['file_id'],nid ) )
         await q.answer ( "Poster saqlandi!")
-        return await ctx.bot.send_message ( uid,f"✅ Poster #{nid} yangilikka biriktirildi.\n\n🇺🇿 🇷🇺 🇬🇧 tugmalari — faqat 3 tildagi previewni tekshirish uchun.\n✅ HAMMAGA YUBORISH bosilganda har bir a’zoga uning tanlagan tilida avtomatik yuboriladi.",reply_markup=ai_news_ready_markup ( nid ) ,_skip_i18n=True)
+        return await ctx.bot.send_message ( uid,f"✅ Poster #{nid} yangilikka biriktirildi.\n\n🇺🇿 🇷🇺 🇬🇧 tugmalari — faqat 3 tildagi previewni tekshirish uchun.\n📢 BARCHA GURUHLARGA YUBORISH bosilganda bot qo‘shilgan guruhlarga guruhning tanlangan tilida avtomatik yuboriladi.",reply_markup=ai_news_ready_markup ( nid ) ,_skip_i18n=True)
 
 async def ai_news_callback ( update,ctx ) :
     q=update.callback_query;u=q.from_user;d=q.data or ''
@@ -1459,14 +1466,14 @@ async def ai_news_callback ( update,ctx ) :
                 execute ( f"UPDATE ai_news_posts SET {lang}_text=? WHERE id=?", ( r['uz_text'] or r['source_text'] or '',n ) )
         changed=execute ( "UPDATE ai_news_posts SET status='sending' WHERE id=? AND status='draft'", ( n, ) )
         await q.answer ( "📤 Yuborish boshlandi")
-        await _news_edit ( q,"📤 HAMMAGA YUBORILMOQDA...\n\nTil tugmalarini tanlash shart emas.")
+        await _news_edit ( q,"📤 BARCHA GURUHLARGA YUBORILMOQDA...\n\nHar bir guruhga uning saqlangan tilida yuboriladi.")
         try:
             ok,fail=await ai_news_broadcast ( ctx,n)
         except Exception as exc:
             log.exception ( "AI news broadcast failed post=%s",n)
             execute ( "UPDATE ai_news_posts SET status='draft' WHERE id=?", ( n, ) )
             return await ctx.bot.send_message ( u.id,"⚠️ Yuborishda xato yuz berdi. Yangilik draft holatiga qaytarildi.\nSabab: "+str ( exc ) [:500],reply_markup=ai_news_ready_markup ( n ) ,_skip_i18n=True)
-        return await ctx.bot.send_message ( u.id,f"✅ YANGILIK TARQATILDI\n\n📨 Yetkazildi: {ok}\n❌ Yetkazilmadi: {fail}\n🌐 Har bir a’zoga saqlangan tilida avtomatik yuborildi.",_skip_i18n=True)
+        return await ctx.bot.send_message ( u.id,f"✅ YANGILIK GURUHLARGA TARQATILDI\n\n🏘 Yetkazilgan guruhlar: {ok}\n❌ Yetkazilmagan guruhlar: {fail}\n🌐 Har bir guruhga saqlangan tilida avtomatik yuborildi.",_skip_i18n=True)
 
 def main_menu_markup ( uid ) :
     kb=[
@@ -5822,10 +5829,6 @@ def main (  ) :
     app.add_handler ( PreCheckoutQueryHandler ( precheckout ) )
     app.add_handler ( MessageHandler ( filters.SUCCESSFUL_PAYMENT,paid ) )
     # news:* callbacklar asosiy callback router ichida ai_news_callback ga uzatiladi.
-    # V9.1 NEWS/POSTER callbacks get their own highest-priority handlers.
-    # This prevents the generic callback router from swallowing HAMMAGA YUBORISH.
-    app.add_handler ( CallbackQueryHandler ( ai_news_callback, pattern=r"^news:" ) , group=-30)
-    app.add_handler ( CallbackQueryHandler ( poster_callback, pattern=r"^poster:" ) , group=-29)
     app.add_handler ( CallbackQueryHandler ( group_lang_callback, pattern=r"^glang:" ) , group=-10)
     app.add_handler ( CallbackQueryHandler ( callback ) , group=0)
     app.add_handler ( MessageHandler ( filters.ChatType.PRIVATE & ~filters.COMMAND & ~filters.SUCCESSFUL_PAYMENT,ai_news_private_input ) ,group=-7)
