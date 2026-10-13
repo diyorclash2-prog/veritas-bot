@@ -1325,10 +1325,19 @@ async def poster_callback ( update,ctx ) :
     q=update.callback_query; d=q.data or ""; uid=q.from_user.id
     if uid not in SUPER_OWNERS:
         return await q.answer ( "Faqat Super Ega uchun.",show_alert=True)
-    m=re.fullmatch ( r"poster: ( styles|make|accept|reject ) : ( \d+ )  ( ?:: ( gold|books|islam|school|auto )  ) ?",d)
-    if not m:
+    # Callbackni regexsiz qat’iy parse qilamiz. Telegram callback_data uchun ishonchliroq.
+    parts=d.split ( ":")
+    if len ( parts) not in (3,4) or parts[0] != "poster":
         return await q.answer ( "Noto‘g‘ri tugma",show_alert=True)
-    action,nid,style=m.group ( 1 ) ,int ( m.group ( 2 )  ) ,m.group ( 3)
+    action=parts[1]
+    if action not in {"styles","make","accept","reject"} or not parts[2].isdigit (  ) :
+        return await q.answer ( "Noto‘g‘ri tugma",show_alert=True)
+    nid=int ( parts[2])
+    style=parts[3] if len ( parts ) ==4 else None
+    if action=="make" and style not in POSTER_STYLES:
+        return await q.answer ( "Poster uslubi topilmadi.",show_alert=True)
+    if action!="make" and style is not None:
+        return await q.answer ( "Noto‘g‘ri tugma",show_alert=True)
     post=one ( "SELECT * FROM ai_news_posts WHERE id=?", ( nid, ) )
     if not post or post['status']!='draft':
         return await q.answer ( "Yangilik topilmadi yoki yuborilgan.",show_alert=True)
