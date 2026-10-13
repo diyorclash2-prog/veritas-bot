@@ -1452,49 +1452,21 @@ async def ai_news_callback ( update,ctx ) :
     if action=='send':
         if r['status']!='draft':
             return await q.answer ( "Bu yangilik allaqachon yuborilgan/bekor qilingan.",show_alert=True)
-
-        # 3 til preview tugmalarini bosish SHART EMAS.
+        # No language-selection prerequisite. RU/EN may fall back to Uzbek only if
+        # the stored translation is unexpectedly empty.
         for lang in ('ru','en' ) :
             if not (r[lang+'_text'] or '' ) .strip (  ) :
-                execute ( f"UPDATE ai_news_posts SET {lang}_text=? WHERE id=?",
-                        (r['uz_text'] or r['source_text'] or '',n ) )
-
-        # Muhim: sqlite Cursor truthy bo'ladi. Haqiqiy rowcountni tekshiramiz.
-        cur=execute ( "UPDATE ai_news_posts SET status='sending' WHERE id=? AND status='draft'", ( n, ) )
-        if getattr ( cur,'rowcount',0) != 1:
-            return await q.answer ( "Yuborish allaqachon boshlangan.",show_alert=True)
-
-        # Telegram callback spinnerini darhol yopamiz.
+                execute ( f"UPDATE ai_news_posts SET {lang}_text=? WHERE id=?", ( r['uz_text'] or r['source_text'] or '',n ) )
+        changed=execute ( "UPDATE ai_news_posts SET status='sending' WHERE id=? AND status='draft'", ( n, ) )
         await q.answer ( "📤 Yuborish boshlandi")
+        await _news_edit ( q,"📤 HAMMAGA YUBORILMOQDA...\n\nTil tugmalarini tanlash shart emas.")
         try:
-            await _news_edit ( q,"📤 HAMMAGA YUBORILMOQDA...\n\nTil tugmalarini tanlash shart emas.")
-        except Exception:
-            log.exception ( "News progress message failed post=%s",n)
-
-        async def _broadcast_job (  ) :
-            try:
-                ok,fail=await ai_news_broadcast ( ctx,n)
-                await ctx.bot.send_message(
-                    chat_id=u.id,
-                    text=f"✅ YANGILIK TARQATILDI\n\n📨 Yetkazildi: {ok}\n❌ Yetkazilmadi: {fail}\n🌐 Har bir a’zoga saqlangan tilida avtomatik yuborildi.",
-                    _skip_i18n=True
-                )
-            except Exception as exc:
-                log.exception ( "AI news broadcast failed post=%s",n)
-                execute ( "UPDATE ai_news_posts SET status='draft' WHERE id=?", ( n, ) )
-                try:
-                    await ctx.bot.send_message(
-                        chat_id=u.id,
-                        text="⚠️ Yuborishda xato yuz berdi. Yangilik draft holatiga qaytarildi.\nSabab: "+str ( exc ) [:500],
-                        reply_markup=ai_news_ready_markup ( n ) ,
-                        _skip_i18n=True
-                    )
-                except Exception:
-                    log.exception ( "News error notification failed post=%s",n)
-
-        # Callback handlerni uzoq broadcast bilan band qilmaymiz.
-        ctx.application.create_task ( _broadcast_job (  ) , update=update, name=f"news-broadcast-{n}")
-        return
+            ok,fail=await ai_news_broadcast ( ctx,n)
+        except Exception as exc:
+            log.exception ( "AI news broadcast failed post=%s",n)
+            execute ( "UPDATE ai_news_posts SET status='draft' WHERE id=?", ( n, ) )
+            return await ctx.bot.send_message ( u.id,"⚠️ Yuborishda xato yuz berdi. Yangilik draft holatiga qaytarildi.\nSabab: "+str ( exc ) [:500],reply_markup=ai_news_ready_markup ( n ) ,_skip_i18n=True)
+        return await ctx.bot.send_message ( u.id,f"✅ YANGILIK TARQATILDI\n\n📨 Yetkazildi: {ok}\n❌ Yetkazilmadi: {fail}\n🌐 Har bir a’zoga saqlangan tilida avtomatik yuborildi.",_skip_i18n=True)
 
 def main_menu_markup ( uid ) :
     kb=[
@@ -5850,6 +5822,10 @@ def main (  ) :
     app.add_handler ( PreCheckoutQueryHandler ( precheckout ) )
     app.add_handler ( MessageHandler ( filters.SUCCESSFUL_PAYMENT,paid ) )
     # news:* callbacklar asosiy callback router ichida ai_news_callback ga uzatiladi.
+    # V9.1 NEWS/POSTER callbacks get their own highest-priority handlers.
+    # This prevents the generic callback router from swallowing HAMMAGA YUBORISH.
+    app.add_handler ( CallbackQueryHandler ( ai_news_callback, pattern=r"^news:" ) , group=-30)
+    app.add_handler ( CallbackQueryHandler ( poster_callback, pattern=r"^poster:" ) , group=-29)
     app.add_handler ( CallbackQueryHandler ( group_lang_callback, pattern=r"^glang:" ) , group=-10)
     app.add_handler ( CallbackQueryHandler ( callback ) , group=0)
     app.add_handler ( MessageHandler ( filters.ChatType.PRIVATE & ~filters.COMMAND & ~filters.SUCCESSFUL_PAYMENT,ai_news_private_input ) ,group=-7)
