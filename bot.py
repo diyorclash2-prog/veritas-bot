@@ -1107,6 +1107,8 @@ async def i18n_markup ( markup,lang,bot ) :
 
 class VeritasI18nBot ( ExtBot ) :
     async def send_message ( self,chat_id,text,*args,**kwargs ) :
+        if kwargs.pop ( "_skip_i18n", False ) :
+            return await super (  ) .send_message ( chat_id,text,*args,**kwargs)
         lang=chat_lang ( chat_id)
         text=await i18n_text ( text,lang)
         if kwargs.get ( "reply_markup" ) :
@@ -1114,6 +1116,8 @@ class VeritasI18nBot ( ExtBot ) :
         return await super (  ) .send_message ( chat_id,text,*args,**kwargs)
 
     async def edit_message_text ( self,text,*args,**kwargs ) :
+        if kwargs.pop ( "_skip_i18n", False ) :
+            return await super (  ) .edit_message_text ( text,*args,**kwargs)
         chat_id=kwargs.get ( "chat_id")
         lang=chat_lang ( chat_id) if chat_id is not None else "uz"
         text=await i18n_text ( text,lang)
@@ -1122,18 +1126,24 @@ class VeritasI18nBot ( ExtBot ) :
         return await super (  ) .edit_message_text ( text,*args,**kwargs)
 
     async def send_photo ( self,chat_id,photo,*args,**kwargs ) :
+        if kwargs.pop ( "_skip_i18n", False ) :
+            return await super (  ) .send_photo ( chat_id,photo,*args,**kwargs)
         lang=chat_lang ( chat_id)
         if kwargs.get ( "caption" ) :kwargs["caption"]=await i18n_text ( kwargs["caption"],lang)
         if kwargs.get ( "reply_markup" ) :kwargs["reply_markup"]=await i18n_markup ( kwargs["reply_markup"],lang,self)
         return await super (  ) .send_photo ( chat_id,photo,*args,**kwargs)
 
     async def send_video ( self,chat_id,video,*args,**kwargs ) :
+        if kwargs.pop ( "_skip_i18n", False ) :
+            return await super (  ) .send_video ( chat_id,video,*args,**kwargs)
         lang=chat_lang ( chat_id)
         if kwargs.get ( "caption" ) :kwargs["caption"]=await i18n_text ( kwargs["caption"],lang)
         if kwargs.get ( "reply_markup" ) :kwargs["reply_markup"]=await i18n_markup ( kwargs["reply_markup"],lang,self)
         return await super (  ) .send_video ( chat_id,video,*args,**kwargs)
 
     async def send_document ( self,chat_id,document,*args,**kwargs ) :
+        if kwargs.pop ( "_skip_i18n", False ) :
+            return await super (  ) .send_document ( chat_id,document,*args,**kwargs)
         lang=chat_lang ( chat_id)
         if kwargs.get ( "caption" ) :kwargs["caption"]=await i18n_text ( kwargs["caption"],lang)
         if kwargs.get ( "reply_markup" ) :kwargs["reply_markup"]=await i18n_markup ( kwargs["reply_markup"],lang,self)
@@ -1212,10 +1222,10 @@ def ai_news_preview_markup ( nid ) :
 async def _news_send_one ( bot,uid,text,media_type='',file_id='' ) :
     async with NEWS_SEND_SEMAPHORE:
         try:
-            if media_type=='photo' and file_id: await bot.send_photo ( uid,file_id,caption=text[:1024])
-            elif media_type=='video' and file_id: await bot.send_video ( uid,file_id,caption=text[:1024])
-            elif media_type=='document' and file_id: await bot.send_document ( uid,file_id,caption=text[:1024])
-            else: await bot.send_message ( uid,text[:4096])
+            if media_type=='photo' and file_id: await bot.send_photo ( uid,file_id,caption=text[:1024],_skip_i18n=True)
+            elif media_type=='video' and file_id: await bot.send_video ( uid,file_id,caption=text[:1024],_skip_i18n=True)
+            elif media_type=='document' and file_id: await bot.send_document ( uid,file_id,caption=text[:1024],_skip_i18n=True)
+            else: await bot.send_message ( uid,text[:4096],_skip_i18n=True)
             return True
         except TelegramError:return False
 async def ai_news_broadcast ( ctx,nid ) :
@@ -1248,10 +1258,17 @@ async def ai_news_private_input ( update,ctx ) :
     with db ( ) as c:nid=c.execute ( "INSERT INTO ai_news_posts ( creator_id,source_text,uz_text,ru_text,en_text,media_type,media_file_id,status,created_at) VALUES ( ?,?,?,?,?,?,?,'draft',? ) ", ( u.id,source,data['uz'],data['ru'],data['en'],media_type,file_id,now (  )  )  ) .lastrowid
     STATE.pop ( u.id,None ) ; await wait.edit_text ( f"📢 YANGILIK #{nid} — PREVIEW\n\n{data['uz'][:3300]}",reply_markup=ai_news_preview_markup ( nid ) )
 async def _news_edit ( q,text,reply_markup=None ) :
+    # AI News preview is already deliberately written in uz/ru/en.
+    # Do NOT pass it through the global auto-translator again.
+    bot=q.get_bot ( )
+    chat_id=q.message.chat_id
     try:
-        return await q.edit_message_text ( text=text,reply_markup=reply_markup)
+        return await bot.edit_message_text(
+            chat_id=chat_id,message_id=q.message.message_id,text=text,
+            reply_markup=reply_markup,_skip_i18n=True)
     except TelegramError:
-        return await q.message.reply_text ( text,reply_markup=reply_markup)
+        return await bot.send_message(
+            chat_id=chat_id,text=text,reply_markup=reply_markup,_skip_i18n=True)
 
 # =========================================================
 # V9.1 — AI POSTER STUDIO (faqat Super Egalar)
@@ -1369,7 +1386,7 @@ async def poster_callback ( update,ctx ) :
         if not candidate:return await q.answer ( "Poster topilmadi. Qayta yarating.",show_alert=True)
         execute ( "UPDATE ai_news_posts SET media_type='photo',media_file_id=? WHERE id=? AND status='draft'", ( candidate['file_id'],nid ) )
         await q.answer ( "Poster saqlandi!")
-        return await ctx.bot.send_message ( uid,f"✅ Poster #{nid} yangilikka biriktirildi.\n\nYuborishdan oldin uch tildagi matnni tekshiring.",reply_markup=ai_news_preview_markup ( nid ) )
+        return await ctx.bot.send_message ( uid,f"✅ Poster #{nid} yangilikka biriktirildi.\n\n🇺🇿 🇷🇺 🇬🇧 tugmalari — faqat 3 tildagi previewni tekshirish uchun.\n✅ HAMMAGA YUBORISH bosilganda har bir a’zoga uning tanlagan tilida avtomatik yuboriladi.",reply_markup=ai_news_preview_markup ( nid ) ,_skip_i18n=True)
 
 async def ai_news_callback ( update,ctx ) :
     q=update.callback_query;u=q.from_user;d=q.data or ''
