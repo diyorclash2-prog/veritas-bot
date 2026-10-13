@@ -1395,9 +1395,24 @@ async def ai_news_callback ( update,ctx ) :
     if d=='news:new':await q.answer (  ) ;STATE[u.id]={'mode':'ai_news_input'};return await _news_edit ( q,"📢 Yangilik matnini yuboring.\n\nMatn, rasm+caption, video+caption yoki hujjat+caption mumkin. AI imloni tuzatib, bezab, 🇺🇿 🇷🇺 🇬🇧 variant yaratadi.")
     if d=='news:list':
         await q.answer (  ) ;rows=all_ ( "SELECT id,status,sent_ok,sent_fail FROM ai_news_posts ORDER BY id DESC LIMIT 15" ) ;body='\n'.join ( f"#{r['id']} · {r['status']} · ✅{r['sent_ok']} ❌{r['sent_fail']}" for r in rows) or 'Hali yangilik yo‘q.';return await _news_edit ( q,"📰 OXIRGI YANGILIKLAR\n\n"+body,reply_markup=ai_news_super_markup (  ) )
-    m=re.match ( r'news:preview: ( \d+ ) : ( uz|ru|en ) $',d)
+    m=re.fullmatch ( r"news:preview: ( \d+ ) : ( uz|ru|en ) ", d)
     if m:
-        await q.answer (  ) ;nid=int ( m.group ( 1 )  ) ;lang=m.group ( 2 ) ;r=one ( "SELECT * FROM ai_news_posts WHERE id=?", ( nid, )  ) ;return await _news_edit ( q,f"{LANG_NAMES[lang]} · #{nid}\n\n{r[lang+'_text'][:3300]}",reply_markup=ai_news_preview_markup ( nid ) ) if r else None
+        nid=int ( m.group ( 1 )  ) ; lang=m.group ( 2)
+        r=one ( "SELECT * FROM ai_news_posts WHERE id=?", ( nid, ) )
+        if not r:
+            return await q.answer ( "Yangilik topilmadi.",show_alert=True)
+        body= ( r[lang+"_text"] or "" ) .strip ( )
+        if not body:
+            return await q.answer ( "Bu tildagi matn tayyor emas.",show_alert=True)
+        await q.answer ( {"uz":"🇺🇿 O‘zbekcha","ru":"🇷🇺 Русский","en":"🇬🇧 English"}[lang])
+        # Til previewini global i18n qatlamidan o'tkazmaymiz.
+        # Eski xabarni edit qilish Telegram/client sabab ishlamasa ham, yangi preview aniq chiqadi.
+        return await ctx.bot.send_message(
+            chat_id=q.message.chat_id,
+            text=f"{LANG_NAMES[lang]} · #{nid}\n\n{body[:3300]}",
+            reply_markup=ai_news_preview_markup ( nid ) ,
+            _skip_i18n=True
+        )
     m=re.match ( r'news: ( redo|edit|cancel|send ) : ( \d+ ) $',d)
     if not m:return
     action,n=m.group ( 1 ) ,int ( m.group ( 2 )  ) ;r=one ( "SELECT * FROM ai_news_posts WHERE id=?", ( n, ) )
