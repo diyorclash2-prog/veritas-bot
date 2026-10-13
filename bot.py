@@ -5912,6 +5912,10 @@ async def ai_news_send_direct ( update, ctx ) :
     if not post:
         return await ctx.bot.send_message ( u.id, "⚠️ Yangilik topilmadi.", _skip_i18n=True)
 
+    # Reject duplicate presses; a post can be sent globally only once.
+    if post["status"] != "draft":
+        return await ctx.bot.send_message ( u.id, "⚠️ Bu post yuborilgan yoki yuborilmoqda. Takroriy jo‘natish to‘xtatildi.", _skip_i18n=True)
+
     # One-language mode: exactly the prepared Uzbek/source text is sent to every group.
     text = (post["uz_text"] or post["source_text"] or "" ) .strip ( )
     media_type = (post["media_type"] or "" ) .strip ( )
@@ -5922,6 +5926,11 @@ async def ai_news_send_direct ( update, ctx ) :
     except Exception as exc:
         log.exception ( "NEWS_SEND_DIRECT groups DB error post=%s", nid)
         return await ctx.bot.send_message ( u.id, f"⚠️ Guruhlar bazadan olinmadi: {str ( exc ) [:300]}", _skip_i18n=True)
+
+    # Telegram photo is stored on acceptance; ensure it is included in the broadcast.
+    poster = one ( "SELECT file_id FROM ai_news_posters WHERE post_id=?", (nid, ) )
+    if poster and poster["file_id"] and not media_file_id:
+        media_type, media_file_id = "photo", poster["file_id"]
 
     log.warning ( "NEWS_SEND_DIRECT GROUPS_FOUND post=%s count=%s", nid, len ( groups ) )
     if not groups:
@@ -5937,7 +5946,10 @@ async def ai_news_send_direct ( update, ctx ) :
         )
 
     try:
-        execute ( "UPDATE ai_news_posts SET status='sending' WHERE id=?", (nid, ) )
+        with db ( ) as c:
+            claimed = c.execute ( "UPDATE ai_news_posts SET status='sending' WHERE id=? AND status='draft'", (nid, )  ) .rowcount
+        if not claimed:
+            return await ctx.bot.send_message ( u.id, "⚠️ Bu post allaqachon yuborilmoqda.", _skip_i18n=True)
     except Exception:
         log.exception ( "NEWS_SEND_DIRECT could not mark sending post=%s", nid)
 
