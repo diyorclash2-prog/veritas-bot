@@ -5909,7 +5909,9 @@ async def ai_news_unified_router ( update, ctx ) :
     log.warning ( "AI_NEWS_ROUTER uid=%s data=%s", getattr ( q.from_user, "id", None ) , data)
 
     # Global broadcast gets first priority because it is the final/critical action.
-    if re.fullmatch ( r" ( ?:broadcast_all|news:send ) :\d+", data ) :
+    # Be tolerant of legacy/new callback suffixes: any broadcast_all:* or news:send:*
+    # belongs to the broadcast handler. The sender extracts the first numeric post id.
+    if data.startswith ( "broadcast_all:") or data.startswith ( "news:send:" ) :
         return await ai_news_send_direct ( update, ctx)
 
     # Group-only post send.
@@ -6002,8 +6004,17 @@ async def ai_news_send_direct ( update, ctx ) :
         return
     u = q.from_user
     d = q.data or ""
-    m = re.fullmatch ( r" ( ?:broadcast_all|news:send ) : ( \d+ ) ", d)
+    # Accept both current and legacy callback variants, including harmless suffixes.
+    if not (d.startswith ( "broadcast_all:") or d.startswith ( "news:send:" )  ) :
+        return
+    tail = d.split ( ":", 1 ) [1] if ":" in d else ""
+    m = re.search ( r"\d+", tail)
     if not m:
+        try:
+            await q.answer ( "⚠️ Tarqatish post ID topilmadi.", show_alert=True)
+        except Exception:
+            pass
+        log.error ( "NEWS_SEND malformed callback data=%r", d)
         return
 
     # Answer Telegram immediately, before any DB/network work.
@@ -6015,8 +6026,8 @@ async def ai_news_send_direct ( update, ctx ) :
     if not u or u.id not in SUPER_OWNERS:
         return
 
-    nid = int ( m.group ( 1 ) )
-    log.warning ( "NEWS_SEND_DIRECT START post=%s uid=%s", nid, u.id)
+    nid = int ( m.group ( 0 ) )
+    log.warning ( "NEWS_SEND_DIRECT START post=%s uid=%s raw_data=%r", nid, u.id, d)
 
     try:
         post = one ( "SELECT * FROM ai_news_posts WHERE id=?", (nid, ) )
