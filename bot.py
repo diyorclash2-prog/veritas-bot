@@ -5883,14 +5883,10 @@ async def callback ( update,ctx ) :
             ensure_user ( q.from_user ) ;set_user_lang ( q.from_user.id,lang ) ;await q.answer ( '✅' ) ;return await q.edit_message_text ( {'uz':'✅ Til saqlandi.','ru':'✅ Язык сохранён.','en':'✅ Language saved.'}[lang],reply_markup=main_menu_markup ( q.from_user.id ) )
     # V9.1 NEWS: barcha news:* callbacklar bitta asosiy router orqali ishlaydi.
     # Alohida handler bilan to'qnashuv bo'lmasligi uchun shu yerdan bevosita yuboramiz.
-    if data.startswith ( 'poster:' ) :
-        return
-    # news:* has its own high-priority CallbackQueryHandler (group=-100 ) .
-    # Do not process it again in the generic callback router.
-    if data.startswith ( 'news:' ) :
-        return
-    if data.startswith ( 'broadcast_all:' ) :
-        return
+    # V9.5: AI news/poster/broadcast callbacks use the SAME proven generic callback path.
+    # This avoids separate CallbackQueryHandler group collisions/silent button presses.
+    if data.startswith ( 'poster:') or data.startswith ( 'news:') or data.startswith ( 'broadcast_all:' ) :
+        return await ai_news_unified_router ( update, ctx)
     if data.startswith ( 'glang:' ) :
         return
     if data.startswith ( 'chatshot:' ) :
@@ -6174,16 +6170,7 @@ def main (  ) :
     app.add_handler ( CommandHandler ( "super",cmd_super ) )
     app.add_handler ( PreCheckoutQueryHandler ( precheckout ) )
     app.add_handler ( MessageHandler ( filters.SUCCESSFUL_PAYMENT,paid ) )
-    # V9.4: every AI-news/poster button goes through ONE deterministic router.
-    # This removes callback handler-group collisions that caused buttons to appear
-    # but do nothing after poster confirmation.
-    app.add_handler(
-        CallbackQueryHandler(
-            ai_news_unified_router,
-            pattern=r"^ ( ?:news:|poster:|broadcast_all: ) ",
-        ),
-        group=-500,
-    )
+    # V9.5: news/poster/broadcast are routed inside the generic callback handler (group=0 ) .
     app.add_handler ( CallbackQueryHandler ( group_lang_callback, pattern=r"^glang:" ) , group=-10)
     app.add_handler ( CallbackQueryHandler ( callback ) , group=0)
     app.add_handler ( MessageHandler ( filters.ChatType.PRIVATE & ~filters.COMMAND & ~filters.SUCCESSFUL_PAYMENT,ai_news_private_input ) ,group=-7)
