@@ -1230,14 +1230,14 @@ def ai_news_preview_markup ( nid ) :
     return InlineKeyboardMarkup ( [
         [InlineKeyboardButton ( "🔄 AI qayta bezasin",callback_data=f"news:redo:{nid}" ) ,InlineKeyboardButton ( "✏️ Qayta yozish",callback_data=f"news:edit:{nid}" ) ],
         [InlineKeyboardButton ( "🖼 POSTER YARATISH",callback_data=f"poster:styles:{nid}" ) ],
-        [InlineKeyboardButton ( "📢 BARCHA GURUHLARGA YUBORISH",callback_data=f"news:send:{nid}" ) ],
+        [InlineKeyboardButton ( "📢 BARCHA GURUHLARGA YUBORISH",callback_data=f"broadcast_all:{nid}" ) ],
         [InlineKeyboardButton ( "❌ Bekor qilish",callback_data=f"news:cancel:{nid}" ) ]
     ])
 
 def ai_news_ready_markup ( nid ) :
     # Poster confirmed: send button is immediately available; no language selection step.
     return InlineKeyboardMarkup ( [
-        [InlineKeyboardButton ( "📢 BARCHA GURUHLARGA YUBORISH",callback_data=f"news:send:{nid}" ) ],
+        [InlineKeyboardButton ( "📢 BARCHA GURUHLARGA YUBORISH",callback_data=f"broadcast_all:{nid}" ) ],
         [InlineKeyboardButton ( "🔄 Posterni qayta yaratish",callback_data=f"poster:styles:{nid}" ) ],
         [InlineKeyboardButton ( "✏️ Matnni qayta yozish",callback_data=f"news:edit:{nid}" ) ],
         [InlineKeyboardButton ( "❌ Bekor qilish",callback_data=f"news:cancel:{nid}" ) ],
@@ -5889,6 +5889,8 @@ async def callback ( update,ctx ) :
     # Do not process it again in the generic callback router.
     if data.startswith ( 'news:' ) :
         return
+    if data.startswith ( 'broadcast_all:' ) :
+        return
     if data.startswith ( 'glang:' ) :
         return
     if data.startswith ( 'chatshot:' ) :
@@ -5961,7 +5963,7 @@ async def ai_news_send_direct ( update, ctx ) :
         return
     u = q.from_user
     d = q.data or ""
-    m = re.fullmatch ( r"news:send: ( \d+ ) ", d)
+    m = re.fullmatch ( r" ( ?:broadcast_all|news:send ) : ( \d+ ) ", d)
     if not m:
         return
 
@@ -6137,7 +6139,7 @@ def main (  ) :
     app.add_handler ( CallbackQueryHandler ( ai_news_list_direct, pattern=r"^news:list$" ) , group=-280)
     app.add_handler ( CallbackQueryHandler ( ai_news_send_group_direct, pattern=r"^news:sendgroup:\d+$" ) , group=-250)
     app.add_handler ( CallbackQueryHandler ( poster_callback, pattern=r"^poster:" ) , group=-240)
-    app.add_handler ( CallbackQueryHandler ( ai_news_send_direct, pattern=r"^news:send:\d+$" ) , group=-200)
+    app.add_handler ( CallbackQueryHandler ( ai_news_send_direct, pattern=r"^ ( ?:broadcast_all|news:send ) :\d+$" ) , group=-400)
     # Other news callbacks use the normal news controller; send is deliberately excluded.
     app.add_handler ( CallbackQueryHandler ( ai_news_callback, pattern=r"^news: ( ?!send:|sendgroup:|menu$|new$|list$ ) " ) , group=-100)
     app.add_handler ( CallbackQueryHandler ( group_lang_callback, pattern=r"^glang:" ) , group=-10)
