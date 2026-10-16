@@ -5912,6 +5912,48 @@ async def ai_news_menu_direct ( update, ctx ) :
     STATE.pop ( u.id,None)
     return await _news_edit ( q,"📢 AI YANGILIK MARKAZI",reply_markup=ai_news_super_markup (  ) )
 
+async def ai_news_new_direct ( update, ctx ) :
+    """Open the new-news input screen through a dedicated callback route."""
+    q = update.callback_query
+    if not q or (q.data or "") != "news:new":
+        return
+    u = q.from_user
+    try:
+        await q.answer ( )
+    except Exception:
+        log.exception ( "NEWS_NEW answerCallbackQuery failed")
+    if not u or u.id not in SUPER_OWNERS:
+        return
+    STATE[u.id] = {"mode": "ai_news_input"}
+    return await _news_edit(
+        q,
+        "📢 Yangilik matnini yuboring.\n\n"
+        "Matn, rasm+caption, video+caption yoki hujjat+caption mumkin. "
+        "AI matnni o‘z tilida tuzatib, bitta tayyor post yaratadi.",
+    )
+
+async def ai_news_list_direct ( update, ctx ) :
+    """Show recent news through a dedicated callback route."""
+    q = update.callback_query
+    if not q or (q.data or "") != "news:list":
+        return
+    u = q.from_user
+    try:
+        await q.answer ( )
+    except Exception:
+        log.exception ( "NEWS_LIST answerCallbackQuery failed")
+    if not u or u.id not in SUPER_OWNERS:
+        return
+    rows = all_ ( "SELECT id,status,sent_ok,sent_fail FROM ai_news_posts ORDER BY id DESC LIMIT 15")
+    body = "\n".join(
+        f"#{r['id']} · {r['status']} · ✅{r['sent_ok']} ❌{r['sent_fail']}" for r in rows
+    ) or "Hali yangilik yo‘q."
+    return await _news_edit(
+        q,
+        "📰 OXIRGI YANGILIKLAR\n\n" + body,
+        reply_markup=ai_news_super_markup (  ) ,
+    )
+
 async def ai_news_send_direct ( update, ctx ) :
     """Dedicated, retry-safe news broadcaster for all registered Telegram groups."""
     q = update.callback_query
@@ -6091,11 +6133,13 @@ def main (  ) :
     # This prevents the broad callback router from swallowing the send button.
     # Exact send callback has its own route and cannot be swallowed by any broad callback handler.
     app.add_handler ( CallbackQueryHandler ( ai_news_menu_direct, pattern=r"^news:menu$" ) , group=-300)
+    app.add_handler ( CallbackQueryHandler ( ai_news_new_direct, pattern=r"^news:new$" ) , group=-290)
+    app.add_handler ( CallbackQueryHandler ( ai_news_list_direct, pattern=r"^news:list$" ) , group=-280)
     app.add_handler ( CallbackQueryHandler ( ai_news_send_group_direct, pattern=r"^news:sendgroup:\d+$" ) , group=-250)
     app.add_handler ( CallbackQueryHandler ( poster_callback, pattern=r"^poster:" ) , group=-240)
     app.add_handler ( CallbackQueryHandler ( ai_news_send_direct, pattern=r"^news:send:\d+$" ) , group=-200)
     # Other news callbacks use the normal news controller; send is deliberately excluded.
-    app.add_handler ( CallbackQueryHandler ( ai_news_callback, pattern=r"^news: ( ?!send:|sendgroup:|menu$ ) " ) , group=-100)
+    app.add_handler ( CallbackQueryHandler ( ai_news_callback, pattern=r"^news: ( ?!send:|sendgroup:|menu$|new$|list$ ) " ) , group=-100)
     app.add_handler ( CallbackQueryHandler ( group_lang_callback, pattern=r"^glang:" ) , group=-10)
     app.add_handler ( CallbackQueryHandler ( callback ) , group=0)
     app.add_handler ( MessageHandler ( filters.ChatType.PRIVATE & ~filters.COMMAND & ~filters.SUCCESSFUL_PAYMENT,ai_news_private_input ) ,group=-7)
