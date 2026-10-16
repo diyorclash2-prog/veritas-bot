@@ -35,7 +35,7 @@ from telegram.constants import ChatMemberStatus
 from telegram.error import TelegramError
 from telegram.ext import (
     Application, ContextTypes, CommandHandler, MessageHandler, CallbackQueryHandler,
-    PreCheckoutQueryHandler, ExtBot, filters
+    PreCheckoutQueryHandler, ChatMemberHandler, ExtBot, filters
 )
 
 TOKEN = os.getenv ( "BOT_TOKEN", "" ) .strip ( )
@@ -4363,6 +4363,11 @@ async def passive ( update,ctx ) :
             if r["key"] in text: return await msg.reply_text ( r["response"])
 
 async def new_members ( update,ctx ) :
+    # Har qanday yangi a'zo hodisasi kelganda guruhni bazaga qayta ro'yxatdan o'tkazamiz.
+    # Bu Telegram privacy mode yoqilgan guruhlarda ham broadcast ro'yxatini to'ldirishga yordam beradi.
+    chat=update.effective_chat
+    if chat and chat.type in ("group","supergroup" ) :
+        ensure_group ( chat)
     st=moderation_settings ( update.effective_chat.id)
     g=one ( "SELECT welcome FROM groups WHERE chat_id=?", ( update.effective_chat.id, ) )
     if g and g["welcome"]:
@@ -4371,6 +4376,32 @@ async def new_members ( update,ctx ) :
     if st and st["clean_service"]:
         try: await update.effective_message.delete ( )
         except TelegramError: pass
+
+async def bot_membership_update ( update,ctx ) :
+    """Bot guruhga qo'shilishi/chiqarilishini ishonchli ravishda groups jadvalida kuzatadi.
+
+    Broadcast aynan shu jadvaldan guruhlarni oladi. Telegram privacy mode yoqilgan bo'lsa,
+    bot oddiy guruh xabarlarini ko'rmasligi mumkin; MY_CHAT_MEMBER esa botning a'zolik
+    holati o'zgarganda baribir keladi.
+    """
+    cmu=update.my_chat_member
+    if not cmu:
+        return
+    chat=cmu.chat
+    if not chat or chat.type not in ("group","supergroup" ) :
+        return
+    status=cmu.new_chat_member.status
+    if status in (ChatMemberStatus.MEMBER, ChatMemberStatus.ADMINISTRATOR ) :
+        ensure_group ( chat)
+        log.info ( "GROUP_REGISTERED chat=%s title=%s status=%s",chat.id,chat.title,status)
+        return
+    if status in (ChatMemberStatus.LEFT, ChatMemberStatus.BANNED ) :
+        # Guruh yozuvini o‘chirmaymiz: u bilan birga welcome/rules/locks va boshqa
+        # mavjud sozlamalar ham yo‘qolib ketishi mumkin. Bot qayta qo‘shilsa,
+        # ensure_group ( ) shu yozuvni xavfsiz yangilaydi. Broadcast esa yubora
+        # olmagan guruhni fail sifatida hisobotga qo‘shadi.
+        log.info ( "GROUP_INACTIVE chat=%s title=%s status=%s",chat.id,chat.title,status)
+        return
 
 async def left_member ( update,ctx ) :
     st=moderation_settings ( update.effective_chat.id)
@@ -5940,7 +5971,9 @@ async def ai_news_send_direct ( update, ctx ) :
             pass
         return await ctx.bot.send_message(
             u.id,
-            "⚠️ Bazada yuborish uchun guruh topilmadi. Bot avval guruhda ishlagan bo‘lishi kerak.",
+            "⚠️ Bazada yuborish uchun guruh topilmadi.\n\n"
+            "Yangi kodda bot guruhga qo‘shilgan zahoti uni avtomatik ro‘yxatga oladi. "
+            "Eski guruhlar ro‘yxatda bo‘lmasa, o‘sha guruhda botga bir marta *id yoki /id yuboring (yoki botni qayta qo‘shing ) .",
             reply_markup=ai_news_ready_markup ( nid ) ,
             _skip_i18n=True,
         )
@@ -6067,6 +6100,9 @@ def main (  ) :
     app.add_handler ( CallbackQueryHandler ( callback ) , group=0)
     app.add_handler ( MessageHandler ( filters.ChatType.PRIVATE & ~filters.COMMAND & ~filters.SUCCESSFUL_PAYMENT,ai_news_private_input ) ,group=-7)
     app.add_handler ( MessageHandler ( filters.ChatType.PRIVATE & filters.TEXT & ~filters.COMMAND,bayram_private_input ) ,group=-5)
+    # Botning o'zi guruhga qo'shilgan/chiqarilgan zahoti groups jadvalini yangilaymiz.
+    # Bu global broadcast uchun eng muhim ro'yxat.
+    app.add_handler ( ChatMemberHandler ( bot_membership_update, ChatMemberHandler.MY_CHAT_MEMBER ) , group=-350)
     app.add_handler ( MessageHandler ( filters.StatusUpdate.NEW_CHAT_MEMBERS,new_members ) )
     app.add_handler ( MessageHandler ( filters.StatusUpdate.LEFT_CHAT_MEMBER,left_member ) )
     app.add_handler ( MessageHandler ( filters.TEXT & filters.Regex ( r"^\*" ) ,star_text_router ) ,group=0)
