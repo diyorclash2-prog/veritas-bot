@@ -5899,6 +5899,49 @@ async def callback ( update,ctx ) :
         return await bayram_callback ( update,ctx)
     return await _bayram_old_callback ( update,ctx)
 
+async def ai_news_unified_router ( update, ctx ) :
+    """Single, deterministic router for every AI-news/poster callback.
+
+    Keeping all news/poster buttons in ONE CallbackQueryHandler avoids handler-group
+    collisions and silent button presses. The broad callback router intentionally
+    ignores these prefixes, so this function is their only execution path.
+    """
+    q = update.callback_query
+    if not q:
+        return
+    data = q.data or ""
+    log.warning ( "AI_NEWS_ROUTER uid=%s data=%s", getattr ( q.from_user, "id", None ) , data)
+
+    # Global broadcast gets first priority because it is the final/critical action.
+    if re.fullmatch ( r" ( ?:broadcast_all|news:send ) :\d+", data ) :
+        return await ai_news_send_direct ( update, ctx)
+
+    # Group-only post send.
+    if re.fullmatch ( r"news:sendgroup:\d+", data ) :
+        return await ai_news_send_group_direct ( update, ctx)
+
+    # Poster studio: style, generation, accept/reject.
+    if data.startswith ( "poster:" ) :
+        return await poster_callback ( update, ctx)
+
+    # Main news menu actions.
+    if data == "news:menu":
+        return await ai_news_menu_direct ( update, ctx)
+    if data == "news:new":
+        return await ai_news_new_direct ( update, ctx)
+    if data == "news:list":
+        return await ai_news_list_direct ( update, ctx)
+
+    # Remaining news actions: preview/redo/edit/cancel etc.
+    if data.startswith ( "news:" ) :
+        return await ai_news_callback ( update, ctx)
+
+    # Should not normally happen because the handler pattern is prefix-scoped.
+    try:
+        await q.answer ( "Noma’lum yangilik tugmasi.", show_alert=True)
+    except Exception:
+        log.exception ( "AI_NEWS_ROUTER unknown callback answer failed data=%s", data)
+
 async def ai_news_menu_direct ( update, ctx ) :
     """Open the Super Owner news sender without passing through broad callback routers."""
     q=update.callback_query
@@ -6131,17 +6174,16 @@ def main (  ) :
     app.add_handler ( CommandHandler ( "super",cmd_super ) )
     app.add_handler ( PreCheckoutQueryHandler ( precheckout ) )
     app.add_handler ( MessageHandler ( filters.SUCCESSFUL_PAYMENT,paid ) )
-    # NEWS callbacks get a dedicated highest-priority route.
-    # This prevents the broad callback router from swallowing the send button.
-    # Exact send callback has its own route and cannot be swallowed by any broad callback handler.
-    app.add_handler ( CallbackQueryHandler ( ai_news_menu_direct, pattern=r"^news:menu$" ) , group=-300)
-    app.add_handler ( CallbackQueryHandler ( ai_news_new_direct, pattern=r"^news:new$" ) , group=-290)
-    app.add_handler ( CallbackQueryHandler ( ai_news_list_direct, pattern=r"^news:list$" ) , group=-280)
-    app.add_handler ( CallbackQueryHandler ( ai_news_send_group_direct, pattern=r"^news:sendgroup:\d+$" ) , group=-250)
-    app.add_handler ( CallbackQueryHandler ( poster_callback, pattern=r"^poster:" ) , group=-240)
-    app.add_handler ( CallbackQueryHandler ( ai_news_send_direct, pattern=r"^ ( ?:broadcast_all|news:send ) :\d+$" ) , group=-400)
-    # Other news callbacks use the normal news controller; send is deliberately excluded.
-    app.add_handler ( CallbackQueryHandler ( ai_news_callback, pattern=r"^news: ( ?!send:|sendgroup:|menu$|new$|list$ ) " ) , group=-100)
+    # V9.4: every AI-news/poster button goes through ONE deterministic router.
+    # This removes callback handler-group collisions that caused buttons to appear
+    # but do nothing after poster confirmation.
+    app.add_handler(
+        CallbackQueryHandler(
+            ai_news_unified_router,
+            pattern=r"^ ( ?:news:|poster:|broadcast_all: ) ",
+        ),
+        group=-500,
+    )
     app.add_handler ( CallbackQueryHandler ( group_lang_callback, pattern=r"^glang:" ) , group=-10)
     app.add_handler ( CallbackQueryHandler ( callback ) , group=0)
     app.add_handler ( MessageHandler ( filters.ChatType.PRIVATE & ~filters.COMMAND & ~filters.SUCCESSFUL_PAYMENT,ai_news_private_input ) ,group=-7)
@@ -6168,7 +6210,7 @@ def main (  ) :
         app.job_queue.run_repeating ( giveaway_job,60,first=10)
         app.job_queue.run_repeating ( rose_cleanup_job,30,first=15)
     app.add_error_handler ( error_handler)
-    log.info ( "VERITAS v9.1 FINAL GROUP POSTER starting")
+    log.info ( "VERITAS v9.4 UNIFIED NEWS ROUTER starting")
     app.run_polling ( allowed_updates=Update.ALL_TYPES)
 
 if __name__=="__main__":
