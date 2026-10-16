@@ -41,7 +41,7 @@ from telegram.ext import (
 TOKEN = os.getenv ( "BOT_TOKEN", "" ) .strip ( )
 DB_PATH = os.getenv ( "DB_PATH", "veritas_v7.sqlite3")
 SUPER_OWNERS = {int ( x) for x in os.getenv ( "SUPER_OWNER_IDS","" ) .split ( ",") if x.strip (  ) .isdigit (  ) }
-VERSION = "9.1"
+VERSION = "9.7"
 OPENAI_API_KEY = os.getenv ( "OPENAI_API_KEY", "" ) .strip ( )
 OPENAI_MODEL = os.getenv ( "OPENAI_MODEL", "gpt-5.6-luna" ) .strip ( ) or "gpt-5.6-luna"
 REBUS_IMAGE_MODEL = os.getenv ( "REBUS_IMAGE_MODEL", "gpt-image-2" ) .strip ( ) or "gpt-image-2"
@@ -5228,9 +5228,355 @@ async def star_text_router ( update,ctx ) :
         if await rose_advanced_command ( update,ctx,cmd,args ) : return
     return await _original_star_text_router ( update,ctx)
 
+
+# =========================================================
+# VERITAS V9.7 — TABIIY TILDA GURUH BOSHQARUVI
+# Eski * buyruqlarga tegmaydi. Faqat "Veritas"/bot mentioni yoki
+# Veritas xabariga reply bo'lganda ishlaydi. Huquqlar deterministik tekshiriladi.
+# =========================================================
+NATURAL_RATE_CACHE = {}
+NATURAL_PERSON_ACTIONS = {
+    "ban","kick","mute","unmute","unban","warn","unwarn","clearwarns",
+    "admin","unadmin","vadmin","unvadmin","approve","unapprove","id"
+}
+NATURAL_INFO_ACTIONS = {"id","admins","rules","warns","blacklists","locks","approved","filters","notes","aktiv"}
+NATURAL_PROMOTE_ACTIONS = {"admin","unadmin","vadmin","unvadmin"}
+NATURAL_RESTRICT_ACTIONS = {"ban","kick","mute","unmute","unban","warn","unwarn","clearwarns"}
+NATURAL_TOGGLE_MAP = {
+    "links_on": ( "links",["on"] ) , "links_off": ( "links",["off"] ) ,
+    "antiflood_on": ( "antiflood",["on"] ) , "antiflood_off": ( "antiflood",["off"] ) ,
+    "reports_on": ( "reports",["on"] ) , "reports_off": ( "reports",["off"] ) ,
+    "welcome_on": ( "welcome",["on"] ) , "welcome_off": ( "welcome",["off"] ) ,
+    "goodbye_on": ( "goodbye",["on"] ) , "goodbye_off": ( "goodbye",["off"] ) ,
+}
+NATURAL_ALLOWED_ACTIONS = NATURAL_PERSON_ACTIONS | NATURAL_INFO_ACTIONS | set ( NATURAL_TOGGLE_MAP) | {
+    "delete","pin","unpin","report","purge","none"
+}
+
+def _natural_norm ( s ) :
+    return (s or "" ) .lower (  ) .replace ( "ʻ","'" ) .replace ( "’","'" ) .replace ( "`","'" ) .strip ( )
+
+def _natural_duration_seconds ( text ) :
+    t=_natural_norm ( text)
+    # 10m / 2h / 1d / 1w
+    m=re.search ( r" ( ?<!\w )  ( \d+ ) \s* ( s|m|h|d|w )  ( ?!\w ) ",t)
+    if m:
+        return int ( m.group ( 1 )  ) *{"s":1,"m":60,"h":3600,"d":86400,"w":604800}[m.group ( 2 ) ]
+    units=[
+        (r" ( \d+ ) \s* ( ?:sekund|soniya ) ",1 ) ,
+        (r" ( \d+ ) \s* ( ?:minut|daqiqa ) ",60 ) ,
+        (r" ( \d+ ) \s* ( ?:soat|hour ) ",3600 ) ,
+        (r" ( \d+ ) \s* ( ?:kun|day ) ",86400 ) ,
+        (r" ( \d+ ) \s* ( ?:hafta|week ) ",604800 ) ,
+    ]
+    for pat,mul in units:
+        mm=re.search ( pat,t,re.I)
+        if mm:return int ( mm.group ( 1 )  ) *mul
+    return 0
+
+def _natural_local_intent ( text ) :
+    """Eng ko'p ishlatiladigan iboralar uchun tez, AI-siz parser."""
+    t=_natural_norm ( text)
+    # Qarama-qarshi amallar avval tekshiriladi.
+    pairs=[
+        ("unadmin", ["adminlikni ol","adminlikdan ol","admindan tushir","qanotini kes","unadmin"] ) ,
+        ("unban", ["unban","bandan chiqar","banini och","blokdan chiqar"] ) ,
+        ("unmute", ["unmute","muteni och","mute och","gapirishga ruxsat","yozishga ruxsat"] ) ,
+        ("unwarn", ["unwarn","warnni kamaytir","ogohlantirishni kamaytir"] ) ,
+        ("clearwarns", ["warnlarni tozala","warnlarini tozala","ogohlantirishlarini tozala"] ) ,
+        ("unvadmin", ["veritas adminligini ol","veritas ruxsatini ol","ruxsatsiz qil"] ) ,
+        ("unapprove", ["unapprove","approvedan chiqar","ishonchdan chiqar"] ) ,
+        ("admin", ["admin qil","admin qilib qo'y","admin qilib qoy","qanot ber","administrator qil"] ) ,
+        ("vadmin", ["veritas admin qil","veritasga ruxsat ber","ruxsat ber"] ) ,
+        ("approve", ["approve qil","ishonchli qil","tasdiqlangan qil"] ) ,
+        ("ban", ["ban qil","blokla","blok qil","hide all","guruhdan butunlay chiqar","qayta kirmasin","yo'qot","yoqot"] ) ,
+        ("kick", ["kick qil","chiqarib yubor","guruhdan chiqar","haydab yubor"] ) ,
+        ("mute", ["mute qil","jim qil","gapirtirma","yozdirma","dam ber","ovozini o'chir"] ) ,
+        ("warn", ["warn ber","ogohlantir","ogohlantirish ber"] ) ,
+        ("delete", ["xabarni o'chir","xabarni ochir","buni o'chir","buni ochir","delete qil"] ) ,
+        ("pin", ["pin qil","tepaga qotir","mahkamla"] ) ,
+        ("unpin", ["unpin","pinni ol","pindan ol"] ) ,
+        ("id", ["id sini ayt","id sini ber","id sini chiqar","idni ayt","idni ber","idni chiqar"] ) ,
+        ("admins", ["adminlarni ko'rsat","adminlar kim","adminlar ro'yxati"] ) ,
+        ("rules", ["qoidalarni ko'rsat","qoidalar nima","qoidani ko'rsat"] ) ,
+        ("aktiv", ["faollikni ko'rsat","aktivlikni ko'rsat","eng faollar","faol a'zolar"] ) ,
+        ("links_off", ["linklarni yop","linkni yop","havolalarni taqiql"] ) ,
+        ("links_on", ["linklarga ruxsat","linkni och","havolalarni och"] ) ,
+        ("antiflood_on", ["antifloodni yoq","flood himoyasini yoq"] ) ,
+        ("antiflood_off", ["antifloodni o'chir","flood himoyasini o'chir"] ) ,
+        ("welcome_on", ["welcome yoq","kutib olishni yoq"] ) ,
+        ("welcome_off", ["welcome o'chir","kutib olishni o'chir"] ) ,
+        ("goodbye_on", ["goodbye yoq","xayrlashishni yoq"] ) ,
+        ("goodbye_off", ["goodbye o'chir","xayrlashishni o'chir"] ) ,
+    ]
+    for action,phrases in pairs:
+        if any ( p in t for p in phrases ) :
+            return {"action":action,"confidence":1.0,"duration_seconds":_natural_duration_seconds ( t ) ,"reason":"","target_text":""}
+    return None
+
+def _natural_intent_sync ( user_text ) :
+    if not OPENAI_API_KEY:
+        return {"action":"none","confidence":0.0,"duration_seconds":0,"reason":"","target_text":""}
+    instructions=(
+        "Siz Veritas Telegram guruh boshqaruvi uchun FAQAT buyruq niyatini ajratuvchi klassifikatorsiz. "
+        "Foydalanuvchi o'zbekcha/ruscha/inglizcha yoki slang bilan yozishi mumkin. "
+        "Masalan 'hide all' -> ban; 'qanot ber' -> admin; 'dam ber' -> mute; 'haydab yubor' -> kick. "
+        "Faqat quyidagi actionlardan bittasini tanlang: " + ",".join ( sorted ( NATURAL_ALLOWED_ACTIONS ) ) + ". "
+        "Moliyaviy to'lov, gift/premium, superadmin, kitob/hadis admini yoki noma'lum xavfli ish so'ralsa action=none. "
+        "Agar oddiy suhbat/savol bo'lsa action=none. "
+        "target_text maydoniga faqat buyruqda ko'rsatilgan @username, raqamli Telegram ID yoki aniq ismni yozing; bo'lmasa bo'sh. "
+        "duration_seconds mute/ban muddati aniq aytilsa sekundlarda, aks holda 0. "
+        "reason qisqa sabab, confidence 0..1. Faqat JSON qaytaring, boshqa matn yozmang. "
+        "Format: {\"action\":\"none\",\"confidence\":0.0,\"duration_seconds\":0,\"reason\":\"\",\"target_text\":\"\"}"
+    )
+    payload=json.dumps ( {"model":OPENAI_MODEL,"instructions":instructions,"input":user_text[:1500],"max_output_tokens":180},ensure_ascii=False ) .encode ( "utf-8")
+    req=urllib.request.Request ( "https://api.openai.com/v1/responses",data=payload,headers={"Authorization":f"Bearer {OPENAI_API_KEY}","Content-Type":"application/json"},method="POST")
+    with urllib.request.urlopen ( req,timeout=25) as resp:
+        data=json.loads ( resp.read (  ) .decode ( "utf-8" ) )
+    raw=str ( data.get ( "output_text") or "" ) .strip ( )
+    if not raw:
+        parts=[]
+        for item in data.get ( "output",[] ) :
+            for c in item.get ( "content",[] ) :
+                if c.get ( "type" ) =="output_text" and c.get ( "text" ) :parts.append ( c["text"])
+        raw="\n".join ( parts ) .strip ( )
+    m=re.search ( r"\{.*\}",raw,re.S)
+    if not m:return {"action":"none","confidence":0.0,"duration_seconds":0,"reason":"","target_text":""}
+    try:r=json.loads ( m.group ( 0 ) )
+    except Exception:return {"action":"none","confidence":0.0,"duration_seconds":0,"reason":"","target_text":""}
+    action=str ( r.get ( "action") or "none" ) .lower (  ) .strip ( )
+    if action not in NATURAL_ALLOWED_ACTIONS:action="none"
+    try:conf=float ( r.get ( "confidence") or 0)
+    except Exception:conf=0.0
+    try:dur=max ( 0,int ( r.get ( "duration_seconds") or 0 ) )
+    except Exception:dur=0
+    return {"action":action,"confidence":max ( 0.0,min ( conf,1.0 )  ) ,"duration_seconds":dur,"reason":str ( r.get ( "reason") or "" ) [:250],"target_text":str ( r.get ( "target_text") or "" ) [:80]}
+
+async def _natural_actor_allowed ( ctx,chat_id,actor_id,action ) :
+    if is_super ( actor_id ) :return True
+    try:m=await ctx.bot.get_chat_member ( chat_id,actor_id)
+    except TelegramError:return False
+    if m.status==ChatMemberStatus.OWNER:return True
+    is_admin= ( m.status==ChatMemberStatus.ADMINISTRATOR)
+    is_vadmin=bool ( one ( "SELECT 1 FROM vadmins WHERE chat_id=? AND user_id=?", ( chat_id,actor_id )  ) )
+    if action in NATURAL_PROMOTE_ACTIONS:
+        return bool ( is_admin and getattr ( m,"can_promote_members",False ) )
+    if action in NATURAL_RESTRICT_ACTIONS:
+        return bool ( is_vadmin or (is_admin and getattr ( m,"can_restrict_members",False )  ) )
+    if action=="delete":
+        return bool ( is_vadmin or (is_admin and getattr ( m,"can_delete_messages",False )  ) )
+    if action in {"pin","unpin"}:
+        return bool ( is_vadmin or (is_admin and (getattr ( m,"can_pin_messages",False) or getattr ( m,"can_edit_messages",False )  )  ) )
+    if action in NATURAL_TOGGLE_MAP or action in {"purge"}:
+        return bool ( is_vadmin or is_admin)
+    if action in {"approve","unapprove"}:
+        return bool ( is_vadmin or is_admin)
+    # Info va report oddiy a'zoga ham mumkin; mavjud funksiyalar o'z tekshiruvini qiladi.
+    if action in NATURAL_INFO_ACTIONS or action=="report":return True
+    return bool ( is_vadmin or is_admin)
+
+async def _natural_target ( update,ctx,target_text="" ) :
+    msg=update.effective_message; chat=update.effective_chat
+    # 1) Reply — eng ishonchli.
+    rp=msg.reply_to_message if msg else None
+    if rp and rp.from_user and rp.from_user.id!=ctx.bot.id:
+        return rp.from_user.id, rp.from_user.full_name or rp.from_user.first_name or str ( rp.from_user.id)
+    raw= ( target_text or "" ) .strip ( )
+    full= ( msg.text or msg.caption or "") if msg else ""
+    # 2) @username
+    candidates=[]
+    if raw.startswith ( "@" ) :candidates=[raw[1:]]
+    else:
+        candidates=re.findall ( r"@ ( [A-Za-z0-9_]{5,32} ) ",full)
+    botname= ( getattr ( ctx.bot,"username","") or "" ) .lower ( )
+    for uname in candidates:
+        if uname.lower (  ) ==botname:continue
+        r=one ( "SELECT user_id,first_name,username FROM users WHERE lower ( username ) =lower ( ?) ORDER BY user_id DESC LIMIT 1", ( uname, ) )
+        if r:
+            try:await ctx.bot.get_chat_member ( chat.id,int ( r["user_id"] ) )
+            except TelegramError:continue
+            return int ( r["user_id"] ) , ( r["first_name"] or ("@"+ ( r["username"] or uname )  ) )
+    # 3) Raqamli ID
+    ids=[]
+    if raw.isdigit (  ) :ids=[raw]
+    else:ids=re.findall ( r" ( ?<!\d )  ( \d{5,15} )  ( ?!\d ) ",full)
+    for sid in ids:
+        uid=int ( sid)
+        if uid==update.effective_user.id and len ( ids ) ==1 and not raw:
+            # Gapdagi o'z ID si tasodifan target bo'lib qolmasin; explicit target_text bo'lsa ruxsat.
+            continue
+        r=one ( "SELECT first_name,username FROM users WHERE user_id=?", ( uid, ) )
+        name= ( r["first_name"] if r and r["first_name"] else ("@"+r["username"] if r and r["username"] else str ( uid )  ) )
+        return uid,name
+    # 4) AI ajratgan aniq ism — faqat guruhda bitta mos odam bo'lsa.
+    if raw and not raw.startswith ( "@") and not raw.isdigit (  ) :
+        rows=all_ ( "SELECT u.user_id,u.first_name,u.username FROM users u JOIN members m ON m.user_id=u.user_id WHERE m.chat_id=? AND lower ( u.first_name ) =lower ( ?) LIMIT 3", ( chat.id,raw ) )
+        if len ( rows ) ==1:
+            r=rows[0];return int ( r["user_id"] ) ,r["first_name"] or ("@"+ ( r["username"] or "" ) ) or str ( r["user_id"])
+    return None,None
+
+async def _natural_chat_reply ( update,ctx,text ) :
+    msg=update.effective_message;chat=update.effective_chat;u=update.effective_user
+    if not ai_group_active ( chat.id ) :
+        await msg.reply_text ( "🔒 Oddiy suhbat uchun bu guruhda Veritas AI faol bo‘lishi kerak. *ai orqali holatini ko‘ring.")
+        return True
+    if not ai_rate_ok ( chat.id,u.id,5 ) :
+        await msg.reply_text ( "⏳ Juda tez yozildi. 5 soniyadan keyin qayta yozing.")
+        return True
+    if not OPENAI_API_KEY:
+        await msg.reply_text ( "⚠️ Veritas AI kaliti sozlanmagan.")
+        return True
+    try:
+        await ctx.bot.send_chat_action ( chat.id,"typing")
+        prompt=f"Guruhdagi foydalanuvchi Veritasga bevosita murojaat qildi:\n{text[:3500]}"+ai_actor_context ( u ) +ai_cabinet_name_context ( u.id)
+        answer=await asyncio.to_thread ( _openai_response_sync,prompt)
+        if not answer:answer="Yaxshiman 🙂 Qanday yordam beray?"
+        for i in range ( 0,len ( answer ) ,4000 ) :await msg.reply_text ( answer[i:i+4000])
+    except Exception:
+        log.exception ( "natural Veritas chat failed")
+        await msg.reply_text ( "⚠️ Veritas AI hozir javob bera olmadi.")
+    return True
+
+async def _natural_execute ( update,ctx,intent ) :
+    msg=update.effective_message;chat=update.effective_chat;actor=update.effective_user
+    action=intent.get ( "action","none")
+    if action=="none":return False
+    if not await _natural_actor_allowed ( ctx,chat.id,actor.id,action ) :
+        await msg.reply_text ( "⛔ Sizda bu amalni bajarish uchun yetarli huquq yo‘q.")
+        return True
+    # Mavjud sozlama va info funksiyalarini qayta ishlatamiz — eski logika buzilmaydi.
+    if action in NATURAL_TOGGLE_MAP:
+        cmd,args=NATURAL_TOGGLE_MAP[action]
+        await settings_command ( update,ctx,cmd,args ) ;return True
+    if action in {"admins","rules","warns","blacklists","locks","approved","filters","notes","aktiv"}:
+        await info_command ( update,ctx,action,[] ) ;return True
+    if action=="report":
+        await report_cmd ( update,ctx ) ;return True
+    if action=="purge":
+        n=re.search ( r"\b ( \d{1,3} ) \b",msg.text or "")
+        await purge_command ( update,ctx,[n.group ( 1 ) ] if n else [] ) ;return True
+    if action=="delete":
+        rp=msg.reply_to_message
+        if not rp:return await msg.reply_text ( "↩️ O‘chiriladigan xabarga reply qiling.") or True
+        try:
+            await rp.delete (  ) ;
+            try:await msg.delete ( )
+            except TelegramError:pass
+        except TelegramError as e:await msg.reply_text ( f"❌ Xabarni o‘chira olmadim: {e}")
+        modlog ( chat.id,actor.id,getattr ( getattr ( rp,"from_user",None ) ,"id",0 ) ,"delete")
+        return True
+    if action=="pin":
+        rp=msg.reply_to_message
+        if not rp:return await msg.reply_text ( "↩️ Pin qilinadigan xabarga reply qiling.") or True
+        try:await ctx.bot.pin_chat_message ( chat.id,rp.message_id ) ;await msg.reply_text ( "📌 Pin qilindi.")
+        except TelegramError as e:await msg.reply_text ( f"❌ Pin qila olmadim: {e}")
+        return True
+    if action=="unpin":
+        try:await ctx.bot.unpin_chat_message ( chat.id ) ;await msg.reply_text ( "📌 Pin olib tashlandi.")
+        except TelegramError as e:await msg.reply_text ( f"❌ Unpin qila olmadim: {e}")
+        return True
+    target_id,target_name=await _natural_target ( update,ctx,intent.get ( "target_text", "" ) )
+    if action=="id" and not target_id:
+        target_id=actor.id;target_name=actor.full_name
+    if action in NATURAL_PERSON_ACTIONS and not target_id:
+        await msg.reply_text ( "↩️ Kim haqida aytayotganingizni aniqlay olmadim. O‘sha odamning xabariga reply qiling yoki @username / Telegram ID yozing.")
+        return True
+    if target_id==ctx.bot.id:
+        await msg.reply_text ( "🤖 Bu amalni Veritasning o‘ziga qo‘llamayman." ) ;return True
+    if target_id==actor.id and action in {"ban","kick","mute","admin","unadmin","vadmin","unvadmin"}:
+        await msg.reply_text ( "⚠️ Bu amalni o‘zingizga qo‘llamayman." ) ;return True
+    if action=="id":
+        await msg.reply_text ( f"🆔 {target_name}: `{target_id}`",parse_mode="Markdown" ) ;return True
+    if action in {"ban","kick","mute","warn"} and await protected ( ctx.bot,chat.id,target_id ) :
+        await msg.reply_text ( "🛡 Bu foydalanuvchi guruh admini/egasi yoki himoyalangan. Amal bajarilmadi." ) ;return True
+    dur=int ( intent.get ( "duration_seconds") or 0 ) ;reason= ( intent.get ( "reason") or "" ) .strip ( )
+    try:
+        if action=="ban":
+            until= ( datetime.now ( timezone.utc ) +timedelta ( seconds=dur ) ) if dur else None
+            await ctx.bot.ban_chat_member ( chat.id,target_id,until_date=until ) ;modlog ( chat.id,actor.id,target_id,"natural_ban",reason,dur)
+        elif action=="kick":
+            await ctx.bot.ban_chat_member ( chat.id,target_id ) ;await ctx.bot.unban_chat_member ( chat.id,target_id ) ;modlog ( chat.id,actor.id,target_id,"natural_kick",reason)
+        elif action=="mute":
+            until= ( datetime.now ( timezone.utc ) +timedelta ( seconds=dur ) ) if dur else None
+            await ctx.bot.restrict_chat_member ( chat.id,target_id,ChatPermissions ( can_send_messages=False ) ,until_date=until ) ;modlog ( chat.id,actor.id,target_id,"natural_mute",reason,dur)
+        elif action=="unmute":
+            await ctx.bot.restrict_chat_member ( chat.id,target_id,ChatPermissions ( can_send_messages=True,can_send_audios=True,can_send_documents=True,can_send_photos=True,can_send_videos=True,can_send_video_notes=True,can_send_voice_notes=True,can_send_polls=True,can_send_other_messages=True,can_add_web_page_previews=True,can_invite_users=True )  ) ;modlog ( chat.id,actor.id,target_id,"natural_unmute",reason)
+        elif action=="unban":
+            await ctx.bot.unban_chat_member ( chat.id,target_id,only_if_banned=True ) ;modlog ( chat.id,actor.id,target_id,"natural_unban",reason)
+        elif action=="warn":
+            execute ( "INSERT INTO warns ( chat_id,user_id,count) VALUES ( ?,?,1) ON CONFLICT ( chat_id,user_id) DO UPDATE SET count=count+1", ( chat.id,target_id ) )
+            execute ( "INSERT INTO warn_records ( chat_id,user_id,actor_id,reason,created_at) VALUES ( ?,?,?,?,? ) ", ( chat.id,target_id,actor.id,reason or "Sabab ko‘rsatilmagan",now (  )  ) )
+            n=one ( "SELECT count FROM warns WHERE chat_id=? AND user_id=?", ( chat.id,target_id )  ) ["count"]
+            st=moderation_settings ( chat.id ) ;limit=int ( st["warn_limit"] or 3 ) ;wa=st["warn_action"] or "ban"
+            if n>=limit:
+                execute ( "DELETE FROM warns WHERE chat_id=? AND user_id=?", ( chat.id,target_id ) )
+                if wa=="kick":await ctx.bot.ban_chat_member ( chat.id,target_id ) ;await ctx.bot.unban_chat_member ( chat.id,target_id)
+                elif wa=="mute":await ctx.bot.restrict_chat_member ( chat.id,target_id,ChatPermissions ( can_send_messages=False ) ,until_date=datetime.now ( timezone.utc ) +timedelta ( seconds=int ( st["warn_mute_seconds"] or 3600 )  ) )
+                else:await ctx.bot.ban_chat_member ( chat.id,target_id)
+                await msg.reply_text ( f"⚠️ {target_name}: {limit}/{limit} warn → {wa}.")
+                modlog ( chat.id,actor.id,target_id,"natural_warn_"+wa,reason ) ;return True
+            await msg.reply_text ( f"⚠️ {target_name}: {n}/{limit} warn." ) ;modlog ( chat.id,actor.id,target_id,"natural_warn",reason ) ;return True
+        elif action=="unwarn":
+            execute ( "UPDATE warns SET count=MAX ( count-1,0) WHERE chat_id=? AND user_id=?", ( chat.id,target_id ) )
+        elif action=="clearwarns":
+            execute ( "DELETE FROM warns WHERE chat_id=? AND user_id=?", ( chat.id,target_id ) )
+        elif action=="admin":
+            await ctx.bot.promote_chat_member ( chat.id,target_id,can_delete_messages=True,can_restrict_members=True,can_invite_users=True)
+        elif action=="unadmin":
+            await ctx.bot.promote_chat_member ( chat.id,target_id,can_delete_messages=False,can_restrict_members=False,can_invite_users=False,can_promote_members=False,can_change_info=False,can_pin_messages=False)
+        elif action=="vadmin":execute ( "INSERT OR IGNORE INTO vadmins VALUES ( ?,? ) ", ( chat.id,target_id ) )
+        elif action=="unvadmin":execute ( "DELETE FROM vadmins WHERE chat_id=? AND user_id=?", ( chat.id,target_id ) )
+        elif action=="approve":execute ( "INSERT OR IGNORE INTO approved VALUES ( ?,? ) ", ( chat.id,target_id ) )
+        elif action=="unapprove":execute ( "DELETE FROM approved WHERE chat_id=? AND user_id=?", ( chat.id,target_id ) )
+        else:return False
+        audit ( actor.id,chat.id,"natural_"+action,str ( target_id ) )
+        extra= ( f" — {dur//60} daqiqa" if dur and dur%60==0 else (f" — {dur} soniya" if dur else "" ) )
+        await msg.reply_text ( f"✅ {target_name}: {action} bajarildi{extra}.")
+        return True
+    except TelegramError as e:
+        await msg.reply_text ( f"❌ Telegram bu amalni bajarmadi: {e}")
+        return True
+
+async def natural_veritas_router ( update,ctx ) :
+    msg=update.effective_message;chat=update.effective_chat;u=update.effective_user
+    if not msg or not chat or not u or u.is_bot or chat.type not in ("group","supergroup") or not msg.text:return
+    raw=msg.text.strip ( )
+    if not raw or raw.startswith ( "*") or raw.startswith ( "/" ) :return
+    low=_natural_norm ( raw)
+    botname= ( getattr ( ctx.bot,"username","") or "" ) .lower ( )
+    reply_to_bot=bool ( msg.reply_to_message and msg.reply_to_message.from_user and msg.reply_to_message.from_user.id==ctx.bot.id)
+    addressed= ( "veritas" in low) or (botname and ("@"+botname) in low) or reply_to_bot
+    if not addressed:return
+    # Juda tez AI-classifier so'rovlari xarajat/spam keltirmasin.
+    key= ( chat.id,u.id ) ;ts=time.time (  ) ;last=NATURAL_RATE_CACHE.get ( key,0)
+    if ts-last<1.5:return
+    NATURAL_RATE_CACHE[key]=ts
+    intent=_natural_local_intent ( raw)
+    if intent is None and OPENAI_API_KEY:
+        try:intent=await asyncio.to_thread ( _natural_intent_sync,raw)
+        except Exception:
+            log.exception ( "natural intent classify failed")
+            intent={"action":"none","confidence":0.0,"duration_seconds":0,"reason":"","target_text":""}
+    if intent is None:intent={"action":"none","confidence":0.0,"duration_seconds":0,"reason":"","target_text":""}
+    action=intent.get ( "action","none")
+    conf=float ( intent.get ( "confidence") or 0)
+    if action!="none" and conf<0.76:
+        await msg.reply_text ( "🤔 Buyruq ma’nosi yetarlicha aniq emas. Masalan: «Veritas, @userni ban qil» yoki o‘sha odamga reply qilib «Veritas, 2 soat mute qil» deb yozing.")
+        ctx.chat_data["natural_consumed_message_id"]=msg.message_id
+        return
+    if action!="none":
+        await _natural_execute ( update,ctx,intent)
+        ctx.chat_data["natural_consumed_message_id"]=msg.message_id
+        return
+    # Buyruq emas — Veritasga oddiy suhbat sifatida javob beramiz.
+    await _natural_chat_reply ( update,ctx,raw)
+    ctx.chat_data["natural_consumed_message_id"]=msg.message_id
+
 _original_passive=passive
 async def passive ( update,ctx ) :
     msg=update.effective_message; chat=update.effective_chat; u=update.effective_user
+    if msg and ctx.chat_data.get ( "natural_consumed_message_id" ) ==msg.message_id:
+        return
     if msg and chat and u and not u.is_bot and chat.type in ('group','supergroup' ) :
         ensure_group ( chat ) ; rr=rose_row ( chat.id)
         if not await protected ( ctx.bot,chat.id,u.id) and not one ( 'SELECT 1 FROM approved WHERE chat_id=? AND user_id=?', ( chat.id,u.id )  ) :
@@ -6200,6 +6546,7 @@ def main (  ) :
     # Vision must be in a DIFFERENT handler group. In the old build it shared group=1
     # with library_private_input, so python-telegram-bot never reached it.
     app.add_handler ( MessageHandler ( filters.ChatType.PRIVATE & (filters.PHOTO | filters.Document.IMAGE ) ,private_ai_media_reply ) ,group=2)
+    app.add_handler ( MessageHandler ( filters.TEXT & ~filters.COMMAND & ~filters.Regex ( r"^\*" ) ,natural_veritas_router ) ,group=2)
     # Group passive processing is separate.
     app.add_handler ( MessageHandler ( filters.ALL & ~filters.StatusUpdate.ALL & ~filters.SUCCESSFUL_PAYMENT,passive ) ,group=3)
     # Plain private text AI comes last.
