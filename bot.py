@@ -7396,6 +7396,190 @@ async def veritas_games_callback ( update, ctx ) :
     await q.answer ( )
     await q.message.reply_text ( '🎮 VERITAS O‘YINLARI\n\n⚔️ Qal’alar urushi — ikki davlat o‘rtasidagi strategik jang.\n\nO‘yin guruhda /qalalar buyrug‘i bilan boshlanadi.', reply_markup=InlineKeyboardMarkup ( [[InlineKeyboardButton ( '⚔️ Qal’alar urushi · Qoidalar',callback_data='games:rules' ) ],[InlineKeyboardButton ( '⬅️ Bosh menyu',callback_data='root:choose' ) ]] ) ) if q.data=='games:menu' else await q.message.reply_text ( veritas_qalalar.RULES,reply_markup=InlineKeyboardMarkup ( [[InlineKeyboardButton ( '⬅️ O‘yinlar',callback_data='games:menu' ) ]] ) )
 
+# === QALALAR UX UPGRADE: buttons, private controls, map pictures, chat lock ===
+import io as _war_io
+from telegram import ChatPermissions as _WarPermissions
+from telegram.ext import CallbackQueryHandler as _WarCallbackHandler
+from telegram import InlineKeyboardButton as _WB, InlineKeyboardMarkup as _WM
+from PIL import Image as _WarImage, ImageDraw as _WarDraw, ImageFont as _WarFont
+
+def _war_game_buttons ( cid ) :
+    return _WM ( [[_WB ( '🗺 Rasmli xarita',callback_data=f'wx:map:{cid}' ) ,_WB ( '🏰 Qal’alarim',callback_data=f'wx:mine:{cid}' ) ],[_WB ( '⚔️ Qo‘shin yuborish',callback_data=f'wx:source:{cid}' ) ,_WB ( '📜 Qoidalar',callback_data=f'wx:rules:{cid}' ) ]])
+
+def _war_picture ( cid ) :
+    with veritas_qalalar.conn ( ) as c:
+        forts=c.execute ( 'SELECT * FROM war_forts WHERE chat_id=? ORDER BY id', ( cid, )  ) .fetchall ( )
+        players={p['user_id']:p['name'] for p in c.execute ( 'SELECT * FROM war_players WHERE chat_id=?', ( cid, )  ) }
+    im=_WarImage.new ( 'RGB', ( 1050,max ( 360,150+len ( forts ) *56 )  ) , ( 238,224,190 ) )
+    d=_WarDraw.Draw ( im)
+    d.rectangle (  ( 10,10,1040,75 ) ,fill= ( 65,50,40 ) )
+    d.text (  ( 32,28 ) ,'QALALAR URUSHI  |  JANG XARITASI',fill='white')
+    for i,f in enumerate ( forts ) :
+        y=95+i*56; col= ( 40,104,176) if f['team']==1 else (179,56,55)
+        d.rounded_rectangle (  ( 24,y,1025,y+46 ) ,radius=8,fill=col)
+        kind='QASR' if f['kind']=='palace' else 'QALA'
+        label=f"{kind} #{f['id']}  |  {players.get ( f['owner'],'Nomalum' ) [:26]}  |  {veritas_qalalar.troops ( f ) } askar"
+        d.text (  ( 42,y+14 ) ,label,fill='white')
+    out=_war_io.BytesIO (  ) ;im.save ( out,format='PNG' ) ;out.seek ( 0 ) ;out.name='xarita.png';return out
+
+async def _war_lock ( ctx,cid ) :
+    try:
+        chat=await ctx.bot.get_chat ( cid)
+        perms=chat.permissions
+        if perms:
+            # Preserve prior permissions in memory during this process.
+            ctx.application.bot_data.setdefault ( 'war_old_permissions',{} ) [cid]=perms
+        await ctx.bot.set_chat_permissions ( cid,_WarPermissions ( can_send_messages=False ) )
+        return True
+    except Exception as exc:
+        await ctx.bot.send_message ( cid,'⚠️ Guruhni yopib bo‘lmadi. Veritasga «Restrict members» administrator huquqini bering.')
+        return False
+
+async def _war_unlock ( ctx,cid ) :
+    try:
+        old=ctx.application.bot_data.get ( 'war_old_permissions',{} ) .pop ( cid,None)
+        if old:await ctx.bot.set_chat_permissions ( cid,old)
+        else:await ctx.bot.set_chat_permissions ( cid,_WarPermissions ( can_send_messages=True ) )
+    except Exception:pass
+
+async def _war_ux ( update,ctx ) :
+    q=update.callback_query;data=q.data.split ( ':' ) ;act=data[1];cid=int ( data[2] ) ;uid=q.from_user.id
+    if act=='rules':
+        await q.answer (  ) ;return await q.message.reply_text ( veritas_qalalar.RULES,reply_markup=_war_game_buttons ( cid ) )
+    if act=='map':
+        await q.answer (  ) ;return await q.message.reply_photo ( _war_picture ( cid ) ,caption='🗺 Jonli xarita',reply_markup=_war_game_buttons ( cid ) )
+    with veritas_qalalar.conn ( ) as c:
+        p=c.execute ( 'SELECT * FROM war_players WHERE chat_id=? AND user_id=?', ( cid,uid )  ) .fetchone ( )
+    if act=='mine':
+        if not p:return await q.answer ( 'Siz bu urushda ishtirok etmaysiz.',show_alert=True)
+        with veritas_qalalar.conn ( ) as c:fs=c.execute ( 'SELECT * FROM war_forts WHERE chat_id=? AND owner=?', ( cid,uid )  ) .fetchall ( )
+        await q.answer ( )
+        return await q.message.reply_text ( '🏰 Sizning qal’alaringiz:\n'+'\n'.join ( f"#{f['id']} — {veritas_qalalar.troops ( f ) } askar" for f in fs ) ,reply_markup=_war_game_buttons ( cid ) )
+    if not p:return await q.answer ( 'Avval o‘yinga qo‘shiling.',show_alert=True)
+    if act=='source':
+        with veritas_qalalar.conn ( ) as c:fs=c.execute ( 'SELECT * FROM war_forts WHERE chat_id=? AND owner=?', ( cid,uid )  ) .fetchall ( )
+        if not fs:return await q.answer ( 'Sizda qal’a yo‘q.',show_alert=True)
+        await q.answer (  ) ;return await q.message.reply_text ( '🏰 Qaysi qal’adan askar yuborasiz?',reply_markup=_WM ( [[_WB ( f"#{f['id']} · {veritas_qalalar.troops ( f ) } askar",callback_data=f"wx:dest:{cid}:{f['id']}" ) ] for f in fs] ) )
+    if act=='dest':
+        src=int ( data[3] ) ;f=veritas_qalalar.fort ( cid,src)
+        if not f or f['owner']!=uid:return await q.answer ( 'Bu qal’a sizniki emas.',show_alert=True)
+        with veritas_qalalar.conn ( ) as c:fs=c.execute ( 'SELECT * FROM war_forts WHERE chat_id=? AND id!=? ORDER BY id', ( cid,src )  ) .fetchall ( )
+        await q.answer (  ) ;return await q.message.reply_text ( '🎯 Nishonni tanlang:',reply_markup=_WM ( [[_WB ( f"#{f['id']} {'🔵' if f['team']==1 else '🔴'}",callback_data=f"wx:amount:{cid}:{src}:{f['id']}" ) ] for f in fs] ) )
+    if act=='amount':
+        src,dst=map ( int,data[3:5] ) ;f=veritas_qalalar.fort ( cid,src)
+        if not f or f['owner']!=uid:return await q.answer ( 'Bu qal’a sizniki emas.',show_alert=True)
+        available=veritas_qalalar.troops ( f)
+        opts=sorted ( set ( n for n in [1,max ( 1,available//4 ) ,max ( 1,available//2 ) ,available] if n<=available ) )
+        await q.answer (  ) ;return await q.message.reply_text ( f'⚔️ #{src} → #{dst}. Necha askar?',reply_markup=_WM ( [[_WB ( f'{n} askar',callback_data=f'wx:send:{cid}:{src}:{dst}:{n}' ) ] for n in opts] ) )
+    if act=='send':
+        src,dst,n=map ( int,data[3:6] ) ;a=veritas_qalalar.fort ( cid,src ) ;b=veritas_qalalar.fort ( cid,dst)
+        if not a or not b or a['owner']!=uid or n<1 or src==dst:return await q.answer ( 'Buyruq yaroqsiz.',show_alert=True)
+        if b['kind']=='palace' and a['team']!=b['team']:
+            with veritas_qalalar.conn ( ) as c:remaining=c.execute ( "SELECT COUNT ( *) FROM war_forts WHERE chat_id=? AND team=? AND kind='castle'", ( cid,b['team'] )  ) .fetchone (  ) [0]
+            if remaining:return await q.answer ( 'Avval dushman qal’alarini egallang.',show_alert=True)
+        import time as _wt, random as _wr
+        now=int ( _wt.time (  )  ) ;available=veritas_qalalar.troops ( a)
+        if n>available:return await q.answer ( 'Askar yetarli emas.',show_alert=True)
+        with veritas_qalalar.conn ( ) as c:
+            c.execute ( 'BEGIN IMMEDIATE')
+            a=c.execute ( 'SELECT * FROM war_forts WHERE id=? AND chat_id=?', ( src,cid )  ) .fetchone ( )
+            available=veritas_qalalar.troops ( a)
+            if a['owner']!=uid or available<n:return await q.answer ( 'Askar yetarli emas.',show_alert=True)
+            c.execute ( 'UPDATE war_forts SET troops=?,updated=? WHERE id=?', ( available-n,now,src ) )
+            c.execute ( 'INSERT INTO war_moves ( chat_id,owner,src,dst,troops,arrival) VALUES ( ?,?,?,?,?,? ) ', ( cid,uid,src,dst,n,now+_wr.choice (  ( 10,20,30 )  )  ) )
+        await q.answer ( 'Buyruq bajarildi!')
+        await q.message.reply_text ( f'🐎 {n} askar yo‘lga chiqdi.',reply_markup=_war_game_buttons ( cid ) )
+
+_war_old_finish=veritas_qalalar.finish_election
+async def _war_finish_with_lock ( update,ctx ) :
+    before=veritas_qalalar.game ( update.effective_chat.id)
+    await _war_old_finish ( update,ctx)
+    after=veritas_qalalar.game ( update.effective_chat.id)
+    if before and before['status']=='election' and after and after['status']=='playing':
+        await _war_lock ( ctx,update.effective_chat.id)
+        await ctx.bot.send_photo ( update.effective_chat.id,_war_picture ( update.effective_chat.id ) ,caption='⚔️ Urush boshlandi! Buyruqlar uchun pastdagi tugmani bosing.',reply_markup=_war_game_buttons ( update.effective_chat.id ) )
+veritas_qalalar.finish_election=_war_finish_with_lock
+
+_war_old_tick=veritas_qalalar.tick
+async def _war_tick_with_unlock ( ctx ) :
+    with veritas_qalalar.conn ( ) as c:active=[r['chat_id'] for r in c.execute ( "SELECT chat_id FROM war_games WHERE status='playing'" ) ]
+    await _war_old_tick ( ctx)
+    for cid in active:
+        g=veritas_qalalar.game ( cid)
+        if g and g['status']=='finished':
+            await _war_unlock ( ctx,cid)
+            try:await ctx.bot.send_photo ( cid,_war_picture ( cid ) ,caption='🏆 Urush yakunlandi! Guruh qayta ochildi.')
+            except Exception:pass
+veritas_qalalar.tick=_war_tick_with_unlock
+
+_war_old_register=veritas_qalalar.war_register
+def _war_register_upgrade ( app,db_path ) :
+    _war_old_register ( app,db_path)
+    app.add_handler ( _WarCallbackHandler ( _war_ux,pattern=r'^wx:' ) ,group=-21)
+veritas_qalalar.war_register=_war_register_upgrade
+
+
+# === V10.5: HISTORICAL WAR DISPATCHES / PRIVATE INTELLIGENCE ===
+import html as _war_html
+
+async def _war_safe_private ( bot, uid, text, reply_markup=None ) :
+    try:
+        await bot.send_message ( uid, text, parse_mode='HTML', reply_markup=reply_markup)
+        return True
+    except Exception:
+        return False  # Telegram requires the member to start the bot privately.
+
+async def _war_send_announcement ( bot, cid, text ) :
+    try:
+        await bot.send_message ( cid, text, parse_mode='HTML', disable_web_page_preview=True)
+    except Exception:
+        pass
+
+_war_previous_tick = veritas_qalalar.tick
+async def _war_illustrated_tick ( ctx ) :
+    # Capture due movements before the original atomic battle resolver handles them.
+    import time as _wt
+    with veritas_qalalar.conn ( ) as c:
+        pending=[dict ( r) for r in c.execute ( "SELECT * FROM war_moves WHERE status='moving' AND arrival<=? ORDER BY arrival,id LIMIT 100", ( int ( _wt.time (  )  ) , )  ) ]
+        previous={m['id']:dict ( c.execute ( 'SELECT * FROM war_forts WHERE id=?', ( m['dst'], )  ) .fetchone ( ) or {}) for m in pending}
+    await _war_previous_tick ( ctx)
+    for m in pending:
+        with veritas_qalalar.conn ( ) as c:
+            move=c.execute ( 'SELECT status FROM war_moves WHERE id=?', ( m['id'], )  ) .fetchone ( )
+            after=c.execute ( 'SELECT * FROM war_forts WHERE id=?', ( m['dst'], )  ) .fetchone ( )
+            before=previous[m['id']]
+            if not move or move['status']!='done' or not after:continue
+            after=dict ( after)
+            sender=c.execute ( 'SELECT name FROM war_players WHERE chat_id=? AND user_id=?', ( m['chat_id'],m['owner'] )  ) .fetchone ( )
+            defender_id=before.get ( 'owner')
+        sender_name=_war_html.escape ( sender['name'] if sender else 'Sarkarda')
+        captured=bool ( before and before.get ( 'team' ) !=after['team'])
+        same_team=bool ( before and before.get ( 'team' ) ==after['team'])
+        if same_team:
+            headline='🐎 <b>MADAD LASHKARI YETIB KELDI</b>'
+            body=f'🛡 #{m["dst"]} qal’aga ittifoqchi qo‘shinlar yetib keldi.'
+        elif captured:
+            headline='🏆 <b>QAL’A ZABT ETILDI!</b>'
+            body=f'🏰 #{m["dst"]} qal’a yangi davlat tasarrufiga o‘tdi.\n👤 G‘olib sarkarda: {sender_name}'
+        else:
+            headline='🛡 <b>QAL’A MUDOFAASI</b>'
+            body=f'🏰 #{m["dst"]} qal’a hujumga bardosh berdi.'
+        announcement= ( '⚔️ ═══ 🏰 ═══ ⚔️\n'
+                      f'{headline}\n\n{body}\n\n'
+                      '📜 <i>Veritas harbiy yilnomasi</i>')
+        await _war_send_announcement ( ctx.bot,m['chat_id'],announcement)
+        await _war_safe_private ( ctx.bot,m['owner'],
+            f'🔐 <b>MAXFIY HARBIY HISOBOT</b>\n\n'
+            f'🐎 Siz yuborgan {m["troops"]} askar #{m["dst"]} manzilga yetdi.\n'
+            f'{"🏆 Qal’a egallandi!" if captured else "🛡 Harbiy yurish yakunlandi."}\n'
+            '📜 Qal’alaringizni boshqarish uchun guruhdagi tugmalardan foydalaning.')
+        if defender_id and defender_id!=m['owner'] and not same_team:
+            await _war_safe_private ( ctx.bot,defender_id,
+                f'🔐 <b>MAXFIY OGОHLANTIRISH</b>\n\n'
+                f'⚔️ Siz boshqargan #{m["dst"]} qal’aga hujum bo‘ldi.\n'
+                + ('❌ Qal’a qo‘ldan ketdi.' if captured else '🛡 Mudofaa saqlanib qoldi.' ) )
+veritas_qalalar.tick=_war_illustrated_tick
+
 def main (  ) :
     if not TOKEN: raise RuntimeError ( "BOT_TOKEN kiritilmagan.")
     init_db ( )
