@@ -41,7 +41,7 @@ from telegram.ext import (
 TOKEN = os.getenv ( "BOT_TOKEN", "" ) .strip ( )
 DB_PATH = os.getenv ( "DB_PATH", "veritas_v7.sqlite3")
 SUPER_OWNERS = {int ( x) for x in os.getenv ( "SUPER_OWNER_IDS","" ) .split ( ",") if x.strip (  ) .isdigit (  ) }
-VERSION = "9.7"
+VERSION = "10.0"
 OPENAI_API_KEY = os.getenv ( "OPENAI_API_KEY", "" ) .strip ( )
 OPENAI_MODEL = os.getenv ( "OPENAI_MODEL", "gpt-5.6-luna" ) .strip ( ) or "gpt-5.6-luna"
 REBUS_IMAGE_MODEL = os.getenv ( "REBUS_IMAGE_MODEL", "gpt-image-2" ) .strip ( ) or "gpt-image-2"
@@ -5905,14 +5905,28 @@ async def bayram_command ( update,ctx ) :
     msg=update.effective_message; chat=update.effective_chat; u=update.effective_user
     if not chat or chat.type not in ('group','supergroup' ) :
         return await msg.reply_text ( '🎉 *bayram faqat guruhda ishlaydi.')
-    if not await can_manage ( ctx.bot,chat.id,u.id ) :
-        return await msg.reply_text ( '⛔ *bayram faqat guruh adminlari va Veritas boshqaruvchilariga ruxsat.')
     candidates=bayram_candidates ( chat.id,50)
     if not candidates:
         return await msg.reply_text ( '⏳ Oxirgi 10 soat ichida qayd etilgan faol a’zolar topilmadi. Bot guruhda ishlagan va xabarlarni ko‘rgan bo‘lishi kerak.')
     with db ( ) as c:
         cid=c.execute ( 'INSERT INTO bayram_campaigns ( chat_id,creator_id,created_at) VALUES ( ?,?,? ) ', ( chat.id,u.id,now (  )  )  ) .lastrowid
     return await msg.reply_text ( f'🎉 VERITAS BAYRAM\n\n⏱ Oxirgi 10 soat\n👥 Faol a’zolar: {len ( candidates ) } tagacha\n\nNechta g‘olibni taqdirlaymiz?',reply_markup=bayram_markup ( cid,'count' ) )
+
+def bayram_reserve_wallet ( campaign_id,creator_id,total,chat_id ) :
+    """Bayram xarajatini tashkilotchining Veritas kabinetidan atomik rezerv qiladi."""
+    total=int ( total)
+    if total<=0:return False
+    ref=f"bayram:{campaign_id}"
+    with db ( ) as c:
+        row=c.execute ( "SELECT wallet FROM users WHERE user_id=?", ( creator_id, )  ) .fetchone ( )
+        bal=int ( row["wallet"] or 0) if row else 0
+        if bal<total:return False
+        changed=c.execute ( "UPDATE bayram_campaigns SET status='sending',confirmed_at=? WHERE id=? AND status='draft'", ( now (  ) ,campaign_id )  ) .rowcount
+        if not changed:return False
+        c.execute ( "UPDATE users SET wallet=wallet-? WHERE user_id=?", ( total,creator_id ) )
+        c.execute ( "INSERT INTO tx ( user_id,kind,amount,target_id,ref,created_at,meta) VALUES ( ?,?,?,?,?,?,? ) ",
+                  (creator_id,'bayram_reserve',-total,chat_id,ref,now (  ) ,json.dumps ( {'campaign_id':campaign_id,'reserved':total},ensure_ascii=False )  ) )
+    return True
 
 async def bayram_callback ( update,ctx ) :
     q=update.callback_query; u=q.from_user; d=q.data or ''
@@ -5956,19 +5970,25 @@ async def bayram_callback ( update,ctx ) :
     winners=all_ ( 'SELECT * FROM bayram_winners WHERE campaign_id=? ORDER BY msg_count DESC,user_id', ( cid, ) )
     if not winners or not camp['greeting'] or not camp['gift_id']:
         return await q.answer ( 'Tabriknoma yoki g‘oliblar tayyor emas.',show_alert=True)
+    total=len ( winners ) *int ( camp['gift_price'])
+    creator_id=int ( camp['creator_id'])
+    # 1) Tashkilotchining Veritas kabinet balansini tekshiramiz. Shaxsiy Telegram Stars olinmaydi.
+    creator_wallet=wallet ( creator_id)
+    if creator_wallet<total:
+        return await q.answer ( f'Kabinet balansida Stars yetarli emas. Kerak: {total} ⭐, balans: {creator_wallet} ⭐.',show_alert=True)
+    # 2) Haqiqiy Giftni bot yuboradi, shuning uchun botning real Stars balansi ham yetarli bo‘lishi shart.
     try:
         available=await ctx.bot.get_available_gifts ( )
         valid=next (  ( g for g in available.gifts if str ( g.id ) ==camp['gift_id'] and int ( g.star_count ) ==camp['gift_price'] and getattr ( g,'remaining_count',None ) !=0 ) ,None)
         if valid is None:return await q.answer ( 'Tanlangan Gift endi mavjud emas.',show_alert=True)
         balance=await ctx.bot.get_my_star_balance ( )
-        if int ( balance.amount ) <len ( winners ) *int ( camp['gift_price'] ) :
-            return await q.answer ( 'Bot Stars balansida yetarli mablag‘ yo‘q.',show_alert=True)
+        if int ( balance.amount ) <total:
+            return await q.answer ( 'Botning Telegram Stars balansida yetarli mablag‘ yo‘q.',show_alert=True)
     except Exception as e:
         return await q.answer ( f'Balans/Gift tekshiruvida xato: {str ( e ) [:110]}',show_alert=True)
-    # Atomik status: ikki marta tasdiqlansa takror gift ketmaydi.
-    with db ( ) as c:
-        changed=c.execute ( "UPDATE bayram_campaigns SET status='sending',confirmed_at=? WHERE id=? AND status='draft'", ( now (  ) ,cid )  ) .rowcount
-    if not changed:return await q.answer ( 'Bu bayram allaqachon boshlangan.',show_alert=True)
+    # 3) Kabinet kreditini atomik rezerv qilamiz va kampaniyani sending holatiga o‘tkazamiz.
+    if not bayram_reserve_wallet ( cid,creator_id,total,int ( camp['chat_id'] )  ) :
+        return await q.answer ( 'Kabinet balansi o‘zgargan yoki bu Bayram allaqachon boshlangan.',show_alert=True)
     await q.answer ( 'Sovg‘alar yuborilmoqda...')
     await q.edit_message_text ( '🎁 Bayram sovg‘alari yuborilmoqda. Natijalar tez orada shu guruhda chiqadi.')
     success=[];failed=[]
@@ -5984,6 +6004,8 @@ async def bayram_callback ( update,ctx ) :
         except Exception as e:
             failed.append ( uid)
             execute ( "UPDATE bayram_winners SET status='failed',error=? WHERE campaign_id=? AND user_id=?", ( str ( e ) [:250],cid,uid ) )
+            # Gift ketmagan bo‘lsa shu odam uchun rezerv qilingan kreditni kabinetga qaytaramiz.
+            wallet_change ( creator_id,int ( camp['gift_price'] ) ,'bayram_refund',uid,ref=f'bayram:{cid}',meta={'campaign_id':cid,'reason':'gift_failed'})
         await asyncio.sleep ( 0.15)
     execute ( "UPDATE bayram_campaigns SET status='completed' WHERE id=?", ( cid, ) )
     # Faqat HAQIQATDA yuborilgan sovg‘alar g‘olib sifatida e’lon qilinadi.
@@ -6006,7 +6028,7 @@ async def bayram_callback ( update,ctx ) :
     for part in batches:
         await ctx.bot.send_message ( camp['chat_id'],part,parse_mode='HTML')
     if failed:
-        await ctx.bot.send_message ( camp['chat_id'],f'⚠️ {len ( failed ) } kishiga Gift yuborilmadi. Sarflanmagan Stars bot balansida qoladi. Tafsilotlar Railway logida.')
+        await ctx.bot.send_message ( camp['chat_id'],f'⚠️ {len ( failed ) } kishiga Gift yuborilmadi. Ular uchun Veritas kabinet krediti avtomatik qaytarildi.\n⭐ Qolgan kabinet balansi: {wallet ( creator_id ) } ⭐.')
     return
 
 async def bayram_private_input ( update,ctx ) :
@@ -6030,7 +6052,7 @@ async def bayram_private_input ( update,ctx ) :
         c.execute ( 'UPDATE bayram_campaigns SET greeting=? WHERE id=?', ( greeting,cid ) )
     STATE.pop ( u.id,None)
     count=len ( winners ) ;total=count*camp['gift_price']
-    await msg.reply_text ( f'🎉 BAYRAM TASDIQLASH\n\n👥 G‘oliblar: {count} kishi\n⏱ Oxirgi 10 soat\n🎁 Har biriga: {camp["gift_price"]} ⭐ Gift\n💰 Jami: {total} ⭐\n\n💌 {greeting}\n\n⚠️ TASDIQLASH bosilsa botning Stars balansidan haqiqiy Giftlar yuboriladi.',reply_markup=bayram_markup ( cid,'confirm' ) )
+    await msg.reply_text ( f'🎉 BAYRAM TASDIQLASH\n\n👥 G‘oliblar: {count} kishi\n⏱ Oxirgi 10 soat\n🎁 Har biriga: {camp["gift_price"]} ⭐ Gift\n💰 Jami: {total} ⭐\n⭐ Kabinet balansingiz: {wallet ( u.id ) } ⭐\n\n💌 {greeting}\n\n⚠️ TASDIQLASH bosilsa jami summa sizning Veritas kabinet balansingizdan yechiladi. Haqiqiy Giftni bot yuboradi; shaxsiy Telegram Stars hisobingizdan yechilmaydi.',reply_markup=bayram_markup ( cid,'confirm' ) )
 
 
 # =========================================================
@@ -6510,6 +6532,840 @@ async def ai_news_send_group_direct ( update,ctx ) :
     execute ( "UPDATE ai_news_posts SET status='draft',sent_fail=1 WHERE id=?", ( nid, ) )
     return await ctx.bot.send_message ( q.message.chat_id,"⚠️ Yuborilmadi. Botning guruhda xabar yuborish huquqini tekshiring.",reply_markup=ai_news_group_ready_markup ( nid ) ,_skip_i18n=True)
 
+# =========================================================
+# VERITAS V10 — MEMORY / POWER / QUIZ / TASKS / AUTOPOST
+# =========================================================
+from zoneinfo import ZoneInfo
+import hashlib as _v10_hashlib
+import difflib as _v10_difflib
+import tempfile as _v10_tempfile
+
+V10_TIMEZONE = os.getenv ( "VERITAS_TIMEZONE", "Asia/Tashkent" ) .strip ( ) or "Asia/Tashkent"
+V10_TRANSCRIBE_MODEL = os.getenv ( "OPENAI_TRANSCRIBE_MODEL", "gpt-4o-mini-transcribe" ) .strip ( ) or "gpt-4o-mini-transcribe"
+V10_PROFILE_LOCK = asyncio.Semaphore ( 2)
+V10_AUTOPOST_LOCK = asyncio.Semaphore ( 1)
+
+
+def v10_init_db (  ) :
+    with db ( ) as c:
+        c.executescript ( """
+        CREATE TABLE IF NOT EXISTS v10_group_state(
+          chat_id INTEGER PRIMARY KEY, awake INTEGER DEFAULT 1,
+          updated_by INTEGER DEFAULT 0, updated_at INTEGER NOT NULL ) ;
+        CREATE TABLE IF NOT EXISTS v10_messages(
+          id INTEGER PRIMARY KEY AUTOINCREMENT, chat_id INTEGER NOT NULL,
+          message_id INTEGER DEFAULT 0, user_id INTEGER DEFAULT 0,
+          username TEXT DEFAULT '', first_name TEXT DEFAULT '', role TEXT DEFAULT 'user',
+          body TEXT DEFAULT '', media_type TEXT DEFAULT '', reply_to_message_id INTEGER DEFAULT 0,
+          created_at INTEGER NOT NULL,
+          UNIQUE ( chat_id,message_id,role )  ) ;
+        CREATE INDEX IF NOT EXISTS idx_v10_messages_chat_time ON v10_messages ( chat_id,created_at ) ;
+        CREATE INDEX IF NOT EXISTS idx_v10_messages_user_time ON v10_messages ( user_id,created_at ) ;
+        CREATE TABLE IF NOT EXISTS v10_user_memory(
+          user_id INTEGER PRIMARY KEY, summary TEXT DEFAULT '', style TEXT DEFAULT '',
+          updated_at INTEGER DEFAULT 0 ) ;
+        CREATE TABLE IF NOT EXISTS v10_tasks(
+          id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER NOT NULL, chat_id INTEGER NOT NULL,
+          task_text TEXT NOT NULL, run_at INTEGER NOT NULL, status TEXT DEFAULT 'pending',
+          created_at INTEGER NOT NULL, sent_at INTEGER DEFAULT 0 ) ;
+        CREATE INDEX IF NOT EXISTS idx_v10_tasks_due ON v10_tasks ( status,run_at ) ;
+        CREATE TABLE IF NOT EXISTS v10_watches(
+          id INTEGER PRIMARY KEY AUTOINCREMENT, owner_id INTEGER NOT NULL, chat_id INTEGER NOT NULL,
+          target_user_id INTEGER NOT NULL, event_type TEXT NOT NULL DEFAULT 'message',
+          keyword TEXT DEFAULT '', active INTEGER DEFAULT 1, created_at INTEGER NOT NULL ) ;
+        CREATE INDEX IF NOT EXISTS idx_v10_watches_target ON v10_watches ( chat_id,target_user_id,active ) ;
+        CREATE TABLE IF NOT EXISTS v10_book_cache(
+          book_id INTEGER PRIMARY KEY, extracted_text TEXT NOT NULL, updated_at INTEGER NOT NULL ) ;
+        CREATE TABLE IF NOT EXISTS v10_autopost_rules(
+          id INTEGER PRIMARY KEY AUTOINCREMENT, owner_id INTEGER NOT NULL,
+          target_chat_id INTEGER NOT NULL, target_title TEXT DEFAULT '', source_kind TEXT NOT NULL,
+          book_id INTEGER DEFAULT 0, topic TEXT DEFAULT '', hour INTEGER NOT NULL, minute INTEGER NOT NULL,
+          timezone TEXT NOT NULL DEFAULT 'Asia/Tashkent', approval_mode TEXT DEFAULT 'auto',
+          image_mode INTEGER DEFAULT 1, active INTEGER DEFAULT 1,
+          last_run_date TEXT DEFAULT '', created_at INTEGER NOT NULL ) ;
+        CREATE INDEX IF NOT EXISTS idx_v10_autopost_active ON v10_autopost_rules ( active,hour,minute ) ;
+        CREATE TABLE IF NOT EXISTS v10_autopost_history(
+          id INTEGER PRIMARY KEY AUTOINCREMENT, rule_id INTEGER NOT NULL, post_hash TEXT NOT NULL,
+          post_text TEXT NOT NULL, created_at INTEGER NOT NULL ) ;
+        CREATE TABLE IF NOT EXISTS v10_autopost_drafts(
+          id INTEGER PRIMARY KEY AUTOINCREMENT, rule_id INTEGER NOT NULL, owner_id INTEGER NOT NULL,
+          target_chat_id INTEGER NOT NULL, post_text TEXT NOT NULL, image_file_id TEXT DEFAULT '',
+          status TEXT DEFAULT 'pending', created_at INTEGER NOT NULL ) ;
+        """)
+
+
+def v10_group_awake ( chat_id ) :
+    r=one ( "SELECT awake FROM v10_group_state WHERE chat_id=?", ( chat_id, ) )
+    return True if not r else bool ( r["awake"])
+
+
+def v10_set_group_awake ( chat_id,awake,actor_id=0 ) :
+    execute ( """INSERT INTO v10_group_state ( chat_id,awake,updated_by,updated_at) VALUES ( ?,?,?,?)
+               ON CONFLICT ( chat_id) DO UPDATE SET awake=excluded.awake,updated_by=excluded.updated_by,updated_at=excluded.updated_at""",
+            (chat_id,1 if awake else 0,actor_id,now (  )  ) )
+
+
+def _v10_message_body ( msg ) :
+    txt= ( getattr ( msg,"text",None) or getattr ( msg,"caption",None) or "" ) .strip ( )
+    if txt:return txt[:12000]
+    if getattr ( msg,"voice",None ) :return "[voice]"
+    if getattr ( msg,"audio",None ) :return "[audio]"
+    if getattr ( msg,"photo",None ) :return "[photo]"
+    if getattr ( msg,"video",None ) :return "[video]"
+    if getattr ( msg,"document",None ) :return "[document]"
+    if getattr ( msg,"sticker",None ) :return "[sticker]"
+    if getattr ( msg,"poll",None ) :return "[poll]"
+    return ""
+
+
+def v10_archive_incoming ( update ) :
+    msg=update.effective_message; chat=update.effective_chat; u=update.effective_user
+    if not msg or not chat or not u or u.is_bot:return
+    ensure_user ( u)
+    if chat.type in ("group","supergroup" ) :ensure_group ( chat)
+    body=_v10_message_body ( msg)
+    try:
+        execute ( """INSERT OR IGNORE INTO v10_messages ( chat_id,message_id,user_id,username,first_name,role,body,media_type,reply_to_message_id,created_at)
+                   VALUES ( ?,?,?,?,?,'user',?,?,?,? ) """,
+                (chat.id,int ( msg.message_id or 0 ) ,u.id,u.username or '',u.first_name or '',body,media_type ( msg) or '',
+                 int ( getattr ( getattr ( msg,'reply_to_message',None ) ,'message_id',0) or 0 ) ,now (  )  ) )
+    except Exception:
+        log.exception ( "V10 incoming archive failed")
+
+
+def v10_archive_outgoing_message ( message ) :
+    if not message:return
+    try:
+        chat_id=int ( message.chat_id)
+        body= ( getattr ( message,"text",None) or getattr ( message,"caption",None) or "" ) .strip ( )
+        if not body:
+            if getattr ( message,"photo",None ) :body='[bot photo]'
+            elif getattr ( message,"document",None ) :body='[bot document]'
+            else:body='[bot message]'
+        execute ( """INSERT OR IGNORE INTO v10_messages ( chat_id,message_id,user_id,username,first_name,role,body,media_type,reply_to_message_id,created_at)
+                   VALUES ( ?,?,0,'','Veritas','assistant',?,?,0,? ) """,
+                (chat_id,int ( message.message_id or 0 ) ,body[:12000],media_type ( message) or '',now (  )  ) )
+    except Exception:
+        log.exception ( "V10 outgoing archive failed")
+
+
+class VeritasV10Bot ( VeritasI18nBot ) :
+    async def send_message ( self,chat_id,text,*args,**kwargs ) :
+        m=await super (  ) .send_message ( chat_id,text,*args,**kwargs)
+        v10_archive_outgoing_message ( m ) ; return m
+    async def send_photo ( self,chat_id,photo,*args,**kwargs ) :
+        m=await super (  ) .send_photo ( chat_id,photo,*args,**kwargs)
+        v10_archive_outgoing_message ( m ) ; return m
+    async def send_document ( self,chat_id,document,*args,**kwargs ) :
+        m=await super (  ) .send_document ( chat_id,document,*args,**kwargs)
+        v10_archive_outgoing_message ( m ) ; return m
+    async def send_video ( self,chat_id,video,*args,**kwargs ) :
+        m=await super (  ) .send_video ( chat_id,video,*args,**kwargs)
+        v10_archive_outgoing_message ( m ) ; return m
+
+
+# V10 da oddiy a'zolar uchun asosiy tugmalar private va groupda bir xil.
+def veritas_global_keyboard (  ) :
+    return ReplyKeyboardMarkup ( [
+        [KeyboardButton ( "🛡 Veritas" ) ,KeyboardButton ( "🎓 O‘quv • Talaba" ) ],
+        [KeyboardButton ( "📝 Test" ) ,KeyboardButton ( "❓ Savol-javob" ) ,KeyboardButton ( "🧩 Rebus" ) ],
+        [KeyboardButton ( "📢 Avtopost" ) ,KeyboardButton ( "❓ V10 Yordam" ) ],
+    ],resize_keyboard=True,is_persistent=True)
+
+
+def v10_help_markup (  ) :
+    return InlineKeyboardMarkup ( [
+        [InlineKeyboardButton ( "🤖 Suhbat va AI",callback_data="v10:help:ai" ) ,InlineKeyboardButton ( "🧠 Xotira",callback_data="v10:help:memory" ) ],
+        [InlineKeyboardButton ( "🛡 Guruh boshqaruvi",callback_data="v10:help:admin" ) ,InlineKeyboardButton ( "📝 Test/Rebus",callback_data="v10:help:quiz" ) ],
+        [InlineKeyboardButton ( "📚 Kitob/Hadis",callback_data="v10:help:library" ) ,InlineKeyboardButton ( "📢 Avtopost",callback_data="v10:help:autopost" ) ],
+        [InlineKeyboardButton ( "⏰ Vazifalar",callback_data="v10:help:tasks" ) ,InlineKeyboardButton ( "🎉 Bayram",callback_data="v10:help:bayram" ) ],
+        [InlineKeyboardButton ( "🎙 Voice",callback_data="v10:help:voice" ) ,InlineKeyboardButton ( "⚡ Uyg‘on/Uxla",callback_data="v10:help:power" ) ],
+    ])
+
+
+def v10_help_text ( section,uid,chat_id=0 ) :
+    admin=is_super ( uid)
+    if chat_id:
+        try: admin=admin or bool ( one ( "SELECT 1 FROM vadmins WHERE chat_id=? AND user_id=?", ( chat_id,uid )  ) )
+        except Exception: pass
+    data={
+      "ai":"🤖 SUHBAT VA AI\n\nVeritasga oddiy o‘zbekcha gap bilan murojaat qiling. Buyruqlarni yodlash shart emas. Guruhda ‘Veritas ...’ deb yozing, shaxsiy chatda esa to‘g‘ridan-to‘g‘ri savol bering.",
+      "memory":"🧠 XOTIRA\n\nVeritas ko‘rgan xabarlarni shaxs va guruh bo‘yicha arxivlaydi. ‘Veritas, bugun nima bo‘ldi?’, ‘kecha nimani gaplashgandik?’, ‘men kimman?’ kabi savollar ishlaydi. Bot ko‘rmagan suhbatni bilmaydi.",
+      "admin":"🛡 GURUH BOSHQARUVI\n\nOddiy tilda mute, warn, ban, kick, qoidalar, faollik va boshqa amallar ishlaydi."+ ( "\nSizda boshqaruv funksiyalari ko‘rinadi." if admin else "\nBoshqaruv amallari faqat ruxsatli adminlarga ochiladi." ) ,
+      "quiz":"📝 TEST / SAVOL-JAVOB / REBUS\n\nTugma orqali yoki ‘Veritas, menga 5 ta test tayyorla’ deb so‘rang. Reply qilingan xabardan, kutubxona kitobidan, mavzudan, internetdan yoki AI o‘zi tuzgan manbadan foydalanish mumkin. Default — 5 ta.",
+      "library":"📚 KITOB VA HADIS\n\nVasatiya kutubxonasi va mahalliy hadis bazasi mavjud. Test uchun kutubxonadagi kitobni manba sifatida tanlash mumkin.",
+      "autopost":"📢 SHAXSIY KANAL AVTOPOST\n\nShaxsiy chatda ‘📢 Avtopost’ni bosing. Kanalni ulang, kitob yoki mavzuni tanlang, kunlik vaqtni belgilang. Avtomatik yoki avval tasdiqlash rejimi, rasmli yoki faqat matnli post tanlanadi.",
+      "tasks":"⏰ ESLATMA VA KUZATUV\n\nMasalan: ‘Veritas, ertaga soat 8 da kitobni eslat’. Guruhda biror a’zoga reply qilib ‘u yozsa menga ayt’ desa, Veritas kuzatuv yaratadi.",
+      "bayram":"🎉 BAYRAM\n\nGuruhdagi har bir a’zo Bayram ochishi mumkin. Xarajat Bayramni ochgan odamning Veritas kabinet balansidan yechiladi; yuborilmagan Giftlar uchun kredit qaytariladi. Haqiqiy Giftni bot yuboradi.",
+      "voice":"🎙 VOICE\n\nVoice xabar Veritas tomonidan matnga aylantiriladi va mazmuniga qarab javob beriladi. Veritasga aytilgan oddiy AI so‘rovlari voice orqali ham ishlaydi.",
+      "power":"⚡ UYG‘ON / UXLA\n\nGuruh admini: ‘Veritas uyg‘on’ yoki ‘Veritas uxla’. Har guruh holati alohida saqlanadi. Super Ega barcha guruhlarni birdan uyg‘otishi yoki uxlatishi mumkin.",
+    }
+    return data.get ( section,"Bo‘lim topilmadi.")
+
+
+def v10_source_markup (  ) :
+    return InlineKeyboardMarkup ( [
+        [InlineKeyboardButton ( "📚 Veritas kutubxonasi",callback_data="v10:source:library" ) ],
+        [InlineKeyboardButton ( "📝 Mavzu / matn",callback_data="v10:source:topic" ) ,InlineKeyboardButton ( "🌐 Internet",callback_data="v10:source:internet" ) ],
+        [InlineKeyboardButton ( "🤖 AI o‘zi tuzsin",callback_data="v10:source:ai" ) ],
+        [InlineKeyboardButton ( "❌ Bekor qilish",callback_data="v10:cancel" ) ],
+    ])
+
+
+def _v10_norm ( s ) :
+    return re.sub ( r"[^a-z0-9а-яёʻ’' ]+"," ", ( s or '' ) .lower (  ) .replace ( "o‘","o'" ) .replace ( "g‘","g'" )  ) .strip ( )
+
+
+def _v10_learning_mode ( text ) :
+    t=_v10_norm ( text)
+    if "rebus" in t:return "rebus"
+    if "savol javob" in t or "savol-javob" in (text or '' ) .lower ( ) or "savoljavob" in t:return "qa"
+    if "test" in t or "quiz" in t:return "test"
+    return ""
+
+
+def _v10_count ( text,default=5 ) :
+    m=re.search ( r"\b ( \d{1,2} ) \s* ( ?:ta|tadan|dona ) ?\b",text or '',re.I)
+    if not m:return default
+    return max ( 1,min ( 20,int ( m.group ( 1 )  )  ) )
+
+
+def _v10_difficulty ( text ) :
+    t=_v10_norm ( text)
+    if "qiyin" in t or "hard" in t:return "qiyin"
+    if "oson" in t or "easy" in t:return "oson"
+    return "o‘rta"
+
+
+def _v10_extract_json_array ( raw ) :
+    m=re.search ( r"\[[\s\S]*\]",raw or '')
+    if not m:return []
+    try:return json.loads ( m.group ( 0 ) )
+    except Exception:return []
+
+
+def _v10_web_response_sync ( prompt ) :
+    payload=json.dumps ( {"model":OPENAI_MODEL,"tools":[{"type":"web_search"}],"input":prompt,"max_output_tokens":2600},ensure_ascii=False ) .encode ( 'utf-8')
+    req=urllib.request.Request ( "https://api.openai.com/v1/responses",data=payload,
+        headers={"Authorization":f"Bearer {OPENAI_API_KEY}","Content-Type":"application/json"},method="POST")
+    with urllib.request.urlopen ( req,timeout=75) as resp:data=json.loads ( resp.read (  ) .decode ( 'utf-8' ) )
+    if data.get ( 'output_text' ) :return str ( data['output_text'] ) .strip ( )
+    parts=[]
+    for item in data.get ( 'output',[] ) :
+        for content in item.get ( 'content',[] ) :
+            if content.get ( 'type' ) =='output_text' and content.get ( 'text' ) :parts.append ( content['text'])
+    return '\n'.join ( parts ) .strip ( )
+
+
+async def v10_generate_items ( mode,source_text,count=5,difficulty="o‘rta",internet=False ) :
+    if not OPENAI_API_KEY:return []
+    source_text= ( source_text or '' ) .strip ( )
+    if mode=='test':
+        instruction=f"""{count} ta {difficulty} darajadagi 4 variantli test tuzing. FAQAT JSON array qaytaring.
+Format: [{{"q":"savol","options":["A","B","C","D"],"answer":0,"explanation":"qisqa izoh"}}]
+answer 0..3. Savollar takrorlanmasin. Manba:\n{source_text[:26000]}"""
+    elif mode=='rebus':
+        instruction=f"""{count} ta {difficulty} darajadagi qisqa matn/emoji rebus tuzing. FAQAT JSON array qaytaring.
+Format: [{{"q":"rebus","answer":"qisqa javob","hint":"qisqa yordam"}}]
+Javob aniq bo‘lsin, rebuslar takrorlanmasin. Manba/mavzu:\n{source_text[:22000]}"""
+    else:
+        instruction=f"""{count} ta {difficulty} darajadagi savol-javob tuzing. FAQAT JSON array qaytaring.
+Format: [{{"q":"savol","answer":"qisqa aniq javob","hint":"juda qisqa ishora"}}]
+Savollar takrorlanmasin. Manba:\n{source_text[:26000]}"""
+    try:
+        raw=await asyncio.to_thread ( _v10_web_response_sync if internet else _openai_response_sync,instruction)
+        arr=_v10_extract_json_array ( raw ) ; good=[]
+        for x in arr:
+            if not isinstance ( x,dict) or not isinstance ( x.get ( 'q' ) ,str ) :continue
+            if mode=='test':
+                opts=x.get ( 'options' ) ;ans=x.get ( 'answer')
+                if not isinstance ( opts,list) or len ( opts ) !=4:continue
+                try:ans=int ( ans)
+                except Exception:continue
+                if 0<=ans<4:good.append ( {'q':x['q'][:500],'options':[str ( z ) [:220] for z in opts],'answer':ans,'explanation':str ( x.get ( 'explanation','' )  ) [:500]})
+            else:
+                if str ( x.get ( 'answer','' )  ) .strip (  ) :good.append ( {'q':x['q'][:700],'answer':str ( x['answer'] ) [:300],'hint':str ( x.get ( 'hint','' )  ) [:300]})
+        return good[:count]
+    except Exception:
+        log.exception ( "V10 item generation failed" ) ;return []
+
+
+async def v10_get_book_text ( ctx,bid,uid=0 ) :
+    cached=one ( "SELECT extracted_text FROM v10_book_cache WHERE book_id=?", ( bid, ) )
+    if cached and len ( cached['extracted_text'] or '' ) >500:return cached['extracted_text']
+    r=one ( "SELECT title,pdf_file_id,book_file_id,book_format FROM library_books WHERE id=? AND status='approved'", ( bid, ) )
+    if not r:return ""
+    fid= ( r['book_file_id'] or r['pdf_file_id'] or '' ) .strip ( )
+    if not fid:return ""
+    fmt= ( r['book_format'] or 'pdf' ) .lower ( )
+    path=f"/tmp/v10_book_{bid}_{uid or 0}.{fmt or 'bin'}"
+    try:
+        try:
+            tg=await ctx.bot.get_file ( fid ) ; await tg.download_to_drive ( custom_path=path)
+        except TelegramError as e:
+            if 'File is too big' not in str ( e ) :raise
+            await _download_large_telegram_file ( ctx,fid,path)
+        raw=Path ( path ) .read_bytes ( )
+        if fmt=='pdf' or raw[:4]==b'%PDF':
+            if fitz is None:return ""
+            doc=fitz.open ( stream=raw,filetype='pdf' ) ;parts=[]
+            for page in doc:
+                parts.append ( page.get_text ( 'text' ) )
+                if sum ( len ( p) for p in parts ) >120000:break
+            doc.close (  ) ;text='\n'.join ( parts)
+        else:
+            text=raw.decode ( 'utf-8',errors='ignore')
+        text=text.strip (  ) [:120000]
+        if text:execute ( "INSERT OR REPLACE INTO v10_book_cache ( book_id,extracted_text,updated_at) VALUES ( ?,?,? ) ", ( bid,text,now (  )  ) )
+        return text
+    except Exception:
+        log.exception ( "V10 book text failed bid=%s",bid ) ;return ""
+    finally:
+        try:Path ( path ) .unlink ( missing_ok=True)
+        except Exception:pass
+
+
+async def v10_send_current_question ( ctx,uid,chat_id ) :
+    st=STATE.get ( uid) or {};items=st.get ( 'items') or [];idx=int ( st.get ( 'index',0 )  ) ;kind=st.get ( 'quiz_kind')
+    if idx>=len ( items ) :return
+    x=items[idx]
+    if kind=='test':
+        kb=InlineKeyboardMarkup ( [[InlineKeyboardButton ( f"{i+1}. {opt}",callback_data=f"v10:testans:{uid}:{idx}:{i}" ) ] for i,opt in enumerate ( x['options'] ) ]+[[InlineKeyboardButton ( "❌ To‘xtatish",callback_data="v10:cancel" ) ]])
+        await ctx.bot.send_message ( chat_id,f"📝 TEST — {idx+1}/{len ( items ) }\n\n{x['q']}",reply_markup=kb)
+    else:
+        icon='🧩' if kind=='rebus' else '❓'
+        hint=f"\n\n💡 Ishora: {x.get ( 'hint' ) }" if x.get ( 'hint') else ''
+        await ctx.bot.send_message ( chat_id,f"{icon} {idx+1}/{len ( items ) }\n\n{x['q']}{hint}\n\nJavobingizni yozing.")
+
+
+async def v10_begin_generated ( ctx,uid,chat_id,kind,items ) :
+    if not items:return await ctx.bot.send_message ( chat_id,"⚠️ Savollarni tayyorlay olmadim. Boshqa manba yoki mavzu bilan urinib ko‘ring.")
+    STATE[uid]={'mode':'v10_quiz_answer','quiz_kind':kind,'items':items,'index':0,'correct':0,'chat_id':chat_id}
+    await v10_send_current_question ( ctx,uid,chat_id)
+
+
+def _v10_answer_ok ( given,expected ) :
+    a=_v10_norm ( given ) ;b=_v10_norm ( expected)
+    if not a or not b:return False
+    if a==b or a in b or b in a:return True
+    return _v10_difflib.SequenceMatcher ( None,a,b ) .ratio (  ) >=0.82
+
+
+async def v10_handle_open_answer ( update,ctx ) :
+    msg=update.effective_message;u=update.effective_user;chat=update.effective_chat
+    st=STATE.get ( u.id) or {}
+    if st.get ( 'mode' ) !='v10_quiz_answer' or st.get ( 'quiz_kind' ) =='test' or int ( st.get ( 'chat_id',0 )  ) !=chat.id:return False
+    text= ( msg.text or '' ) .strip ( )
+    if not text:return True
+    items=st['items'];idx=int ( st['index'] ) ;x=items[idx]
+    ok=_v10_answer_ok ( text,x['answer'])
+    if ok:st['correct']=int ( st.get ( 'correct',0 )  ) +1
+    await msg.reply_text (  ( '✅ To‘g‘ri!' if ok else f"❌ To‘g‘ri javob: {x['answer']}" ) )
+    st['index']=idx+1;STATE[u.id]=st
+    if st['index']>=len ( items ) :
+        total=len ( items ) ;corr=int ( st.get ( 'correct',0 )  ) ;STATE.pop ( u.id,None)
+        await msg.reply_text ( f"🏁 Tugadi. Natija: {corr}/{total}.")
+    else:await v10_send_current_question ( ctx,u.id,chat.id)
+    return True
+
+
+async def v10_start_learning ( update,ctx,kind=None,raw_text=None ) :
+    msg=update.effective_message;u=update.effective_user;chat=update.effective_chat
+    raw= ( raw_text if raw_text is not None else (msg.text or '' )  ) .strip (  ) ; kind=kind or _v10_learning_mode ( raw) or 'test'
+    count=_v10_count ( raw,5 ) ;difficulty=_v10_difficulty ( raw)
+    rp=getattr ( msg,'reply_to_message',None ) ;source= ( getattr ( rp,'text',None) or getattr ( rp,'caption',None) or '' ) .strip ( ) if rp else ''
+    if source:
+        await msg.reply_text ( f"🧠 Reply qilingan xabardan {count} ta savol tayyorlayapman...")
+        items=await v10_generate_items ( kind,source,count,difficulty,False)
+        return await v10_begin_generated ( ctx,u.id,chat.id,kind,items)
+    STATE[u.id]={'mode':'v10_source_choice','quiz_kind':kind,'count':count,'difficulty':difficulty,'chat_id':chat.id}
+    labels={'test':'📝 Test','qa':'❓ Savol-javob','rebus':'🧩 Rebus'}
+    return await msg.reply_text ( f"{labels[kind]} uchun manbani tanlang:",reply_markup=v10_source_markup (  ) )
+
+
+async def v10_summary ( update,ctx,hours=24 ) :
+    chat=update.effective_chat;msg=update.effective_message
+    since=now (  ) -hours*3600
+    rows=all_ ( "SELECT first_name,username,role,body,created_at FROM v10_messages WHERE chat_id=? AND created_at>=? ORDER BY id DESC LIMIT 300", ( chat.id,since ) )
+    if not rows:return await msg.reply_text ( "Bu davr uchun xotirada xabar yo‘q.")
+    rows=list ( reversed ( rows )  ) ;trans='\n'.join ( f"[{r['role']}] {r['first_name'] or r['username']}: {r['body'][:700]}" for r in rows)
+    if not OPENAI_API_KEY:
+        users=len ( { ( r['first_name'],r['username']) for r in rows if r['role']=='user'})
+        return await msg.reply_text ( f"📊 Oxirgi {hours} soat: {len ( rows ) } xabar, taxminan {users} faol foydalanuvchi.")
+    prompt=f"""Quyidagi Telegram guruh tarixidan qisqa va aniq o‘zbekcha xulosa qil.
+Bo‘limlar: asosiy mavzular, muhim qaror/xabarlar, savollar/vazifalar, kelishmovchilik bo‘lsa qisqa ayt. Uydirma qilma.
+TARIX:\n{trans[-28000:]}"""
+    try:ans=await asyncio.to_thread ( _openai_response_sync,prompt)
+    except Exception:return await msg.reply_text ( "⚠️ Xulosa tayyorlashda AI xatosi yuz berdi.")
+    await msg.reply_text ( "🧠 VERITAS XULOSASI\n\n"+ans[:3500])
+
+
+async def v10_history_answer ( update,ctx,query ) :
+    chat=update.effective_chat;msg=update.effective_message
+    rows=all_ ( "SELECT first_name,username,role,body,created_at FROM v10_messages WHERE chat_id=? ORDER BY id DESC LIMIT 500", ( chat.id, ) )
+    if not rows:return await msg.reply_text ( "Bu guruh bo‘yicha xotirada ma’lumot yo‘q.")
+    trans='\n'.join ( f"{datetime.fromtimestamp ( r['created_at'],timezone.utc ) .strftime ( '%Y-%m-%d %H:%M' ) } | {r['role']} | {r['first_name'] or r['username']}: {r['body'][:600]}" for r in reversed ( rows ) )
+    if not OPENAI_API_KEY:return await msg.reply_text ( "AI kaliti yo‘q, tarixni semantik qidira olmayman.")
+    prompt=f"""Faqat berilgan guruh tarixiga tayangan holda foydalanuvchi savoliga javob ber. Topilmasa 'xotirada topilmadi' de. Uydirma qilma.
+SAVOL: {query}\nTARIX:\n{trans[-30000:]}"""
+    try:ans=await asyncio.to_thread ( _openai_response_sync,prompt)
+    except Exception:return await msg.reply_text ( "⚠️ Tarix qidiruvida xato.")
+    await msg.reply_text ( "🔎 Xotira natijasi\n\n"+ans[:3500])
+
+
+def _v10_profile_sync ( uid ) :
+    rows=all_ ( "SELECT body FROM v10_messages WHERE user_id=? AND role='user' AND body<>'' ORDER BY id DESC LIMIT 180", ( uid, ) )
+    if not rows:return None
+    text='\n'.join ( r['body'][:700] for r in reversed ( rows ) )
+    prompt=f"""Quyidagi foydalanuvchi yozuvlaridan faqat ishonchli, foydali va maxfiy bo‘lmagan uzoq muddatli xotira yarating.
+Sog‘liq, siyosiy qarash, din/etnik kelib chiqish kabi sezgir shaxsiy atributlarni xulosa qilib identifikatsiya qilmang.
+FAQAT JSON: {{\"summary\":\"2-6 jumla\",\"style\":\"qisqa muloqot uslubi tavsifi\"}}
+YOZUVLAR:\n{text[-26000:]}"""
+    raw=_openai_response_sync ( prompt ) ;m=re.search ( r"\{[\s\S]*\}",raw or '')
+    if not m:return None
+    d=json.loads ( m.group ( 0 )  ) ;return str ( d.get ( 'summary','' )  ) [:1800],str ( d.get ( 'style','' )  ) [:500]
+
+async def v10_refresh_user_memory ( uid ) :
+    if not OPENAI_API_KEY:return
+    async with V10_PROFILE_LOCK:
+        try:res=await asyncio.to_thread ( _v10_profile_sync,uid)
+        except Exception:
+            log.exception ( 'V10 profile summary failed' ) ;return
+        if not res:return
+        execute ( "INSERT INTO v10_user_memory ( user_id,summary,style,updated_at) VALUES ( ?,?,?,?) ON CONFLICT ( user_id) DO UPDATE SET summary=excluded.summary,style=excluded.style,updated_at=excluded.updated_at", ( uid,res[0],res[1],now (  )  ) )
+
+async def v10_who_am_i ( update,ctx ) :
+    u=update.effective_user;msg=update.effective_message
+    mem0=one ( "SELECT updated_at FROM v10_user_memory WHERE user_id=?", ( u.id, ) )
+    if OPENAI_API_KEY and (not mem0 or now (  ) -int ( mem0['updated_at'] or 0 ) >86400 ) :
+        await v10_refresh_user_memory ( u.id)
+    rows=all_ ( """SELECT g.chat_id,g.title,COALESCE ( m.messages,0) messages FROM groups g
+                 LEFT JOIN members m ON m.chat_id=g.chat_id AND m.user_id=?
+                 WHERE m.user_id=? ORDER BY messages DESC LIMIT 20""", ( u.id,u.id ) )
+    total=one ( "SELECT COUNT ( *) n FROM v10_messages WHERE user_id=?", ( u.id, )  ) ['n']
+    mem=one ( "SELECT summary FROM v10_user_memory WHERE user_id=?", ( u.id, ) )
+    groups='\n'.join ( f"• {r['title'] or r['chat_id']} — {r['messages']} xabar" for r in rows[:8]) or '• Hali guruh faolligi topilmadi.'
+    text=f"👤 Siz: {u.full_name}\n🆔 {u.id}\n🧠 V10 xotirasida: {total} ta ko‘rilgan xabar\n\n🏘 Guruhlar:\n{groups}"
+    if mem and mem['summary']:text+='\n\n📝 Qisqa xotira:\n'+mem['summary'][:1200]
+    await msg.reply_text ( text)
+
+
+def _v10_parse_reminder_sync ( text ) :
+    tz=ZoneInfo ( V10_TIMEZONE ) ;cur=datetime.now ( tz)
+    prompt=f"""Hozirgi vaqt: {cur.isoformat (  ) }. Timezone: {V10_TIMEZONE}.
+Quyidagi o‘zbekcha eslatmani vaqtga aylantir. FAQAT JSON qaytar:
+{{"run_at":"ISO8601 offset bilan","text":"eslatiladigan qisqa matn"}}
+Agar aniq vaqtni chiqarib bo‘lmasa run_at bo‘sh bo‘lsin.
+SO‘ROV: {text}"""
+    raw=_openai_response_sync ( prompt ) ;m=re.search ( r"\{[\s\S]*\}",raw or '')
+    if not m:return None
+    d=json.loads ( m.group ( 0 )  ) ;run=d.get ( 'run_at') or ''
+    if not run:return None
+    dt=datetime.fromisoformat ( run ) ;return int ( dt.timestamp (  )  ) ,str ( d.get ( 'text') or text ) [:1000]
+
+
+async def v10_create_reminder ( update,ctx,raw ) :
+    msg=update.effective_message;u=update.effective_user;chat=update.effective_chat
+    if not OPENAI_API_KEY:return await msg.reply_text ( "⚠️ Eslatmani tabiiy tilda tushunish uchun OPENAI_API_KEY kerak.")
+    try:parsed=await asyncio.to_thread ( _v10_parse_reminder_sync,raw)
+    except Exception:parsed=None
+    if not parsed:return await msg.reply_text ( "⏰ Vaqtni aniq tushunmadim. Masalan: ‘Veritas, ertaga soat 8 da kitobni eslat’. ")
+    run_at,task_text=parsed
+    if run_at<=now (  ) :return await msg.reply_text ( "⏰ Eslatma vaqti kelajakda bo‘lishi kerak.")
+    with db ( ) as c:tid=c.execute ( "INSERT INTO v10_tasks ( user_id,chat_id,task_text,run_at,status,created_at) VALUES ( ?,?,?,?,\'pending\',? ) ", ( u.id,chat.id,task_text,run_at,now (  )  )  ) .lastrowid
+    local=datetime.fromtimestamp ( run_at,ZoneInfo ( V10_TIMEZONE )  ) .strftime ( '%Y-%m-%d %H:%M')
+    await msg.reply_text ( f"✅ Eslatma #{tid} saqlandi.\n🕒 {local} ({V10_TIMEZONE} ) \n📝 {task_text}")
+
+
+async def v10_task_job ( ctx ) :
+    rows=all_ ( "SELECT * FROM v10_tasks WHERE status='pending' AND run_at<=? ORDER BY run_at LIMIT 30", ( now (  ) , ) )
+    for r in rows:
+        try:
+            u=one ( "SELECT first_name,username FROM users WHERE user_id=?", ( r['user_id'], )  ) ;name= ( u['first_name'] or ('@'+u['username'] if u and u['username'] else str ( r['user_id'] )  ) ) if u else str ( r['user_id'])
+            await ctx.bot.send_message ( r['chat_id'],f"⏰ ESLATMA — {name}\n\n{r['task_text']}")
+            execute ( "UPDATE v10_tasks SET status='sent',sent_at=? WHERE id=?", ( now (  ) ,r['id'] ) )
+        except Exception:
+            log.exception ( "V10 reminder send failed id=%s",r['id'])
+
+
+async def v10_create_watch ( update,ctx,raw,event_type='message' ) :
+    msg=update.effective_message;u=update.effective_user;chat=update.effective_chat
+    target_id,target_name=await _natural_target ( update,ctx,raw)
+    if not target_id:return await msg.reply_text ( "↩️ Kuzatiladigan odamning xabariga reply qiling yoki @username yozing.")
+    with db ( ) as c:wid=c.execute ( "INSERT INTO v10_watches ( owner_id,chat_id,target_user_id,event_type,keyword,active,created_at) VALUES ( ?,?,?,?,\'',1,? ) ", ( u.id,chat.id,target_id,event_type,now (  )  )  ) .lastrowid
+    await msg.reply_text ( f"✅ Kuzatuv #{wid}: {target_name} {'guruhga kirsa' if event_type=='join' else 'yozsa'} sizga xabar beraman.")
+
+
+async def v10_check_message_watches ( ctx,chat_id,user_id,body ) :
+    rows=all_ ( "SELECT * FROM v10_watches WHERE chat_id=? AND target_user_id=? AND event_type='message' AND active=1", ( chat_id,user_id ) )
+    if not rows:return
+    g=one ( "SELECT title FROM groups WHERE chat_id=?", ( chat_id, )  ) ;u=one ( "SELECT first_name,username FROM users WHERE user_id=?", ( user_id, ) )
+    name= ( u['first_name'] or ('@'+u['username'] if u and u['username'] else str ( user_id )  ) ) if u else str ( user_id)
+    for r in rows:
+        try:await ctx.bot.send_message ( r['owner_id'],f"🔔 Kuzatuv: {name} yozdi.\n🏘 {g['title'] if g else chat_id}\n\n{ ( body or '' ) [:1500]}")
+        except TelegramError:pass
+
+
+async def v10_check_join_watches ( ctx,chat_id,user ) :
+    rows=all_ ( "SELECT * FROM v10_watches WHERE chat_id=? AND target_user_id=? AND event_type='join' AND active=1", ( chat_id,user.id ) )
+    for r in rows:
+        try:await ctx.bot.send_message ( r['owner_id'],f"🔔 {user.full_name} guruhga kirdi.")
+        except TelegramError:pass
+
+
+def _v10_transcribe_sync ( raw,filename='voice.ogg',mime='audio/ogg' ) :
+    if not OPENAI_API_KEY:raise RuntimeError ( 'OPENAI_API_KEY yo‘q')
+    boundary='----VeritasV10Boundary'+str ( random.randint ( 100000,999999 ) )
+    parts=[]
+    def field ( name,value ) :
+        parts.append ( f'--{boundary}\r\nContent-Disposition: form-data; name="{name}"\r\n\r\n{value}\r\n'.encode (  ) )
+    field ( 'model',V10_TRANSCRIBE_MODEL)
+    parts.append ( f'--{boundary}\r\nContent-Disposition: form-data; name="file"; filename="{filename}"\r\nContent-Type: {mime}\r\n\r\n'.encode (  ) +raw+b'\r\n')
+    parts.append ( f'--{boundary}--\r\n'.encode (  )  ) ;data=b''.join ( parts)
+    req=urllib.request.Request ( 'https://api.openai.com/v1/audio/transcriptions',data=data,
+        headers={'Authorization':f'Bearer {OPENAI_API_KEY}','Content-Type':f'multipart/form-data; boundary={boundary}'},method='POST')
+    with urllib.request.urlopen ( req,timeout=120) as resp:d=json.loads ( resp.read (  ) .decode ( 'utf-8' ) )
+    return str ( d.get ( 'text') or '' ) .strip ( )
+
+
+async def v10_voice_handler ( update,ctx ) :
+    msg=update.effective_message;u=update.effective_user;chat=update.effective_chat
+    if not msg or not msg.voice or not u:return
+    if chat.type in ('group','supergroup') and not v10_group_awake ( chat.id ) :return
+    try:
+        f=await ctx.bot.get_file ( msg.voice.file_id ) ;raw=bytes ( await f.download_as_bytearray (  ) )
+        text=await asyncio.to_thread ( _v10_transcribe_sync,raw,'voice.ogg','audio/ogg')
+    except Exception as e:
+        log.exception ( 'V10 voice transcription failed' ) ;return await msg.reply_text ( '⚠️ Voice xabarni matnga aylantira olmadim.')
+    if not text:return await msg.reply_text ( '⚠️ Voice ichidan matn aniqlanmadi.')
+    execute ( """INSERT OR REPLACE INTO v10_messages ( chat_id,message_id,user_id,username,first_name,role,body,media_type,reply_to_message_id,created_at)
+               VALUES ( ?,?,?,?,?,'user',?,'voice',?,? ) """,
+            (chat.id,msg.message_id,u.id,u.username or '',u.first_name or '',f'[voice] {text}',int ( getattr ( getattr ( msg,'reply_to_message',None ) ,'message_id',0) or 0 ) ,now (  )  ) )
+    kind=_v10_learning_mode ( text)
+    if kind:
+        return await v10_start_learning ( update,ctx,kind,text)
+    if chat.type in ('group','supergroup' ) :
+        low=_v10_norm ( text)
+        if 'veritas' not in low:return
+        intent=_natural_local_intent ( text)
+        if intent is None and OPENAI_API_KEY:
+            try:intent=await asyncio.to_thread ( _natural_intent_sync,text)
+            except Exception:intent=None
+        if intent and intent.get ( 'action' ) !='none':return await _natural_execute ( update,ctx,intent)
+    try:
+        ans=await asyncio.to_thread ( _openai_response_sync,f"Foydalanuvchi voice orqali dedi: {text}{ai_actor_context ( u ) }")
+        await msg.reply_text ( f"🎙 {text}\n\n🤖 {ans[:3000]}")
+    except Exception:await msg.reply_text ( f"🎙 {text}")
+
+
+# ------------------------- AUTOPOST -------------------------
+def v10_autopost_start_markup (  ) :
+    return InlineKeyboardMarkup ( [[InlineKeyboardButton ( '❌ Bekor qilish',callback_data='v10:cancel' ) ]])
+
+
+async def v10_autopost_start ( update,ctx ) :
+    msg=update.effective_message;u=update.effective_user
+    if update.effective_chat.type!='private':
+        return await msg.reply_text ( '📢 Avtopost sozlamasi xavfsizlik uchun shaxsiy chatda ochiladi. Botning shaxsiy chatiga kiring va “📢 Avtopost” tugmasini bosing.')
+    STATE[u.id]={'mode':'v10_ap_channel'}
+    await msg.reply_text ( '📢 AVTOPOST — 1/4\n\nPost yuboriladigan kanalning biror postini shu yerga forward qiling yoki @kanalusername yuboring.\nBot kanalda post yozish huquqiga ega admin bo‘lishi kerak.',reply_markup=v10_autopost_start_markup (  ) )
+
+
+async def _v10_ap_capture_channel ( update,ctx ) :
+    msg=update.effective_message;u=update.effective_user;target=None;title=''
+    origin=getattr ( msg,'forward_origin',None)
+    ch=getattr ( origin,'chat',None) if origin else None
+    if ch:
+        target=ch.id;title=getattr ( ch,'title','') or str ( ch.id)
+    else:
+        txt= ( msg.text or '' ) .strip ( )
+        if txt.startswith ( '@' ) :
+            try:
+                ch=await ctx.bot.get_chat ( txt ) ;target=ch.id;title=ch.title or txt
+            except Exception:pass
+    if not target:return await msg.reply_text ( '⚠️ Kanal aniqlanmadi. Kanal postini forward qiling yoki @kanalusername yuboring.')
+    try:
+        me=await ctx.bot.get_chat_member ( target,ctx.bot.id)
+        if me.status not in (ChatMemberStatus.ADMINISTRATOR,ChatMemberStatus.OWNER ) :
+            return await msg.reply_text ( '⛔ Veritas bu kanalda admin emas. Avval botga post yozish huquqini bering.')
+    except Exception:return await msg.reply_text ( '⛔ Kanalni tekshira olmadim. Botni kanalga admin qilib qo‘ying.')
+    STATE[u.id]={'mode':'v10_ap_source','target_chat_id':target,'target_title':title}
+    kb=InlineKeyboardMarkup ( [[InlineKeyboardButton ( '📚 Kitobdan',callback_data='v10:ap:source:book' ) ,InlineKeyboardButton ( '📝 Mavzudan',callback_data='v10:ap:source:topic' ) ],[InlineKeyboardButton ( '❌ Bekor qilish',callback_data='v10:cancel' ) ]])
+    await msg.reply_text ( f'✅ Kanal: {title}\n\n2/4 — Post manbasini tanlang:',reply_markup=kb)
+
+
+def _v10_ap_mode_markup (  ) :
+    return InlineKeyboardMarkup ( [
+        [InlineKeyboardButton ( '🤖 Avtomatik + rasm',callback_data='v10:ap:mode:auto:1' ) ,InlineKeyboardButton ( '✅ Tasdiqlash + rasm',callback_data='v10:ap:mode:approve:1' ) ],
+        [InlineKeyboardButton ( '📝 Avtomatik matn',callback_data='v10:ap:mode:auto:0' ) ,InlineKeyboardButton ( '👀 Tasdiqlash matn',callback_data='v10:ap:mode:approve:0' ) ],
+        [InlineKeyboardButton ( '❌ Bekor qilish',callback_data='v10:cancel' ) ]
+    ])
+
+
+def _v10_post_text_sync ( source,source_name,recent ) :
+    prompt=f"""Telegram kanal uchun o‘zbekcha, chiroyli va foydali bitta yangi post yozing.
+Manba: {source_name}. Faqat berilgan manba mazmuniga tayaning, aniq iqtibos uydirmang.
+Post 450-900 belgi, sarlavha + 2-4 qisqa paragraf, oxirida bitta mulohaza/savol bo‘lsin.
+Avvalgi postlarga juda o‘xshamasin.
+AVVALGI POSTLAR:\n{recent[-6000:]}\nMANBA:\n{source[:18000]}"""
+    return _openai_response_sync ( prompt ) .strip ( )
+
+
+def _v10_post_image_sync ( post_text ) :
+    if not OPENAI_API_KEY:raise RuntimeError ( 'OPENAI_API_KEY yo‘q')
+    prompt= ( "Create a beautiful vertical editorial illustration for a Telegram post. Match the MEANING and mood of the text. "
+            "No words, no typography, no logos, no watermark. Tasteful, realistic or painterly composition, culturally respectful. TEXT:\n"+post_text[:2200])
+    payload=json.dumps ( {'model':os.getenv ( 'POSTER_IMAGE_MODEL',REBUS_IMAGE_MODEL ) ,'prompt':prompt,'size':'1024x1536','quality':'medium'},ensure_ascii=False ) .encode ( 'utf-8')
+    req=urllib.request.Request ( 'https://api.openai.com/v1/images/generations',data=payload,headers={'Authorization':f'Bearer {OPENAI_API_KEY}','Content-Type':'application/json'},method='POST')
+    with urllib.request.urlopen ( req,timeout=240) as resp:d=json.loads ( resp.read (  ) .decode ( 'utf-8' ) )
+    item= ( d.get ( 'data') or [{}] ) [0]
+    if item.get ( 'b64_json' ) :return base64.b64decode ( item['b64_json'])
+    if item.get ( 'url' ) :
+        with urllib.request.urlopen ( item['url'],timeout=120) as resp:return resp.read ( )
+    raise RuntimeError ( 'Rasm qaytmadi')
+
+
+async def v10_autopost_job ( ctx ) :
+    async with V10_AUTOPOST_LOCK:
+        rows=all_ ( "SELECT * FROM v10_autopost_rules WHERE active=1 ORDER BY id")
+        for r in rows:
+            try:tz=ZoneInfo ( r['timezone'] or V10_TIMEZONE)
+            except Exception:tz=ZoneInfo ( V10_TIMEZONE)
+            cur=datetime.now ( tz ) ;today=cur.strftime ( '%Y-%m-%d')
+            if cur.hour!=int ( r['hour']) or cur.minute!=int ( r['minute']) or r['last_run_date']==today:continue
+            execute ( "UPDATE v10_autopost_rules SET last_run_date=? WHERE id=?", ( today,r['id'] ) )
+            try:
+                if r['source_kind']=='book':
+                    text=await v10_get_book_text ( ctx,int ( r['book_id'] ) ,int ( r['owner_id'] )  ) ;book=one ( 'SELECT title FROM library_books WHERE id=?', ( r['book_id'], )  ) ;source_name=book['title'] if book else 'Kitob'
+                    if not text:raise RuntimeError ( 'Kitob matni olinmadi')
+                    start=random.randint ( 0,max ( 0,len ( text ) -6000 )  ) ;source=text[start:start+9000]
+                else:
+                    source=r['topic'];source_name='Mavzu: '+r['topic']
+                prev=all_ ( "SELECT post_text FROM v10_autopost_history WHERE rule_id=? ORDER BY id DESC LIMIT 5", ( r['id'], )  ) ;recent='\n---\n'.join ( x['post_text'] for x in prev)
+                post=await asyncio.to_thread ( _v10_post_text_sync,source,source_name,recent)
+                if not post:raise RuntimeError ( 'Post bo‘sh')
+                h=_v10_hashlib.sha256 ( post.encode ( 'utf-8' )  ) .hexdigest ( )
+                if one ( 'SELECT 1 FROM v10_autopost_history WHERE rule_id=? AND post_hash=?', ( r['id'],h )  ) :continue
+                image_bytes=None
+                if r['image_mode']:image_bytes=await asyncio.to_thread ( _v10_post_image_sync,post)
+                if r['approval_mode']=='auto':
+                    if image_bytes:await ctx.bot.send_photo ( r['target_chat_id'],io.BytesIO ( image_bytes ) ,caption=post[:1024])
+                    else:await ctx.bot.send_message ( r['target_chat_id'],post[:4000])
+                    execute ( 'INSERT INTO v10_autopost_history ( rule_id,post_hash,post_text,created_at) VALUES ( ?,?,?,? ) ', ( r['id'],h,post,now (  )  ) )
+                else:
+                    with db ( ) as c:did=c.execute ( "INSERT INTO v10_autopost_drafts ( rule_id,owner_id,target_chat_id,post_text,status,created_at) VALUES ( ?,?,?,?,\'pending\',? ) ", ( r['id'],r['owner_id'],r['target_chat_id'],post,now (  )  )  ) .lastrowid
+                    kb=InlineKeyboardMarkup ( [[InlineKeyboardButton ( '✅ Kanalga yuborish',callback_data=f'v10:ap:approve:{did}' ) ,InlineKeyboardButton ( '❌ O‘tkazib yuborish',callback_data=f'v10:ap:skip:{did}' ) ]])
+                    if image_bytes:
+                        m=await ctx.bot.send_photo ( r['owner_id'],io.BytesIO ( image_bytes ) ,caption= ( '📢 AVTOPOST PREVIEW\n\n'+post ) [:1024],reply_markup=kb)
+                        fid=m.photo[-1].file_id if m.photo else ''
+                        execute ( 'UPDATE v10_autopost_drafts SET image_file_id=? WHERE id=?', ( fid,did ) )
+                    else:await ctx.bot.send_message ( r['owner_id'],'📢 AVTOPOST PREVIEW\n\n'+post[:3500],reply_markup=kb)
+            except Exception as e:
+                execute ( "UPDATE v10_autopost_rules SET last_run_date='' WHERE id=?", ( r['id'], ) )
+                log.exception ( 'V10 autopost rule failed id=%s',r['id'])
+                try:await ctx.bot.send_message ( r['owner_id'],f"⚠️ Avtopost #{r['id']} bajarilmadi: {str ( e ) [:300]}")
+                except Exception:pass
+
+
+async def v10_callback ( update,ctx ) :
+    q=update.callback_query;d=q.data or '';u=q.from_user
+    if d=='v10:cancel':
+        STATE.pop ( u.id,None ) ;await q.answer (  ) ;
+        try:return await q.edit_message_text ( '❌ Bekor qilindi.')
+        except Exception:return
+    if d.startswith ( 'v10:help:' ) :
+        sec=d.rsplit ( ':',1 ) [1];await q.answer (  ) ;return await q.edit_message_text ( v10_help_text ( sec,u.id,getattr ( q.message.chat,'id',0 )  ) ,reply_markup=v10_help_markup (  ) )
+    if d.startswith ( 'v10:testans:' ) :
+        _,_,suid,sidx,schoice=d.split ( ':' ) ;
+        if int ( suid ) !=u.id:return await q.answer ( 'Bu test boshqa foydalanuvchiga tegishli.',show_alert=True)
+        st=STATE.get ( u.id) or {};idx=int ( sidx ) ;choice=int ( schoice)
+        if st.get ( 'mode' ) !='v10_quiz_answer' or st.get ( 'quiz_kind' ) !='test' or idx!=int ( st.get ( 'index',-1 )  ) :return await q.answer ( 'Bu savol sessiyasi tugagan.',show_alert=True)
+        x=st['items'][idx];ok=choice==int ( x['answer'] ) ;st['correct']=int ( st.get ( 'correct',0 )  ) + ( 1 if ok else 0 ) ;st['index']=idx+1;STATE[u.id]=st
+        await q.answer ( '✅ To‘g‘ri!' if ok else f"❌ To‘g‘ri javob: {int ( x['answer'] ) +1}",show_alert=True)
+        if st['index']>=len ( st['items'] ) :
+            corr=st['correct'];total=len ( st['items'] ) ;STATE.pop ( u.id,None ) ;return await q.edit_message_text ( f'🏁 TEST TUGADI\n\n✅ To‘g‘ri: {corr}/{total}\n🎯 Natija: {round ( corr*100/total ) }%')
+        try:await q.message.delete ( )
+        except Exception:pass
+        return await v10_send_current_question ( ctx,u.id,int ( st['chat_id'] ) )
+    if d.startswith ( 'v10:source:' ) :
+        st=STATE.get ( u.id) or {}
+        if st.get ( 'mode' ) !='v10_source_choice':return await q.answer ( 'Sessiya topilmadi.',show_alert=True)
+        src=d.rsplit ( ':',1 ) [1]
+        if src=='library':
+            rows=all_ ( "SELECT id,title FROM library_books WHERE status='approved' ORDER BY id DESC LIMIT 20")
+            kb=[[InlineKeyboardButton ( '📚 '+r['title'][:48],callback_data=f"v10:book:{r['id']}" ) ] for r in rows]
+            kb.append ( [InlineKeyboardButton ( '❌ Bekor qilish',callback_data='v10:cancel' ) ] ) ;await q.answer (  ) ;return await q.edit_message_text ( '📚 Kitobni tanlang:',reply_markup=InlineKeyboardMarkup ( kb ) )
+        st['mode']='v10_wait_source_text';st['source_kind']=src;STATE[u.id]=st;await q.answer (  ) ;
+        prompt={'topic':'📝 Mavzu yoki matnni yuboring.','internet':'🌐 Internetdan qidiriladigan mavzuni yozing.','ai':'🤖 Test/rebus uchun mavzuni yozing; Veritas o‘zi tuzadi.'}.get ( src,'Mavzuni yozing.')
+        return await q.edit_message_text ( prompt,reply_markup=InlineKeyboardMarkup ( [[InlineKeyboardButton ( '❌ Bekor qilish',callback_data='v10:cancel' ) ]] ) )
+    if d.startswith ( 'v10:book:' ) :
+        st=STATE.get ( u.id) or {};bid=int ( d.rsplit ( ':',1 ) [1])
+        if st.get ( 'mode' ) !='v10_source_choice':return await q.answer ( 'Sessiya tugagan.',show_alert=True)
+        book=one ( 'SELECT title FROM library_books WHERE id=? AND status="approved"', ( bid, )  ) ;
+        if not book:return await q.answer ( 'Kitob topilmadi.',show_alert=True)
+        await q.answer ( 'Kitob o‘qilmoqda...' ) ;await q.edit_message_text ( f"🧠 ‘{book['title']}’ dan savollar tayyorlanmoqda...")
+        text=await v10_get_book_text ( ctx,bid,u.id ) ;items=await v10_generate_items ( st['quiz_kind'],text,int ( st['count'] ) ,st['difficulty'],False ) ;chat_id=int ( st['chat_id'])
+        return await v10_begin_generated ( ctx,u.id,chat_id,st['quiz_kind'],items)
+    if d.startswith ( 'v10:ap:source:' ) :
+        st=STATE.get ( u.id) or {}
+        if st.get ( 'mode' ) !='v10_ap_source':return await q.answer ( 'Avtopost sessiyasi topilmadi.',show_alert=True)
+        src=d.rsplit ( ':',1 ) [1]
+        if src=='book':
+            rows=all_ ( "SELECT id,title FROM library_books WHERE status='approved' ORDER BY id DESC LIMIT 20" ) ;kb=[[InlineKeyboardButton ( '📚 '+r['title'][:48],callback_data=f"v10:ap:book:{r['id']}" ) ] for r in rows];kb.append ( [InlineKeyboardButton ( '❌ Bekor qilish',callback_data='v10:cancel' ) ] ) ;await q.answer (  ) ;return await q.edit_message_text ( '📚 Avtopost uchun kitobni tanlang:',reply_markup=InlineKeyboardMarkup ( kb ) )
+        st['mode']='v10_ap_topic';st['source_kind']='topic';STATE[u.id]=st;await q.answer (  ) ;return await q.edit_message_text ( '📝 Kanal posti uchun mavzuni yozing. Masalan: sabr, ilm, tarbiya.')
+    if d.startswith ( 'v10:ap:book:' ) :
+        st=STATE.get ( u.id) or {};bid=int ( d.rsplit ( ':',1 ) [1] ) ;
+        if st.get ( 'mode' ) !='v10_ap_source':return await q.answer ( 'Sessiya topilmadi.',show_alert=True)
+        st.update ( {'mode':'v10_ap_time','source_kind':'book','book_id':bid,'topic':''} ) ;STATE[u.id]=st;await q.answer (  ) ;return await q.edit_message_text ( f"✅ Kitob tanlandi.\n\n3/4 — Har kuni qaysi vaqtda? Masalan 08:00.\nTimezone: {V10_TIMEZONE}")
+    if d.startswith ( 'v10:ap:mode:' ) :
+        st=STATE.get ( u.id) or {};parts=d.split ( ':' ) ;
+        if st.get ( 'mode' ) !='v10_ap_mode' or len ( parts ) !=5:return await q.answer ( 'Sessiya topilmadi.',show_alert=True)
+        approval=parts[3];image=int ( parts[4] ) ;
+        with db ( ) as c:rid=c.execute ( """INSERT INTO v10_autopost_rules ( owner_id,target_chat_id,target_title,source_kind,book_id,topic,hour,minute,timezone,approval_mode,image_mode,active,last_run_date,created_at)
+          VALUES ( ?,?,?,?,?,?,?,?,?,?,?,1,'',? ) """, ( u.id,st['target_chat_id'],st['target_title'],st['source_kind'],int ( st.get ( 'book_id',0 )  ) ,st.get ( 'topic','' ) ,st['hour'],st['minute'],V10_TIMEZONE,approval,image,now (  )  )  ) .lastrowid
+        STATE.pop ( u.id,None ) ;await q.answer ( '✅' ) ;return await q.edit_message_text ( f"✅ Avtopost #{rid} yoqildi.\n📢 {st['target_title']}\n🕒 Har kuni {st['hour']:02d}:{st['minute']:02d} ({V10_TIMEZONE} ) \n🤖 Rejim: {'avtomatik' if approval=='auto' else 'avval tasdiqlash'} | {'rasmli' if image else 'matnli'}")
+    if d.startswith ( 'v10:ap:approve:') or d.startswith ( 'v10:ap:skip:' ) :
+        action='approve' if ':approve:' in d else 'skip';did=int ( d.rsplit ( ':',1 ) [1] ) ;dr=one ( 'SELECT * FROM v10_autopost_drafts WHERE id=?', ( did, ) )
+        if not dr or dr['owner_id']!=u.id or dr['status']!='pending':return await q.answer ( 'Draft topilmadi.',show_alert=True)
+        if action=='skip':execute ( "UPDATE v10_autopost_drafts SET status='skipped' WHERE id=?", ( did, )  ) ;await q.answer (  ) ;return await q.edit_message_caption ( caption='❌ Avtopost o‘tkazib yuborildi.') if q.message.photo else await q.edit_message_text ( '❌ Avtopost o‘tkazib yuborildi.')
+        if dr['image_file_id']:await ctx.bot.send_photo ( dr['target_chat_id'],dr['image_file_id'],caption=dr['post_text'][:1024])
+        else:await ctx.bot.send_message ( dr['target_chat_id'],dr['post_text'][:4000])
+        h=_v10_hashlib.sha256 ( dr['post_text'].encode ( 'utf-8' )  ) .hexdigest (  ) ;execute ( "INSERT INTO v10_autopost_history ( rule_id,post_hash,post_text,created_at) VALUES ( ?,?,?,? ) ", ( dr['rule_id'],h,dr['post_text'],now (  )  )  ) ;execute ( "UPDATE v10_autopost_drafts SET status='sent' WHERE id=?", ( did, )  ) ;await q.answer ( '✅ Yuborildi' ) ;return
+    return await q.answer ( 'Noma’lum V10 tugmasi.',show_alert=True)
+
+
+async def v10_private_or_group_state_input ( update,ctx ) :
+    msg=update.effective_message;u=update.effective_user;chat=update.effective_chat
+    st=STATE.get ( u.id) or {};mode=st.get ( 'mode')
+    if mode=='v10_wait_source_text' and int ( st.get ( 'chat_id',0 )  ) ==chat.id:
+        text= ( msg.text or '' ) .strip ( )
+        if not text:return True
+        src=st.get ( 'source_kind' ) ;internet=src=='internet';source= ( "Mavzu: "+text) if src in ('ai','internet') else text
+        await msg.reply_text ( '🧠 Savollar tayyorlanmoqda...' ) ;items=await v10_generate_items ( st['quiz_kind'],source,int ( st['count'] ) ,st['difficulty'],internet ) ;kind=st['quiz_kind'];chat_id=chat.id
+        return await v10_begin_generated ( ctx,u.id,chat_id,kind,items) or True
+    if mode=='v10_ap_channel' and chat.type=='private':await _v10_ap_capture_channel ( update,ctx ) ;return True
+    if mode=='v10_ap_topic' and chat.type=='private':
+        text= ( msg.text or '' ) .strip (  ) ;
+        if not text:return True
+        st.update ( {'mode':'v10_ap_time','source_kind':'topic','topic':text,'book_id':0} ) ;STATE[u.id]=st;await msg.reply_text ( f"✅ Mavzu saqlandi.\n\n3/4 — Har kuni qaysi vaqtda? Masalan 08:00.\nTimezone: {V10_TIMEZONE}" ) ;return True
+    if mode=='v10_ap_time' and chat.type=='private':
+        m=re.fullmatch ( r'\s* ( [01]?\d|2[0-3] ) : ( [0-5]\d ) \s*', ( msg.text or '' ) )
+        if not m:await msg.reply_text ( '🕒 Vaqtni HH:MM ko‘rinishida yuboring. Masalan 08:00.' ) ;return True
+        st.update ( {'mode':'v10_ap_mode','hour':int ( m.group ( 1 )  ) ,'minute':int ( m.group ( 2 )  ) } ) ;STATE[u.id]=st;await msg.reply_text ( '4/4 — Nashr rejimini tanlang:',reply_markup=_v10_ap_mode_markup (  )  ) ;return True
+    return False
+
+
+_v10_prev_natural_router=natural_veritas_router
+async def natural_veritas_router ( update,ctx ) :
+    msg=update.effective_message;chat=update.effective_chat;u=update.effective_user
+    if not msg or not chat or not u or u.is_bot:return
+    if await v10_handle_open_answer ( update,ctx ) :
+        ctx.user_data['v10_consumed_message_id']=msg.message_id;ctx.chat_data['v10_consumed_message_id']=msg.message_id;return
+    if await v10_private_or_group_state_input ( update,ctx ) :
+        ctx.user_data['v10_consumed_message_id']=msg.message_id;ctx.chat_data['v10_consumed_message_id']=msg.message_id;return
+    raw= ( msg.text or '' ) .strip ( )
+    if not raw:return
+    low=_v10_norm ( raw)
+    # ReplyKeyboard shortcuts private va groupda bir xil.
+    shortcuts={'📝 Test':'test','❓ Savol-javob':'qa','🧩 Rebus':'rebus'}
+    if raw in shortcuts:
+        await v10_start_learning ( update,ctx,shortcuts[raw],raw ) ;ctx.user_data['v10_consumed_message_id']=msg.message_id;ctx.chat_data['v10_consumed_message_id']=msg.message_id;return
+    if raw=='❓ V10 Yordam':
+        await msg.reply_text ( '❓ VERITAS V10 — YORDAM MARKAZI',reply_markup=v10_help_markup (  )  ) ;ctx.user_data['v10_consumed_message_id']=msg.message_id;ctx.chat_data['v10_consumed_message_id']=msg.message_id;return
+    if raw=='📢 Avtopost':
+        await v10_autopost_start ( update,ctx ) ;ctx.user_data['v10_consumed_message_id']=msg.message_id;ctx.chat_data['v10_consumed_message_id']=msg.message_id;return
+    if chat.type in ('group','supergroup' ) :
+        addressed= ( 'veritas' in low) or bool ( msg.reply_to_message and msg.reply_to_message.from_user and msg.reply_to_message.from_user.id==ctx.bot.id)
+        # Power control is available even while sleeping.
+        if addressed and ('uygon' in low or "uyg'on" in low or 'uyg‘on' in raw.lower (  )  ) :
+            if 'barcha' in low and is_super ( u.id ) :
+                rows=all_ ( 'SELECT chat_id FROM groups' ) ;
+                for r in rows:v10_set_group_awake ( r['chat_id'],True,u.id)
+                await msg.reply_text ( f'⚡ {len ( rows ) } ta guruh uchun Veritas uyg‘otildi.')
+            elif await can_manage ( ctx.bot,chat.id,u.id ) :v10_set_group_awake ( chat.id,True,u.id ) ;await msg.reply_text ( '⚡ Veritas uyg‘ondi.')
+            else:await msg.reply_text ( '⛔ Veritasni uyg‘otish uchun guruh admini bo‘lish kerak.')
+            ctx.chat_data['v10_consumed_message_id']=msg.message_id;return
+        if addressed and ('uxla' in low or 'sleep' in low ) :
+            if 'barcha' in low and is_super ( u.id ) :
+                rows=all_ ( 'SELECT chat_id FROM groups' ) ;
+                for r in rows:v10_set_group_awake ( r['chat_id'],False,u.id)
+                await msg.reply_text ( f'💤 {len ( rows ) } ta guruh uchun Veritas uxlatildi.')
+            elif await can_manage ( ctx.bot,chat.id,u.id ) :v10_set_group_awake ( chat.id,False,u.id ) ;await msg.reply_text ( '💤 Veritas bu guruhda uxlaydi. Uyg‘otish: “Veritas uyg‘on”.')
+            else:await msg.reply_text ( '⛔ Veritasni uxlatish uchun guruh admini bo‘lish kerak.')
+            ctx.chat_data['v10_consumed_message_id']=msg.message_id;return
+        if addressed and is_super ( u.id) and ('qaysi guruh' in low and ('uygoq' in low or 'uyg‘oq' in raw.lower (  )  )  ) :
+            rows=all_ ( "SELECT g.title,g.chat_id,COALESCE ( s.awake,1) awake FROM groups g LEFT JOIN v10_group_state s ON s.chat_id=g.chat_id ORDER BY g.title" ) ;body='\n'.join (  ( '⚡ ' if r['awake'] else '💤 ' ) + ( r['title'] or str ( r['chat_id'] ) ) for r in rows[:80] ) ;await msg.reply_text ( 'VERITAS HOLATI\n\n'+ ( body or 'Guruhlar yo‘q.' )  ) ;ctx.chat_data['v10_consumed_message_id']=msg.message_id;return
+        if not v10_group_awake ( chat.id ) :return
+        if addressed and ('nima boldi' in low or "nima bo'ldi" in low or 'nima bo‘ldi' in raw.lower (  )  ) :
+            hours=72 if re.search ( r'3\s*kun',low) else (24 if 'bugun' in low or 'ketganimdan' in low else 24 ) ;await v10_summary ( update,ctx,hours ) ;ctx.chat_data['v10_consumed_message_id']=msg.message_id;return
+        if addressed and ('men kimman' in low or 'meni taniysanmi' in low ) :await v10_who_am_i ( update,ctx ) ;ctx.chat_data['v10_consumed_message_id']=msg.message_id;return
+        if addressed and any ( x in low for x in ('eslaysanmi','tarixdan','gapirgandi','gaplashganmiz','otgan hafta','o‘tgan hafta','kecha nimani' )  ) :
+            await v10_history_answer ( update,ctx,raw ) ;ctx.chat_data['v10_consumed_message_id']=msg.message_id;return
+        if addressed and ('eslat' in low or 'eslatma' in low ) :await v10_create_reminder ( update,ctx,raw ) ;ctx.chat_data['v10_consumed_message_id']=msg.message_id;return
+        if addressed and ('yozsa' in low and ('menga ayt' in low or 'xabar ber' in low )  ) :
+            await v10_create_watch ( update,ctx,raw,'message' ) ;ctx.chat_data['v10_consumed_message_id']=msg.message_id;return
+        if addressed and ('kelganda' in low or 'kirsa' in low) and ('menga ayt' in low or 'xabar ber' in low ) :
+            await v10_create_watch ( update,ctx,raw,'join' ) ;ctx.chat_data['v10_consumed_message_id']=msg.message_id;return
+    else:
+        if 'men kimman' in low or 'meni taniysanmi' in low:await v10_who_am_i ( update,ctx ) ;ctx.user_data['v10_consumed_message_id']=msg.message_id;return
+        if 'eslat' in low or 'eslatma' in low:await v10_create_reminder ( update,ctx,raw ) ;ctx.user_data['v10_consumed_message_id']=msg.message_id;return
+    kind=_v10_learning_mode ( raw)
+    addressed_private=chat.type=='private'
+    addressed_group= ( 'veritas' in low) if chat.type in ('group','supergroup') else False
+    if kind and (addressed_private or addressed_group or msg.reply_to_message ) :
+        await v10_start_learning ( update,ctx,kind,raw ) ;ctx.user_data['v10_consumed_message_id']=msg.message_id;ctx.chat_data['v10_consumed_message_id']=msg.message_id;return
+    if (chat.type=='private' and any ( x in low for x in ('nima qila olasan','yordam','qanday ishlataman' )  ) ) or (chat.type in ('group','supergroup') and 'veritas' in low and any ( x in low for x in ('nima qila olasan','yordam','qanday ishlataman' )  )  ) :
+        await msg.reply_text ( '❓ VERITAS V10 — YORDAM MARKAZI',reply_markup=v10_help_markup (  )  ) ;ctx.user_data['v10_consumed_message_id']=msg.message_id;ctx.chat_data['v10_consumed_message_id']=msg.message_id;return
+    return await _v10_prev_natural_router ( update,ctx)
+
+
+_v10_prev_private_ai_reply=private_ai_reply
+async def private_ai_reply ( update,ctx ) :
+    if ctx.user_data.get ( 'v10_consumed_message_id' ) ==getattr ( update.effective_message,'message_id',None ) :return
+    return await _v10_prev_private_ai_reply ( update,ctx)
+
+
+_v10_prev_passive=passive
+async def passive ( update,ctx ) :
+    msg=update.effective_message;chat=update.effective_chat;u=update.effective_user
+    v10_archive_incoming ( update)
+    if msg and chat and u and not u.is_bot and chat.type in ('group','supergroup' ) :
+        try:await v10_check_message_watches ( ctx,chat.id,u.id,_v10_message_body ( msg ) )
+        except Exception:log.exception ( 'V10 watch check failed')
+        if not v10_group_awake ( chat.id ) :return
+    if msg and (ctx.chat_data.get ( 'v10_consumed_message_id' ) ==msg.message_id or ctx.user_data.get ( 'v10_consumed_message_id' ) ==msg.message_id ) :return
+    return await _v10_prev_passive ( update,ctx)
+
+
+_v10_prev_new_members=new_members
+async def new_members ( update,ctx ) :
+    chat=update.effective_chat;msg=update.effective_message
+    if chat and msg:
+        for nu in msg.new_chat_members or []:
+            if not nu.is_bot:
+                ensure_user ( nu)
+                try:await v10_check_join_watches ( ctx,chat.id,nu)
+                except Exception:pass
+    return await _v10_prev_new_members ( update,ctx)
+
+
+_v10_prev_callback=callback
+async def callback ( update,ctx ) :
+    data= ( update.callback_query.data or '') if update.callback_query else ''
+    if data.startswith ( 'v10:' ) :return await v10_callback ( update,ctx)
+    return await _v10_prev_callback ( update,ctx)
+
+
+_v10_prev_error_handler=error_handler
+async def v10_error_handler ( update,ctx ) :
+    try:await _v10_prev_error_handler ( update,ctx)
+    except Exception:pass
+    err=str ( getattr ( ctx,'error',None) or 'Unknown error' ) [:1200]
+    for uid in list ( SUPER_OWNERS ) [:5]:
+        try:await ctx.bot.send_message ( uid,'⚠️ VERITAS V10 XATO\n\n'+err,_skip_i18n=True)
+        except Exception:pass
+
+
 def main (  ) :
     if not TOKEN: raise RuntimeError ( "BOT_TOKEN kiritilmagan.")
     init_db ( )
@@ -6520,7 +7376,8 @@ def main (  ) :
     ai_news_init_db ( )
     poster_init_db ( )
     i18n_init_db ( )
-    app=Application.builder (  ) .bot ( VeritasI18nBot ( token=TOKEN )  ) .build ( )
+    v10_init_db ( )
+    app=Application.builder (  ) .bot ( VeritasV10Bot ( token=TOKEN )  ) .build ( )
     app.add_handler ( CommandHandler ( "start",v9_start_selector ) )
     app.add_handler ( CommandHandler ( "help",cmd_help ) )
     app.add_handler ( CommandHandler ( "id",cmd_id ) )
@@ -6546,6 +7403,7 @@ def main (  ) :
     # Vision must be in a DIFFERENT handler group. In the old build it shared group=1
     # with library_private_input, so python-telegram-bot never reached it.
     app.add_handler ( MessageHandler ( filters.ChatType.PRIVATE & (filters.PHOTO | filters.Document.IMAGE ) ,private_ai_media_reply ) ,group=2)
+    app.add_handler ( MessageHandler ( filters.VOICE, v10_voice_handler ) ,group=2)
     app.add_handler ( MessageHandler ( filters.TEXT & ~filters.COMMAND & ~filters.Regex ( r"^\*" ) ,natural_veritas_router ) ,group=2)
     # Group passive processing is separate.
     app.add_handler ( MessageHandler ( filters.ALL & ~filters.StatusUpdate.ALL & ~filters.SUCCESSFUL_PAYMENT,passive ) ,group=3)
@@ -6554,8 +7412,10 @@ def main (  ) :
     if app.job_queue:
         app.job_queue.run_repeating ( giveaway_job,60,first=10)
         app.job_queue.run_repeating ( rose_cleanup_job,30,first=15)
-    app.add_error_handler ( error_handler)
-    log.info ( "VERITAS v9.4 UNIFIED NEWS ROUTER starting")
+        app.job_queue.run_repeating ( v10_task_job,30,first=12)
+        app.job_queue.run_repeating ( v10_autopost_job,60,first=20)
+    app.add_error_handler ( v10_error_handler)
+    log.info ( "VERITAS v10 starting")
     app.run_polling ( allowed_updates=Update.ALL_TYPES)
 
 if __name__=="__main__":
