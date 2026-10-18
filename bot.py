@@ -1,6 +1,6 @@
-# VERITAS V10.9.9 — BALANCED + SAFE MOVEMENT BUILD
-# Adds even-team enforcement, private-chat preflight, safe survivor retreat, and stop/march race protection.
-# Admin-only lobby, atomic join/start-stop protections, safer status cards.
+# VERITAS V10.10 — GAME-FREE STABLE BUILD
+# Legacy game subsystem removed. Core Veritas features preserved.
+# Includes Telegram flood-control safety and callback/error hardening.
 
 # VERITAS V10.9.3 — ADMIN-SAFE START/STOP + REAL TELEGRAM ADMIN LIST
 # VERITAS BOT v8 — Vasatiya Library build
@@ -37,7 +37,7 @@ from telegram import (
     LabeledPrice
 )
 from telegram.constants import ChatMemberStatus
-from telegram.error import TelegramError
+from telegram.error import TelegramError, RetryAfter
 from telegram.ext import (
     Application, ContextTypes, CommandHandler, MessageHandler, CallbackQueryHandler,
     PreCheckoutQueryHandler, ChatMemberHandler, ExtBot, filters
@@ -46,7 +46,7 @@ from telegram.ext import (
 TOKEN = os.getenv ( "BOT_TOKEN", "" ) .strip ( )
 DB_PATH = os.getenv ( "DB_PATH", "veritas_v7.sqlite3")
 SUPER_OWNERS = {int ( x) for x in os.getenv ( "SUPER_OWNER_IDS","" ) .split ( ",") if x.strip (  ) .isdigit (  ) }
-VERSION = "10.9"
+VERSION = "10.10"
 OPENAI_API_KEY = os.getenv ( "OPENAI_API_KEY", "" ) .strip ( )
 OPENAI_MODEL = os.getenv ( "OPENAI_MODEL", "gpt-5.6-luna" ) .strip ( ) or "gpt-5.6-luna"
 REBUS_IMAGE_MODEL = os.getenv ( "REBUS_IMAGE_MODEL", "gpt-image-2" ) .strip ( ) or "gpt-image-2"
@@ -358,7 +358,7 @@ def v9_init_db (  ) :
         """)
 
 def root_choice_markup (  ) :
-    return InlineKeyboardMarkup ( [[InlineKeyboardButton ( "🛡 Veritas",callback_data="root:v8" ) ],[InlineKeyboardButton ( "🎓 O‘quv • Talaba",callback_data="root:v9" ) ],[InlineKeyboardButton ( "🎮 Veritas o‘yinlari",callback_data="games:menu" ) ]])
+    return InlineKeyboardMarkup ( [[InlineKeyboardButton ( "🛡 Veritas",callback_data="root:v8" ) ],[InlineKeyboardButton ( "🎓 O‘quv • Talaba",callback_data="root:v9" ) ]])
 
 def v9_entry_markup (  ) :
     return InlineKeyboardMarkup ( [[InlineKeyboardButton ( "🏫 Maktab",callback_data="v9:inst:school" ) ],[InlineKeyboardButton ( "🏛 Institut",callback_data="v9:inst:institute" ) ,InlineKeyboardButton ( "🎓 Universitet",callback_data="v9:inst:university" ) ],[InlineKeyboardButton ( "⬅️ Veritas tanlash",callback_data="root:choose" ) ]])
@@ -1111,56 +1111,132 @@ async def i18n_markup ( markup,lang,bot ) :
         log.exception ( "i18n markup failed")
     return markup
 
+async def _tg_retry_call ( call, *args, **kwargs ) :
+    """Retry Telegram API calls when Telegram explicitly asks us to wait.
+    Prevents temporary 429/Flood Control responses from crashing user flows.
+    """
+    attempts = 0
+    while True:
+        try:
+            return await call ( *args, **kwargs)
+        except RetryAfter as exc:
+            attempts += 1
+            raw = getattr ( exc, "retry_after", 1)
+            try:
+                wait = float ( raw.total_seconds (  ) ) if hasattr ( raw, "total_seconds") else float ( raw)
+            except Exception:
+                wait = 1.0
+            wait = max ( 0.5, wait) + 0.5
+            log.warning ( "Telegram flood control: waiting %.1fs before retry (%s ) ", wait, getattr ( call, "__name__", "api_call" ) )
+            if attempts >= 3 or wait > 90:
+                raise
+            await asyncio.sleep ( wait)
+
+
 class VeritasI18nBot ( ExtBot ) :
     async def send_message ( self,chat_id,text,*args,**kwargs ) :
-        if kwargs.pop ( "_skip_i18n", False ) :
-            return await super (  ) .send_message ( chat_id,text,*args,**kwargs)
-        lang=chat_lang ( chat_id)
-        text=await i18n_text ( text,lang)
-        if kwargs.get ( "reply_markup" ) :
-            kwargs["reply_markup"]=await i18n_markup ( kwargs["reply_markup"],lang,self)
-        return await super (  ) .send_message ( chat_id,text,*args,**kwargs)
+        skip_i18n=kwargs.pop ( "_skip_i18n", False)
+        if not skip_i18n:
+            lang=chat_lang ( chat_id)
+            text=await i18n_text ( text,lang)
+            if kwargs.get ( "reply_markup" ) :
+                kwargs["reply_markup"]=await i18n_markup ( kwargs["reply_markup"],lang,self)
+        try:
+            return await _tg_retry_call ( super (  ) .send_message,chat_id,text,*args,**kwargs)
+        except TelegramError as exc:
+            # A replied-to message may have been deleted while a workflow was running.
+            # In that case deliver the message normally instead of crashing the flow.
+            if "Message to be replied not found" in str ( exc ) :
+                fallback=dict ( kwargs)
+                fallback.pop ( "reply_to_message_id",None)
+                fallback.pop ( "reply_parameters",None)
+                log.info ( "Missing reply target; sending plain message to chat %s",chat_id)
+                return await _tg_retry_call ( super (  ) .send_message,chat_id,text,*args,**fallback)
+            raise
 
     async def edit_message_text ( self,text,*args,**kwargs ) :
-        if kwargs.pop ( "_skip_i18n", False ) :
-            return await super (  ) .edit_message_text ( text,*args,**kwargs)
-        chat_id=kwargs.get ( "chat_id")
-        lang=chat_lang ( chat_id) if chat_id is not None else "uz"
-        text=await i18n_text ( text,lang)
-        if kwargs.get ( "reply_markup" ) :
-            kwargs["reply_markup"]=await i18n_markup ( kwargs["reply_markup"],lang,self)
-        return await super (  ) .edit_message_text ( text,*args,**kwargs)
+        skip_i18n=kwargs.pop ( "_skip_i18n", False)
+        if not skip_i18n:
+            chat_id=kwargs.get ( "chat_id")
+            lang=chat_lang ( chat_id) if chat_id is not None else "uz"
+            text=await i18n_text ( text,lang)
+            if kwargs.get ( "reply_markup" ) :
+                kwargs["reply_markup"]=await i18n_markup ( kwargs["reply_markup"],lang,self)
+        try:
+            return await _tg_retry_call ( super (  ) .edit_message_text,text,*args,**kwargs)
+        except TelegramError as exc:
+            if "Message is not modified" in str ( exc ) :
+                log.info ( "Duplicate message edit ignored")
+                return None
+            raise
 
     async def send_photo ( self,chat_id,photo,*args,**kwargs ) :
         if kwargs.pop ( "_skip_i18n", False ) :
-            return await super (  ) .send_photo ( chat_id,photo,*args,**kwargs)
+            return await _tg_retry_call ( super (  ) .send_photo,chat_id,photo,*args,**kwargs)
         lang=chat_lang ( chat_id)
         if kwargs.get ( "caption" ) :kwargs["caption"]=await i18n_text ( kwargs["caption"],lang)
         if kwargs.get ( "reply_markup" ) :kwargs["reply_markup"]=await i18n_markup ( kwargs["reply_markup"],lang,self)
-        return await super (  ) .send_photo ( chat_id,photo,*args,**kwargs)
+        return await _tg_retry_call ( super (  ) .send_photo,chat_id,photo,*args,**kwargs)
 
     async def send_video ( self,chat_id,video,*args,**kwargs ) :
         if kwargs.pop ( "_skip_i18n", False ) :
-            return await super (  ) .send_video ( chat_id,video,*args,**kwargs)
+            return await _tg_retry_call ( super (  ) .send_video,chat_id,video,*args,**kwargs)
         lang=chat_lang ( chat_id)
         if kwargs.get ( "caption" ) :kwargs["caption"]=await i18n_text ( kwargs["caption"],lang)
         if kwargs.get ( "reply_markup" ) :kwargs["reply_markup"]=await i18n_markup ( kwargs["reply_markup"],lang,self)
-        return await super (  ) .send_video ( chat_id,video,*args,**kwargs)
+        return await _tg_retry_call ( super (  ) .send_video,chat_id,video,*args,**kwargs)
 
     async def send_document ( self,chat_id,document,*args,**kwargs ) :
         if kwargs.pop ( "_skip_i18n", False ) :
-            return await super (  ) .send_document ( chat_id,document,*args,**kwargs)
+            return await _tg_retry_call ( super (  ) .send_document,chat_id,document,*args,**kwargs)
         lang=chat_lang ( chat_id)
         if kwargs.get ( "caption" ) :kwargs["caption"]=await i18n_text ( kwargs["caption"],lang)
         if kwargs.get ( "reply_markup" ) :kwargs["reply_markup"]=await i18n_markup ( kwargs["reply_markup"],lang,self)
-        return await super (  ) .send_document ( chat_id,document,*args,**kwargs)
+        return await _tg_retry_call ( super (  ) .send_document,chat_id,document,*args,**kwargs)
 
     async def edit_message_caption ( self,*args,**kwargs ) :
         chat_id=kwargs.get ( "chat_id")
         lang=chat_lang ( chat_id) if chat_id is not None else "uz"
         if kwargs.get ( "caption" ) :kwargs["caption"]=await i18n_text ( kwargs["caption"],lang)
         if kwargs.get ( "reply_markup" ) :kwargs["reply_markup"]=await i18n_markup ( kwargs["reply_markup"],lang,self)
-        return await super (  ) .edit_message_caption ( *args,**kwargs)
+        return await _tg_retry_call ( super (  ) .edit_message_caption,*args,**kwargs)
+
+    async def edit_message_reply_markup ( self,*args,**kwargs ) :
+        try:
+            return await _tg_retry_call ( super (  ) .edit_message_reply_markup,*args,**kwargs)
+        except TelegramError as exc:
+            if "Message is not modified" in str ( exc ) :
+                log.info ( "Duplicate reply-markup edit ignored")
+                return None
+            raise
+
+    async def send_gift ( self,*args,**kwargs ) :
+        return await _tg_retry_call ( super (  ) .send_gift,*args,**kwargs)
+
+    async def get_available_gifts ( self,*args,**kwargs ) :
+        return await _tg_retry_call ( super (  ) .get_available_gifts,*args,**kwargs)
+
+    async def get_my_star_balance ( self,*args,**kwargs ) :
+        return await _tg_retry_call ( super (  ) .get_my_star_balance,*args,**kwargs)
+
+    async def answer_callback_query ( self,*args,**kwargs ) :
+        # Callback queries expire quickly. Sleeping through Telegram RetryAfter
+        # can turn a harmless rate-limit into "Query is too old".
+        try:
+            return await super (  ) .answer_callback_query ( *args,**kwargs)
+        except RetryAfter as exc:
+            log.warning ( "Callback answer rate-limited; skipped expired answer: %s", exc)
+            return None
+        except TelegramError as exc:
+            text=str ( exc)
+            if "Query is too old" in text or "query id is invalid" in text:
+                log.info ( "Expired callback answer ignored: %s", text)
+                return None
+            raise
+
+    async def delete_message ( self,*args,**kwargs ) :
+        return await _tg_retry_call ( super (  ) .delete_message,*args,**kwargs)
+
 
 def group_lang_markup ( chat_id ) :
     return InlineKeyboardMarkup ( [
@@ -1515,7 +1591,6 @@ def main_menu_markup ( uid ) :
       [InlineKeyboardButton ( "🔎 A’zo profili",callback_data="profilefind" ) ,InlineKeyboardButton ( "💠 Qadr TOP",callback_data="qadrtop" ) ],
       [InlineKeyboardButton ( "🤖 Veritas AI",callback_data="ai_private" ) ],
       [InlineKeyboardButton ( "🧩 AI Rebus",callback_data="rebus:start" ) ],
-      [InlineKeyboardButton ( "🎮 Veritas o‘yinlari",callback_data="games:menu" ) ],
       [InlineKeyboardButton ( "📚 Vasatiya kutubxonasi",callback_data="library" ) ,InlineKeyboardButton ( "📜 Sahih Hadislar",callback_data="hadith" ) ],
       [InlineKeyboardButton ( "📨 Egaga xabar qoldirish",callback_data="owner:message" ) ],
       [InlineKeyboardButton ( "🌐 Til / Язык / Language",callback_data="lang:menu" ) ],
@@ -5955,6 +6030,7 @@ async def bayram_callback ( update,ctx ) :
     if camp['status']!='draft':return await q.answer ( 'Bu bayram allaqachon yakunlangan yoki boshlangan.',show_alert=True)
     if action=='cancel':
         execute ( "UPDATE bayram_campaigns SET status='cancelled' WHERE id=?", ( cid, ) )
+        ctx.user_data.pop ( 'bayram_state',None)
         await q.answer (  ) ;return await q.edit_message_text ( '❌ Bayram bekor qilindi.')
     if action=='count':
         n=int ( a[3] ) ;
@@ -5972,7 +6048,7 @@ async def bayram_callback ( update,ctx ) :
         if not gifts:
             return await q.answer ( f'Hozir {price} ⭐ narxli Gift mavjud emas.',show_alert=True)
         execute ( 'UPDATE bayram_campaigns SET gift_price=?,gift_id=? WHERE id=?', ( price,str ( gifts[0].id ) ,cid ) )
-        STATE[u.id]={'mode':'bayram_greeting','bayram_id':cid}
+        ctx.user_data['bayram_state']={'mode':'bayram_greeting','bayram_id':cid}
         await q.answer ( )
         await q.edit_message_text ( '💌 TABRIKNOMA\n\nEndi shaxsiy chatda botga tabriknoma matnini yuboring.\nBotga /start bosib qo‘ying, agar avval yozmagan bo‘lsangiz.')
         try:await ctx.bot.send_message ( u.id,f'🎉 BAYRAM #{cid}\n\nTabriknoma matnini shu yerga yozing. Matn sovg‘aga biriktiriladi va guruhda ham e’lon qilinadi.')
@@ -6019,7 +6095,7 @@ async def bayram_callback ( update,ctx ) :
             execute ( "UPDATE bayram_winners SET status='failed',error=? WHERE campaign_id=? AND user_id=?", ( str ( e ) [:250],cid,uid ) )
             # Gift ketmagan bo‘lsa shu odam uchun rezerv qilingan kreditni kabinetga qaytaramiz.
             wallet_change ( creator_id,int ( camp['gift_price'] ) ,'bayram_refund',uid,ref=f'bayram:{cid}',meta={'campaign_id':cid,'reason':'gift_failed'})
-        await asyncio.sleep ( 0.15)
+        await asyncio.sleep ( 0.60)
     execute ( "UPDATE bayram_campaigns SET status='completed' WHERE id=?", ( cid, ) )
     # Faqat HAQIQATDA yuborilgan sovg‘alar g‘olib sifatida e’lon qilinadi.
     lines=[]
@@ -6047,7 +6123,7 @@ async def bayram_callback ( update,ctx ) :
 async def bayram_private_input ( update,ctx ) :
     msg=update.effective_message;u=update.effective_user
     if not msg or not u or msg.chat.type!='private':return
-    st=STATE.get ( u.id) or {}
+    st=ctx.user_data.get ( 'bayram_state') or {}
     if st.get ( 'mode' ) !='bayram_greeting':return
     ctx.user_data['bayram_consumed_message_id']=msg.message_id
     greeting= ( msg.text or '' ) .strip ( )
@@ -6055,7 +6131,7 @@ async def bayram_private_input ( update,ctx ) :
         return await ctx.bot.send_message ( chat_id=msg.chat_id, text='💌 Gift ichidagi tabriknoma 120 belgidan oshmasin. Iltimos, qisqaroq matn yozing.')
     cid=st['bayram_id'];camp=one ( 'SELECT * FROM bayram_campaigns WHERE id=? AND creator_id=? AND status="draft"', ( cid,u.id ) )
     if not camp:
-        STATE.pop ( u.id,None ) ;return await ctx.bot.send_message ( chat_id=msg.chat_id, text='Bu bayram sessiyasi tugagan.')
+        ctx.user_data.pop ( 'bayram_state',None ) ;return await ctx.bot.send_message ( chat_id=msg.chat_id, text='Bu Bayram sessiyasi endi faol emas. Guruhdagi Bayram tugmasidan yangisini boshlang.')
     winners=bayram_candidates ( camp['chat_id'],camp['winner_count'])
     if not winners:
         return await ctx.bot.send_message ( chat_id=msg.chat_id, text='Oxirgi 10 soatda faol a’zolar topilmadi.')
@@ -6063,7 +6139,7 @@ async def bayram_private_input ( update,ctx ) :
         c.execute ( 'DELETE FROM bayram_winners WHERE campaign_id=?', ( cid, ) )
         c.executemany ( 'INSERT INTO bayram_winners ( campaign_id,user_id,msg_count) VALUES ( ?,?,? ) ',[ ( cid,r['user_id'],r['n']) for r in winners])
         c.execute ( 'UPDATE bayram_campaigns SET greeting=? WHERE id=?', ( greeting,cid ) )
-    STATE.pop ( u.id,None)
+    ctx.user_data.pop ( 'bayram_state',None)
     count=len ( winners ) ;total=count*camp['gift_price']
     await ctx.bot.send_message ( chat_id=msg.chat_id, text=f'🎉 BAYRAM TASDIQLASH\n\n👥 G‘oliblar: {count} kishi\n⏱ Oxirgi 10 soat\n🎁 Har biriga: {camp["gift_price"]} ⭐ Gift\n💰 Jami: {total} ⭐\n⭐ Kabinet balansingiz: {wallet ( u.id ) } ⭐\n\n💌 {greeting}\n\n⚠️ TASDIQLASH bosilsa jami summa sizning Veritas kabinet balansingizdan yechiladi. Haqiqiy Giftni bot yuboradi; shaxsiy Telegram Stars hisobingizdan yechilmaydi.',reply_markup=bayram_markup ( cid,'confirm' ) )
 
@@ -7370,10 +7446,9 @@ async def new_members ( update,ctx ) :
 _v10_prev_callback=callback
 async def callback ( update,ctx ) :
     data= ( update.callback_query.data or '') if update.callback_query else ''
-    # These prefixes have their own earlier CallbackQueryHandlers. Letting them
-    # continue into the legacy callback chain causes a second q.answer (  ) , which
-    # Telegram rejects as "Query is too old / query id is invalid".
-    if data.startswith (  ( 'v109:','games:','excerpt:' )  ) :
+    # excerpt:* has its own earlier CallbackQueryHandler. Do not let it
+    # continue into the legacy callback chain and answer the same query twice.
+    if data.startswith ( 'excerpt:' ) :
         return
     if data.startswith ( 'v10:' ) :
         return await v10_callback ( update,ctx)
@@ -7387,6 +7462,12 @@ async def v10_error_handler ( update,ctx ) :
     # Telegram bir xil matn/tugmani qayta edit qilganda bu zararli xato emas.
     if 'Message is not modified' in err:
         log.info ( 'V10 harmless Telegram edit ignored: %s', err)
+        return
+    if isinstance ( err_obj, RetryAfter) or 'Flood control exceeded' in err or 'Retry in ' in err:
+        log.warning ( 'V10 temporary Telegram flood control ignored by error reporter: %s', err)
+        return
+    if 'Query is too old' in err or 'query id is invalid' in err:
+        log.info ( 'Expired Telegram callback ignored by error reporter: %s', err)
         return
     try:
         await _v10_prev_error_handler ( update,ctx)
@@ -7402,1974 +7483,6 @@ async def v10_error_handler ( update,ctx ) :
             pass
 
 
-
-# ================================================================
-# VERITAS V10.9.3 — QAL'ALAR URUSHI (PRIVATE START/STOP + CALLBACK RECOVERY)
-# Adds private-cabinet Start/Stop controls and keeps callback/stale-state recovery.
-# Based on V10.9 clean isolated engine.
-#
-# VERITAS V10.9 — QAL'ALAR URUSHI (CLEAN ISOLATED ENGINE)
-# All tables/callbacks are version-prefixed so Bayram/Library/AI state
-# cannot collide with the game state. Core rules are deterministic;
-# AI is used for historical illustrations/narration only.
-# ================================================================
-import io as _v109_io
-import math as _v109_math
-import random as _v109_random
-import time as _v109_time
-import html as _v109_html
-import json as _v109_json
-import re as _v109_re
-import sqlite3 as _v109_sqlite3
-import asyncio as _v109_asyncio
-import os as _v109_os
-import base64 as _v109_base64
-import urllib.request as _v109_urllib_request
-import urllib.error as _v109_urllib_error
-from telegram import InlineKeyboardButton as _V109B, InlineKeyboardMarkup as _V109M, ChatPermissions as _V109Permissions
-from telegram.ext import CallbackQueryHandler as _V109Callback, MessageHandler as _V109MessageHandler, filters as _v109_filters, ApplicationHandlerStop as _V109Stop
-from PIL import Image as _V109Image, ImageDraw as _V109Draw, ImageFont as _V109Font
-
-V109_MIN_PLAYERS = 4
-V109_MAX_PLAYERS = 22                 # 2 podshoh + har tomonda 10 tagacha qal'a
-V109_ELECTION_SECONDS = 45
-V109_PALACE_START_TROOPS = 25
-V109_CASTLE_START_TROOPS = 10
-V109_PALACE_TROOPS_PER_SECOND = 1
-V109_HERO_PRICE = 100
-V109_HERO_UPGRADE_BASE = 25
-V109_POINTS_FOR_5_DIAMONDS = 1000
-V109_REWARD_GOLD_POOL = int ( _v109_os.getenv ( 'WAR_REWARD_GOLD', '1000' ) )
-V109_REWARD_DIAMOND_POOL = int ( _v109_os.getenv ( 'WAR_REWARD_DIAMONDS', '50' ) )
-V109_AI_IMAGES = _v109_os.getenv ( 'WAR_AI_IMAGES', '1' ) .strip (  ) .lower ( ) not in {'0','false','off','no'}
-V109_AI_IMAGE_COOLDOWN = int ( _v109_os.getenv ( 'WAR_AI_IMAGE_COOLDOWN', '20' ) )
-V109_EVENT_MIN_SECONDS = 120
-V109_EVENT_MAX_SECONDS = 240
-
-V109_RULES = (
-    "⚔️ <b>QAL'ALAR URUSHI — QOIDALAR</b>\n\n"
-    "🏰 O'yinchilar ikki davlatga bo'linadi. Podshohdan tashqari har bir qo'mondon 1 qal'a va 10 askar bilan boshlaydi.\n"
-    "👑 Har davlat podshohi saylov bilan aniqlanadi. Podshoh qasrda 25 askar bilan boshlaydi.\n"
-    "⏱ Askar faqat qasrda ko'payadi: har soniyada +1. Podshoh bu askarlarni ittifoqchi qal'alarga yubora oladi.\n"
-    "⚔️ Qal'a egasi o'z qo'shinini hujumga, yordamga yoki qasr mudofaasiga yuboradi. Qal'a bo'sh qolsa ham o'z davlatida qoladi; dushman kelib egallashi kerak.\n"
-    "🐎 Qarama-qarshi ikki lashkar bir-biriga qarab yo'lga chiqsa, ochiq maydonda to'qnashadi: har ikki tomon qo'shinining yarmi yo'qoladi, qolganlari o'z qal'asiga qaytadi.\n"
-    "🏆 Son jihatdan ustun tomon qal'a jangida g'olib bo'ladi. Mag'lub qo'shinning yarmi halok bo'ladi, qolgan yarmi g'olib tomon safiga o'tadi. Durangda ikki tomon ham yarmidan ayriladi va hujumchi ortga qaytadi.\n"
-    "🦸 Qahramon faqat podshoh qasrini himoya qiladi. 1-daraja qahramon 3 dushman askarini jangdan chiqaradi; har daraja +1 kuch beradi.\n"
-    "🏯 Dushmanning barcha qal'alari qo'lga olingachgina qasrga hujum ochiladi. Qasr egallansa urush darhol tugaydi.\n"
-    "🔐 Aniq askar sonlari va buyruqlar faqat shaxsiy Veritas chatida ko'rinadi. Guruhda umumiy xarita, yilnoma va natijalar ko'rsatiladi.\n"
-    "💎 1000 faoliyat balli = 5 olmos. 100 olmos = 1 doimiy qahramon. Olmos va qahramonni boshqa a'zoga sovg'a qilish mumkin."
-)
-
-
-def _v109_conn (  ) :
-    c = _v109_sqlite3.connect ( DB_PATH, timeout=30)
-    c.row_factory = _v109_sqlite3.Row
-    return c
-
-
-def _v109_now (  ) :
-    return int ( _v109_time.time (  ) )
-
-
-def _v109_init_db (  ) :
-    with _v109_conn ( ) as c:
-        c.executescript ( '''
-        CREATE TABLE IF NOT EXISTS v109_war_games(
-            chat_id INTEGER PRIMARY KEY,
-            status TEXT NOT NULL DEFAULT 'lobby',
-            created_at INTEGER NOT NULL DEFAULT 0,
-            started_at INTEGER NOT NULL DEFAULT 0,
-            updated_at INTEGER NOT NULL DEFAULT 0,
-            election_deadline INTEGER NOT NULL DEFAULT 0,
-            next_event_at INTEGER NOT NULL DEFAULT 0,
-            lobby_message_id INTEGER NOT NULL DEFAULT 0,
-            status_message_id INTEGER NOT NULL DEFAULT 0,
-            pinned_message_id INTEGER NOT NULL DEFAULT 0,
-            team1_name TEXT NOT NULL DEFAULT 'Moviy Saltanat',
-            team2_name TEXT NOT NULL DEFAULT 'Qizil Saltanat',
-            winner_team INTEGER NOT NULL DEFAULT 0,
-            saved_permissions TEXT,
-            locked INTEGER NOT NULL DEFAULT 0
-        );
-        CREATE TABLE IF NOT EXISTS v109_war_players(
-            chat_id INTEGER NOT NULL,
-            user_id INTEGER NOT NULL,
-            name TEXT NOT NULL,
-            team INTEGER NOT NULL DEFAULT 0,
-            king INTEGER NOT NULL DEFAULT 0,
-            joined_at INTEGER NOT NULL DEFAULT 0,
-            last_action INTEGER NOT NULL DEFAULT 0,
-            dm_ok INTEGER NOT NULL DEFAULT 0,
-            PRIMARY KEY ( chat_id,user_id)
-        );
-        CREATE INDEX IF NOT EXISTS v109_war_players_user ON v109_war_players ( user_id ) ;
-        CREATE TABLE IF NOT EXISTS v109_war_forts(
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            chat_id INTEGER NOT NULL,
-            original_team INTEGER NOT NULL,
-            team INTEGER NOT NULL,
-            owner_id INTEGER NOT NULL,
-            kind TEXT NOT NULL,
-            label TEXT NOT NULL,
-            troops INTEGER NOT NULL DEFAULT 0,
-            updated_at INTEGER NOT NULL DEFAULT 0,
-            x REAL NOT NULL DEFAULT 0,
-            y REAL NOT NULL DEFAULT 0,
-            active INTEGER NOT NULL DEFAULT 1
-        );
-        CREATE INDEX IF NOT EXISTS v109_war_forts_chat ON v109_war_forts ( chat_id,team,active ) ;
-        CREATE TABLE IF NOT EXISTS v109_war_votes(
-            chat_id INTEGER NOT NULL,
-            team INTEGER NOT NULL,
-            voter_id INTEGER NOT NULL,
-            candidate_id INTEGER NOT NULL,
-            PRIMARY KEY ( chat_id,voter_id)
-        );
-        CREATE TABLE IF NOT EXISTS v109_war_moves(
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            chat_id INTEGER NOT NULL,
-            owner_id INTEGER NOT NULL,
-            team INTEGER NOT NULL,
-            src_id INTEGER NOT NULL,
-            dst_id INTEGER NOT NULL,
-            troops INTEGER NOT NULL,
-            kind TEXT NOT NULL,
-            departed_at INTEGER NOT NULL,
-            arrival_at INTEGER NOT NULL,
-            status TEXT NOT NULL DEFAULT 'moving'
-        );
-        CREATE INDEX IF NOT EXISTS v109_war_moves_due ON v109_war_moves ( status,arrival_at ) ;
-        CREATE TABLE IF NOT EXISTS v109_war_input_state(
-            user_id INTEGER PRIMARY KEY,
-            chat_id INTEGER NOT NULL,
-            mode TEXT NOT NULL,
-            payload TEXT,
-            updated_at INTEGER NOT NULL
-        );
-        CREATE TABLE IF NOT EXISTS v109_war_wallets(
-            user_id INTEGER PRIMARY KEY,
-            gold INTEGER NOT NULL DEFAULT 0,
-            diamonds INTEGER NOT NULL DEFAULT 0,
-            updated_at INTEGER NOT NULL DEFAULT 0
-        );
-        CREATE TABLE IF NOT EXISTS v109_war_exchange(
-            user_id INTEGER PRIMARY KEY,
-            spent_points INTEGER NOT NULL DEFAULT 0
-        );
-        CREATE TABLE IF NOT EXISTS v109_war_heroes(
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            user_id INTEGER NOT NULL,
-            name TEXT NOT NULL,
-            level INTEGER NOT NULL DEFAULT 1,
-            created_at INTEGER NOT NULL DEFAULT 0
-        );
-        CREATE INDEX IF NOT EXISTS v109_war_heroes_user ON v109_war_heroes ( user_id ) ;
-        CREATE TABLE IF NOT EXISTS v109_war_gifts(
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            sender_id INTEGER NOT NULL,
-            receiver_id INTEGER NOT NULL,
-            kind TEXT NOT NULL,
-            amount INTEGER NOT NULL DEFAULT 0,
-            hero_id INTEGER NOT NULL DEFAULT 0,
-            created_at INTEGER NOT NULL DEFAULT 0
-        );
-        CREATE TABLE IF NOT EXISTS v109_war_events(
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            chat_id INTEGER NOT NULL,
-            kind TEXT NOT NULL,
-            status TEXT NOT NULL DEFAULT 'open',
-            winner_id INTEGER NOT NULL DEFAULT 0,
-            created_at INTEGER NOT NULL,
-            expires_at INTEGER NOT NULL
-        );
-        CREATE TABLE IF NOT EXISTS v109_war_log(
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            chat_id INTEGER NOT NULL,
-            event TEXT NOT NULL,
-            details TEXT,
-            created_at INTEGER NOT NULL
-        );
-        ''')
-
-
-def _v109_log ( cid,event,details='' ) :
-    try:
-        with _v109_conn ( ) as c:
-            c.execute ( 'INSERT INTO v109_war_log ( chat_id,event,details,created_at) VALUES ( ?,?,?,? ) ', ( cid,event,details[:3000],_v109_now (  )  ) )
-    except Exception:
-        pass
-
-
-def _v109_game ( cid ) :
-    with _v109_conn ( ) as c:
-        return c.execute ( 'SELECT * FROM v109_war_games WHERE chat_id=?', ( cid, )  ) .fetchone ( )
-
-
-def _v109_player ( cid,uid ) :
-    with _v109_conn ( ) as c:
-        return c.execute ( 'SELECT * FROM v109_war_players WHERE chat_id=? AND user_id=?', ( cid,uid )  ) .fetchone ( )
-
-
-def _v109_players ( cid ) :
-    with _v109_conn ( ) as c:
-        return c.execute ( 'SELECT * FROM v109_war_players WHERE chat_id=? ORDER BY joined_at,user_id', ( cid, )  ) .fetchall ( )
-
-
-def _v109_fort ( fid,cid=None ) :
-    with _v109_conn ( ) as c:
-        if cid is None:
-            return c.execute ( 'SELECT * FROM v109_war_forts WHERE id=? AND active=1', ( fid, )  ) .fetchone ( )
-        return c.execute ( 'SELECT * FROM v109_war_forts WHERE id=? AND chat_id=? AND active=1', ( fid,cid )  ) .fetchone ( )
-
-
-def _v109_realize_troops_row ( c,row,now=None ) :
-    if not row:
-        return 0
-    now = now or _v109_now ( )
-    total = int ( row['troops'])
-    if row['kind'] == 'palace':
-        total += max ( 0, now-int ( row['updated_at'] ) ) * V109_PALACE_TROOPS_PER_SECOND
-    c.execute ( 'UPDATE v109_war_forts SET troops=?,updated_at=? WHERE id=?', ( total,now,row['id'] ) )
-    return total
-
-
-def _v109_visible_troops ( row,now=None ) :
-    if not row:return 0
-    total=int ( row['troops'])
-    if row['kind']=='palace':
-        total += max ( 0, ( now or _v109_now (  )  ) -int ( row['updated_at'] )  ) *V109_PALACE_TROOPS_PER_SECOND
-    return total
-
-
-def _v109_team_name ( game,team ) :
-    if not game:return 'Noma’lum davlat'
-    return game['team1_name'] if int ( team ) ==1 else game['team2_name']
-
-
-def _v109_wallet ( uid ) :
-    with _v109_conn ( ) as c:
-        c.execute ( 'INSERT OR IGNORE INTO v109_war_wallets ( user_id,updated_at) VALUES ( ?,? ) ', ( uid,_v109_now (  )  ) )
-        return c.execute ( 'SELECT * FROM v109_war_wallets WHERE user_id=?', ( uid, )  ) .fetchone ( )
-
-
-def _v109_total_points ( uid ) :
-    # Veritasning mavjud members jadvalidagi XP — faoliyat balli.
-    try:
-        with _v109_conn ( ) as c:
-            r=c.execute ( 'SELECT COALESCE ( SUM ( xp ) ,0) FROM members WHERE user_id=?', ( uid, )  ) .fetchone ( )
-            return int ( r[0] if r else 0)
-    except Exception:
-        return 0
-
-
-def _v109_spent_points ( uid ) :
-    with _v109_conn ( ) as c:
-        r=c.execute ( 'SELECT spent_points FROM v109_war_exchange WHERE user_id=?', ( uid, )  ) .fetchone ( )
-        return int ( r['spent_points']) if r else 0
-
-
-def _v109_hero_power ( uid ) :
-    with _v109_conn ( ) as c:
-        h=c.execute ( 'SELECT * FROM v109_war_heroes WHERE user_id=? ORDER BY level DESC,id ASC LIMIT 1', ( uid, )  ) .fetchone ( )
-    if not h:return (0,None)
-    return (2+int ( h['level'] ) ,h)
-
-
-def _v109_safe ( s ) :
-    return _v109_html.escape ( str ( s or '' ) )
-
-
-def _v109_font ( size,bold=False ) :
-    paths=[]
-    if bold:
-        paths += ['/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf','/usr/share/fonts/truetype/liberation2/LiberationSans-Bold.ttf']
-    else:
-        paths += ['/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf','/usr/share/fonts/truetype/liberation2/LiberationSans-Regular.ttf']
-    for p in paths:
-        try:return _V109Font.truetype ( p,size)
-        except Exception:pass
-    return _V109Font.load_default ( )
-
-
-def _v109_card_image ( kind,title,subtitle='' ) :
-    w,h=1280,720
-    im=_V109Image.new ( 'RGB', ( w,h ) , ( 224,205,166 ) )
-    d=_V109Draw.Draw ( im)
-    # parchment + horizon + two fortress silhouettes
-    d.rectangle (  ( 0,0,w,120 ) ,fill= ( 55,43,34 ) )
-    d.rectangle (  ( 0,520,w,720 ) ,fill= ( 92,74,51 ) )
-    d.ellipse (  ( 90,360,280,550 ) ,fill= ( 72,62,49 )  ) ; d.rectangle (  ( 120,300,250,540 ) ,fill= ( 72,62,49 ) )
-    d.ellipse (  ( 1000,350,1190,550 ) ,fill= ( 72,62,49 )  ) ; d.rectangle (  ( 1030,290,1160,540 ) ,fill= ( 72,62,49 ) )
-    # lances / banners
-    d.line (  ( 300,540,420,250 ) ,fill= ( 48,39,31 ) ,width=8 ) ; d.polygon ( [ ( 420,250 ) , ( 520,285 ) , ( 420,320 ) ],fill= ( 47,89,145 ) )
-    d.line (  ( 980,540,860,250 ) ,fill= ( 48,39,31 ) ,width=8 ) ; d.polygon ( [ ( 860,250 ) , ( 760,285 ) , ( 860,320 ) ],fill= ( 150,55,52 ) )
-    icons={'lobby':'⚔','election':'♛','start':'⚔','move':'➜','battle':'⚔','help':'✚','victory':'♛','event':'✦','map':'⌖'}
-    icon=icons.get ( kind,'⚔')
-    try:d.text (  ( 55,28 ) ,icon,fill='white',font=_v109_font ( 54,True ) )
-    except Exception:pass
-    d.text (  ( 130,30 ) ,title[:60],fill='white',font=_v109_font ( 42,True ) )
-    if subtitle:
-        # simple wrapping
-        words=subtitle.split (  ) ; lines=[]; cur=''
-        for word in words:
-            test= ( cur+' '+word ) .strip ( )
-            if len ( test ) >58: lines.append ( cur ) ;cur=word
-            else:cur=test
-        if cur:lines.append ( cur)
-        y=180
-        for line in lines[:5]:
-            d.text (  ( 340,y ) ,line,fill= ( 54,43,34 ) ,font=_v109_font ( 30,False )  ) ;y+=48
-    d.text (  ( 35,665 ) ,'VERITAS • QAL’ALAR URUSHI',fill= ( 242,230,205 ) ,font=_v109_font ( 22,True ) )
-    out=_v109_io.BytesIO (  ) ;im.save ( out,format='PNG' ) ;out.seek ( 0 ) ;out.name='veritas_war.png';return out
-
-
-def _v109_map_image ( cid,viewer_id=None ) :
-    with _v109_conn ( ) as c:
-        game=c.execute ( 'SELECT * FROM v109_war_games WHERE chat_id=?', ( cid, )  ) .fetchone ( )
-        forts=[dict ( r) for r in c.execute ( 'SELECT * FROM v109_war_forts WHERE chat_id=? AND active=1 ORDER BY team,kind DESC,id', ( cid, )  ) ]
-        names={r['user_id']:r['name'] for r in c.execute ( 'SELECT user_id,name FROM v109_war_players WHERE chat_id=?', ( cid, )  ) }
-    w,h=1400,820
-    im=_V109Image.new ( 'RGB', ( w,h ) , ( 231,218,188 )  ) ;d=_V109Draw.Draw ( im)
-    d.rectangle (  ( 0,0,w,90 ) ,fill= ( 51,42,34 ) )
-    d.text (  ( 35,24 ) ,'QAL’ALAR URUSHI — UMUMIY XARITA',fill='white',font=_v109_font ( 38,True ) )
-    d.line (  ( 700,105,700,770 ) ,fill= ( 133,111,78 ) ,width=5)
-    if game:
-        d.text (  ( 60,110 ) ,str ( game['team1_name'] ) [:28],fill= ( 40,83,145 ) ,font=_v109_font ( 28,True ) )
-        d.text (  ( 900,110 ) ,str ( game['team2_name'] ) [:28],fill= ( 151,53,53 ) ,font=_v109_font ( 28,True ) )
-    team_groups={1:[],2:[]}
-    for f in forts:team_groups[int ( f['team'] ) ].append ( f)
-    for team in (1,2 ) :
-        arr=team_groups[team]
-        for i,f in enumerate ( arr ) :
-            cols=2; row=i//cols; col=i%cols
-            x0= ( 70 if team==1 else 770 ) +col*300; y0=175+row*120
-            fill= ( 55,105,170) if team==1 else (174,70,65)
-            d.rounded_rectangle (  ( x0,y0,x0+260,y0+82 ) ,radius=14,fill=fill)
-            mark='QASR' if f['kind']=='palace' else 'QAL’A'
-            owner=names.get ( f['owner_id'],'Noma’lum' ) [:18]
-            d.text (  ( x0+14,y0+10 ) ,mark,fill='white',font=_v109_font ( 22,True ) )
-            d.text (  ( x0+14,y0+42 ) ,owner,fill='white',font=_v109_font ( 20,False ) )
-            if viewer_id and int ( f['owner_id'] ) ==int ( viewer_id ) :
-                t=_v109_visible_troops ( f)
-                d.text (  ( x0+175,y0+12 ) ,str ( t ) ,fill= ( 255,239,152 ) ,font=_v109_font ( 22,True ) )
-    d.text (  ( 35,780 ) ,'🔒 Guruh xaritasida askar sonlari yashirin. Shaxsiy xaritada faqat o‘zingizniki ko‘rinadi.',fill= ( 70,60,50 ) ,font=_v109_font ( 19,False ) )
-    out=_v109_io.BytesIO (  ) ;im.save ( out,format='PNG' ) ;out.seek ( 0 ) ;out.name='veritas_war_map.png';return out
-
-
-def _v109_ai_image_sync ( scene_type,details ) :
-    if not V109_AI_IMAGES or not OPENAI_API_KEY:
-        return None
-    model=_v109_os.getenv ( 'WAR_IMAGE_MODEL',_v109_os.getenv ( 'POSTER_IMAGE_MODEL',globals (  ) .get ( 'REBUS_IMAGE_MODEL','gpt-image-1' )  ) )
-    prompt=(
-        "Create a cinematic historical illustration inspired by late-14th-century Central Asian Timurid-era warfare. "
-        "Stone and mud-brick fortresses, armored cavalry, archers, spears, banners, dust and dramatic natural light. "
-        "No modern weapons, no fantasy magic, no readable text, no logos, no watermark, no identifiable real historical person. "
-        "Respectful historical atmosphere, wide 16:9 composition. Scene type: "+scene_type+". Situation: "+details[:1500]
-    )
-    payload=_v109_json.dumps ( {'model':model,'prompt':prompt,'size':'1536x1024','quality':'medium'},ensure_ascii=False ) .encode ( 'utf-8')
-    req=_v109_urllib_request.Request ( 'https://api.openai.com/v1/images/generations',data=payload,headers={'Authorization':f'Bearer {OPENAI_API_KEY}','Content-Type':'application/json'},method='POST')
-    try:
-        with _v109_urllib_request.urlopen ( req,timeout=240) as resp:
-            data=_v109_json.loads ( resp.read (  ) .decode ( 'utf-8' ) )
-        items=data.get ( 'data') if isinstance ( data,dict) else None
-        item=items[0] if items and isinstance ( items[0],dict) else None
-        if not item:return None
-        if item.get ( 'b64_json' ) :return _v109_base64.b64decode ( item['b64_json'])
-        if item.get ( 'url' ) :
-            with _v109_urllib_request.urlopen ( item['url'],timeout=120) as resp:return resp.read ( )
-    except Exception:
-        log.exception ( 'V10.9 war AI image failed')
-    return None
-
-
-async def _v109_send_ai_scene ( ctx,cid,scene_type,details,caption,critical=False ) :
-    if not V109_AI_IMAGES or not OPENAI_API_KEY:return
-    key=f'v109_ai_last_{cid}'
-    now=_v109_now ( )
-    last=int ( ctx.application.bot_data.get ( key,0) or 0)
-    if not critical and now-last<V109_AI_IMAGE_COOLDOWN:return
-    ctx.application.bot_data[key]=now
-    try:
-        image=await _v109_asyncio.to_thread ( _v109_ai_image_sync,scene_type,details)
-        if image:
-            bio=_v109_io.BytesIO ( image ) ;bio.name='veritas_ai_war.png';bio.seek ( 0)
-            await ctx.bot.send_photo ( cid,bio,caption= ( '🎨 <b>VERITAS AI — JANG TASVIRI</b>\n\n'+caption ) [:1024],parse_mode='HTML')
-    except Exception:
-        log.exception ( 'V10.9 war AI scene send failed')
-
-
-async def _v109_is_admin ( ctx,cid,uid ) :
-    if uid in SUPER_OWNERS:return True
-    try:
-        cm=await ctx.bot.get_chat_member ( cid,uid)
-        return cm.status in ('administrator','creator','owner')
-    except Exception:return False
-
-
-def _v109_lobby_markup (  ) :
-    return _V109M ( [
-        [_V109B ( '➕ O‘yinga qo‘shilish',callback_data='v109:join' ) ,_V109B ( '➖ O‘yindan chiqish',callback_data='v109:leave' ) ],
-        [_V109B ( '🚀 O‘yinni boshlash',callback_data='v109:start' ) ],
-        [_V109B ( '👥 Ishtirokchilar',callback_data='v109:players' ) ,_V109B ( '📜 Qoidalar',callback_data='v109:rules' ) ],
-    ])
-
-
-def _v109_group_play_markup ( cid ) :
-    return _V109M ( [
-        [_V109B ( '🎮 Maxfiy panelim',callback_data=f'v109:panel:{cid}' ) ,_V109B ( '🗺 Umumiy xarita',callback_data=f'v109:gmap:{cid}' ) ],
-        [_V109B ( '📜 Qoidalar',callback_data='v109:rules' ) ,_V109B ( '💰 Hamyonim',callback_data='v109:wallet' ) ],
-        [_V109B ( '🛑 O‘yinni to‘xtatish',callback_data=f'v109:stop:{cid}' ) ],
-    ])
-
-
-def _v109_private_panel_markup ( cid,uid ) :
-    p=_v109_player ( cid,uid)
-    king=bool ( p and p['king'])
-    rows=[
-        [_V109B ( '⚔️ Hujum',callback_data=f'v109:attack:{cid}' ) ,_V109B ( '🛡 Yordam',callback_data=f'v109:help:{cid}' ) ],
-        [_V109B ( '🏯 Qasrni himoya qilish',callback_data=f'v109:palhelp:{cid}' ) ,_V109B ( '🧱 Himoyada qolish',callback_data=f'v109:stay:{cid}' ) ],
-        [_V109B ( '🏰 Qal’alarim',callback_data=f'v109:mine:{cid}' ) ,_V109B ( '🗺 Xarita',callback_data=f'v109:pmap:{cid}' ) ],
-        [_V109B ( '💰 Hamyon / Olmos',callback_data='v109:wallet' ) ,_V109B ( '🦸 Qahramonlar',callback_data='v109:heroes' ) ],
-    ]
-    if king:rows.append ( [_V109B ( '🏳 Davlat nomini o‘zgartirish',callback_data=f'v109:rename:{cid}' ) ])
-    rows.append ( [_V109B ( '⛔ O‘yinni to‘xtatish',callback_data=f'v109:pstop:{cid}' ) ])
-    rows.append ( [_V109B ( '📜 Qoidalar',callback_data='v109:rules' ) ])
-    return _V109M ( rows)
-
-
-def _v109_games_markup ( private=False ) :
-    if private:
-        return _V109M ( [
-            [_V109B ( '▶️ O‘yinni boshlash',callback_data='v109:pstartmenu' ) ,_V109B ( '⛔ O‘yinni to‘xtatish',callback_data='v109:pstopmenu' ) ],
-            [_V109B ( '⚔️ Qal’alar urushi',callback_data='v109:home' ) ],
-            [_V109B ( '💰 Hamyonim',callback_data='v109:wallet' ) ,_V109B ( '🦸 Qahramonlarim',callback_data='v109:heroes' ) ],
-            [_V109B ( '📜 To‘liq qoidalar',callback_data='v109:rules' ) ],
-            [_V109B ( '⬅️ Bosh menyu',callback_data='root:choose' ) ],
-        ])
-    return _V109M ( [
-        [_V109B ( '⚔️ Qal’alar urushini ochish',callback_data='v109:open' ) ],
-        [_V109B ( '📜 Qoidalar',callback_data='v109:rules' ) ],
-        [_V109B ( '⬅️ Bosh menyu',callback_data='root:choose' ) ],
-    ])
-
-
-async def veritas_games_callback ( update,ctx ) :
-    q=update.callback_query
-    if not q:return
-    await q.answer ( )
-    private=q.message.chat.type=='private'
-    text= ( "🎮 <b>VERITAS O‘YINLARI</b>\n\n"
-          "⚔️ <b>Qal’alar urushi</b> — ikki davlat, podshohlar, qal’alar va yashirin harbiy qarorlardan iborat strategik o‘yin.\n\n"
-          "Guruhda o‘yin ochiladi; barcha harbiy buyruqlar esa shaxsiy Veritas chatidagi tugmalar orqali beriladi.")
-    await q.message.reply_text ( text,parse_mode='HTML',reply_markup=_v109_games_markup ( private ) )
-
-
-async def _v109_safe_dm ( ctx,uid,text,reply_markup=None ) :
-    try:
-        await ctx.bot.send_message ( uid,text,parse_mode='HTML',reply_markup=reply_markup,disable_web_page_preview=True)
-        return True
-    except Exception:
-        return False
-
-
-async def _v109_is_real_admin ( ctx,cid,uid ) :
-    """Telegramdagi haqiqiy admin holati. SUPER_OWNER istisnosi ro'yxatga ta'sir qilmaydi."""
-    try:
-        cm=await ctx.bot.get_chat_member ( cid,uid)
-        return cm.status in ('administrator','creator','owner')
-    except Exception:
-        return False
-
-
-async def _v109_bot_present ( ctx,cid ) :
-    """Veritas ayni paytda guruhda bormi — eski DB yozuvlarini filtrlash uchun."""
-    try:
-        cm=await ctx.bot.get_chat_member ( cid,ctx.bot.id)
-        return cm.status not in ('left','kicked')
-    except Exception:
-        return False
-
-
-async def _v109_can_manage_group ( ctx,cid,uid ) :
-    """Selected group only: user must be a real Telegram admin and Veritas must still be present."""
-    if not await _v109_is_real_admin ( ctx,cid,uid ) :
-        return False
-    return await _v109_bot_present ( ctx,cid)
-
-
-async def _v109_manageable_groups ( ctx,uid ) :
-    """Faqat Veritas bor VA foydalanuvchi Telegramda haqiqiy admin bo'lgan guruhlar."""
-    try:
-        with _v109_conn ( ) as c:
-            rows=[dict ( r) for r in c.execute(
-                'SELECT chat_id,COALESCE ( title,CAST ( chat_id AS TEXT ) ) title FROM groups '
-                'ORDER BY COALESCE ( title,CAST ( chat_id AS TEXT ) ) LIMIT 80'
-            ).fetchall (  ) ]
-    except Exception:
-        log.exception ( 'V10.9 admin group list DB read failed')
-        return []
-
-    sem=_v109_asyncio.Semaphore ( 6)
-    async def probe ( g ) :
-        cid=int ( g['chat_id'])
-        async with sem:
-            try:
-                member=await ctx.bot.get_chat_member ( cid,uid)
-                if member.status not in ('administrator','creator','owner' ) :
-                    return None
-                bot_member=await ctx.bot.get_chat_member ( cid,ctx.bot.id)
-                if bot_member.status in ('left','kicked' ) :
-                    return None
-                title=str ( g.get ( 'title') or cid)
-                try:
-                    chat=await ctx.bot.get_chat ( cid)
-                    title= ( getattr ( chat,'title',None) or title)
-                    with _v109_conn ( ) as c:
-                        c.execute ( 'UPDATE groups SET title=? WHERE chat_id=?', ( title,cid ) )
-                except Exception:
-                    pass
-                return {'chat_id':cid,'title':title}
-            except Exception:
-                return None
-
-    checked=await _v109_asyncio.gather ( * ( probe ( g) for g in rows ) ,return_exceptions=False)
-    out=[g for g in checked if g]
-    out.sort ( key=lambda g:str ( g['title'] ) .casefold (  ) )
-    return out[:40]
-
-
-async def _v109_prepare_reset ( ctx,cid ) :
-    """Before resetting a finished/stopped/stale session, never lose a real group lock."""
-    g=_v109_game ( cid)
-    if not g:return True
-    if int ( g['locked'] or 0 ) :
-        if not await _v109_unlock_group ( ctx,cid ) :
-            return False
-    _v109_reset_game ( cid)
-    return True
-
-
-def _v109_group_title ( cid ) :
-    try:
-        with _v109_conn ( ) as c:
-            r=c.execute ( 'SELECT title FROM groups WHERE chat_id=?', ( cid, )  ) .fetchone ( )
-        return r['title'] if r and r['title'] else str ( cid)
-    except Exception:
-        return str ( cid)
-
-
-def _v109_private_control_markup (  ) :
-    return _V109M ( [
-        [_V109B ( '▶️ O‘yinni boshlash',callback_data='v109:pstartmenu' ) ,_V109B ( '⛔ O‘yinni to‘xtatish',callback_data='v109:pstopmenu' ) ],
-        [_V109B ( '⚔️ Harbiy kabinet',callback_data='v109:home' ) ,_V109B ( '📜 Qoidalar',callback_data='v109:rules' ) ],
-    ])
-
-
-async def _v109_private_start_menu ( q,ctx ) :
-    await q.answer ( )
-    if q.message.chat.type!='private':
-        return await q.message.reply_text ( 'Bu boshqaruv shaxsiy kabinetda ishlaydi.')
-    groups=await _v109_manageable_groups ( ctx,q.from_user.id)
-    if not groups:
-        return await q.message.reply_text ( '🏰 Siz boshqaradigan guruh topilmadi. Veritasni guruhga administrator qilib qo‘shing va guruhni botda ro‘yxatdan o‘tkazing.',reply_markup=_v109_private_control_markup (  ) )
-    rows=[[_V109B ( '🏰 '+str ( g['title'] ) [:42],callback_data=f'v109:pstart:{g["chat_id"]}' ) ] for g in groups[:30]]
-    rows.append ( [_V109B ( '⬅️ Qal’alar kabineti',callback_data='v109:home' ) ])
-    return await q.message.reply_text ( '▶️ <b>O‘YINNI BOSHLASH</b>\n\nQaysi guruhda Qal’alar urushi uchun lashkar yig‘ilishini ochamiz?',parse_mode='HTML',reply_markup=_V109M ( rows ) )
-
-
-async def _v109_private_stop_menu ( q,ctx ) :
-    await q.answer ( )
-    if q.message.chat.type!='private':
-        return await q.message.reply_text ( 'Bu boshqaruv shaxsiy kabinetda ishlaydi.')
-    allowed={int ( g['chat_id'] ) :g for g in await _v109_manageable_groups ( ctx,q.from_user.id ) }
-    with _v109_conn ( ) as c:
-        games=[dict ( r) for r in c.execute ( 'SELECT chat_id,status FROM v109_war_games WHERE status IN ("lobby","election","launching","playing") OR (status="finished" AND locked=1) ORDER BY updated_at DESC' ) ]
-    games=[g for g in games if int ( g['chat_id']) in allowed]
-    if not games:
-        return await q.message.reply_text ( 'ℹ️ Hozir siz boshqaradigan guruhlarda faol Qal’alar urushi yo‘q.',reply_markup=_v109_private_control_markup (  ) )
-    labels={'lobby':'Lashkar','election':'Saylov','launching':'Start','playing':'Urush','finished':'Guruhni ochish'}
-    rows=[[_V109B ( f"⛔ {str ( allowed[int ( g['chat_id'] ) ]['title'] ) [:30]} · {labels.get ( g['status'],g['status'] ) }",callback_data=f"v109:pstop:{g['chat_id']}" ) ] for g in games[:30]]
-    rows.append ( [_V109B ( '⬅️ Qal’alar kabineti',callback_data='v109:home' ) ])
-    return await q.message.reply_text ( '⛔ <b>O‘YINNI TO‘XTATISH</b>\n\nTo‘xtatiladigan guruhni tanlang:',parse_mode='HTML',reply_markup=_V109M ( rows ) )
-
-
-async def _v109_private_start_group ( q,ctx,cid ) :
-    uid=q.from_user.id
-    if q.message.chat.type!='private':
-        return await q.answer ( 'Bu tugma shaxsiy kabinet uchun.',show_alert=True)
-    try:await q.answer ( )
-    except Exception:pass
-    if not await _v109_can_manage_group ( ctx,cid,uid ) :
-        return await q.message.reply_text ( '⛔ Bu guruhni boshqarish huquqingiz yo‘q yoki Veritas guruhda yo‘q.',reply_markup=_v109_private_control_markup (  ) )
-    g=_v109_game ( cid)
-    if g and g['status'] in ('election','playing' ) :
-        return await q.message.reply_text ( 'ℹ️ Bu guruhda o‘yin allaqachon davom etmoqda.',reply_markup=_v109_private_control_markup (  ) )
-    if g and g['status']=='stopping':
-        return await q.message.reply_text ( '⏳ Bu guruhdagi o‘yin hozir to‘xtatilmoqda.',reply_markup=_v109_private_control_markup (  ) )
-    if g and g['status']=='launching':
-        age=max ( 0,_v109_now (  ) -int ( g['updated_at'] or 0 ) )
-        if age<=90:
-            return await q.message.reply_text ( '⏳ Urush ishga tushirilmoqda.',reply_markup=_v109_private_control_markup (  ) )
-        if not await _v109_prepare_reset ( ctx,cid ) :
-            return await q.message.reply_text ( '⛔ Eski sessiya qotib qolgan va guruhni qayta ochib bo‘lmadi. Veritas admin huquqlarini tekshiring.',reply_markup=_v109_private_control_markup (  ) )
-    if not g:
-        _v109_reset_game ( cid)
-    elif g['status'] in ('finished','stopped' ) :
-        if not await _v109_prepare_reset ( ctx,cid ) :
-            return await q.message.reply_text ( '⛔ Avval guruh yozishmalarini qayta ochish kerak.',reply_markup=_v109_private_control_markup (  ) )
-    lobby_msg=await _v109_refresh_lobby ( ctx,cid,True)
-    title=_v109_group_title ( cid)
-    if not lobby_msg:
-        return await q.message.reply_text ( '⛔ Veritas bu guruhga lobby yubora olmadi. Botning guruhdagi admin/yuborish huquqlarini tekshiring.',reply_markup=_v109_private_control_markup (  ) )
-    await q.message.reply_text ( f'✅ <b>{_v109_safe ( title ) }</b> guruhida Qal’alar urushi ochildi.\n\nA’zolar <b>➕ O‘yinga qo‘shilish</b>ni bosadi. Kamida {V109_MIN_PLAYERS} kishi yig‘ilgach, guruhdagi <b>🚀 O‘yinni boshlash</b> tugmasi bilan podshoh saylovi boshlanadi.',parse_mode='HTML',reply_markup=_v109_private_control_markup (  ) )
-    _v109_asyncio.create_task ( _v109_send_ai_scene ( ctx,cid,'lobby','Commanders and soldiers gathering peacefully outside two opposing medieval Central Asian fortresses before a campaign.','🏰 Lashkar yig‘ilishi boshlandi.',critical=True ) )
-
-
-async def _v109_private_stop_group ( q,ctx,cid ) :
-    uid=q.from_user.id
-    if q.message.chat.type!='private':
-        return await q.answer ( 'Bu tugma shaxsiy kabinet uchun.',show_alert=True)
-    try:await q.answer ( )
-    except Exception:pass
-    if not await _v109_can_manage_group ( ctx,cid,uid ) :
-        return await q.message.reply_text ( '⛔ Bu guruhni boshqarish huquqingiz yo‘q yoki Veritas guruhda yo‘q.',reply_markup=_v109_private_control_markup (  ) )
-    ok,text=await _v109_stop_game ( ctx,cid,uid)
-    if ok:
-        await q.message.reply_text ( f'⛔ <b>{_v109_safe ( _v109_group_title ( cid )  ) }</b> guruhidagi o‘yin to‘xtatildi. Guruh yozishmalari qayta ochildi.',parse_mode='HTML',reply_markup=_v109_private_control_markup (  ) )
-    else:
-        await q.message.reply_text ( text,reply_markup=_v109_private_control_markup (  ) )
-
-
-def _v109_saved_permissions ( chat ) :
-    p=getattr ( chat,'permissions',None)
-    if not p:return None
-    keys=['can_send_messages','can_send_audios','can_send_documents','can_send_photos','can_send_videos','can_send_video_notes','can_send_voice_notes','can_send_polls','can_send_other_messages','can_add_web_page_previews','can_change_info','can_invite_users','can_pin_messages','can_manage_topics']
-    data={k:getattr ( p,k,None) for k in keys}
-    return _v109_json.dumps ( data)
-
-
-async def _v109_lock_group ( ctx,cid ) :
-    game=_v109_game ( cid)
-    if not game:return False
-    if game['locked']:return True
-    saved=None;permissions_applied=False
-    try:
-        chat=await ctx.bot.get_chat ( cid)
-        bot_member=await ctx.bot.get_chat_member ( cid,ctx.bot.id)
-        if bot_member.status not in ('administrator','creator','owner' ) :
-            log.warning ( 'V10.9 group lock denied: bot is not admin in %s',cid)
-            return False
-        if bot_member.status=='administrator' and not bool ( getattr ( bot_member,'can_restrict_members',False )  ) :
-            log.warning ( 'V10.9 group lock denied: bot lacks can_restrict_members in %s',cid)
-            return False
-        saved=_v109_saved_permissions ( chat)
-        perms=_V109Permissions(
-            can_send_messages=False,can_send_audios=False,can_send_documents=False,can_send_photos=False,
-            can_send_videos=False,can_send_video_notes=False,can_send_voice_notes=False,can_send_polls=False,
-            can_send_other_messages=False,can_add_web_page_previews=False
-        )
-        await ctx.bot.set_chat_permissions ( cid,perms)
-        permissions_applied=True
-        with _v109_conn ( ) as c:
-            c.execute ( 'UPDATE v109_war_games SET locked=1,saved_permissions=? WHERE chat_id=?', ( saved,cid ) )
-        return True
-    except Exception as exc:
-        log.warning ( 'V10.9 group lock failed: %s',exc)
-        if permissions_applied:
-            try:
-                data=_v109_json.loads ( saved) if saved else {}
-                if data:
-                    await ctx.bot.set_chat_permissions ( cid,_V109Permissions ( **data ) )
-                else:
-                    await ctx.bot.set_chat_permissions ( cid,_V109Permissions(
-                        can_send_messages=True,can_send_audios=True,can_send_documents=True,can_send_photos=True,
-                        can_send_videos=True,can_send_video_notes=True,can_send_voice_notes=True,can_send_polls=True,
-                        can_send_other_messages=True,can_add_web_page_previews=True
-                    ))
-            except Exception:
-                log.exception ( 'V10.9 lock rollback could not restore group permissions for %s',cid)
-        return False
-
-
-async def _v109_unlock_group ( ctx,cid ) :
-    game=_v109_game ( cid)
-    if not game:return False
-    if not game['locked']:
-        return True
-    try:
-        data=_v109_json.loads ( game['saved_permissions']) if game['saved_permissions'] else {}
-        if data:
-            await ctx.bot.set_chat_permissions ( cid,_V109Permissions ( **data ) )
-        else:
-            await ctx.bot.set_chat_permissions ( cid,_V109Permissions(
-                can_send_messages=True,can_send_audios=True,can_send_documents=True,can_send_photos=True,
-                can_send_videos=True,can_send_video_notes=True,can_send_voice_notes=True,can_send_polls=True,
-                can_send_other_messages=True,can_add_web_page_previews=True
-            ))
-    except Exception as exc:
-        log.warning ( 'V10.9 group unlock failed: %s',exc)
-        return False
-    try:
-        with _v109_conn ( ) as c:
-            c.execute ( 'UPDATE v109_war_games SET locked=0 WHERE chat_id=?', ( cid, ) )
-    except Exception:
-        log.exception ( 'V10.9 group unlock DB flag update failed for %s',cid)
-    return True
-
-
-async def _v109_pin ( ctx,cid,message_id ) :
-    try:
-        await ctx.bot.pin_chat_message ( cid,message_id,disable_notification=True)
-        with _v109_conn ( ) as c:c.execute ( 'UPDATE v109_war_games SET pinned_message_id=? WHERE chat_id=?', ( message_id,cid ) )
-    except Exception:pass
-
-
-async def _v109_send_status_card ( ctx,cid,kind,title,caption,markup,pin=False,replace=True ) :
-    game=_v109_game ( cid)
-    old=int ( game['status_message_id'] or 0) if game else 0
-    m=None
-    try:
-        m=await ctx.bot.send_photo ( cid,_v109_card_image ( kind,title,caption ) ,caption=caption[:1024],parse_mode='HTML',reply_markup=markup)
-    except Exception:
-        log.warning ( 'V10.9 status photo failed; falling back to text card for %s',cid)
-        try:
-            m=await ctx.bot.send_message ( cid,caption[:4000],parse_mode='HTML',reply_markup=markup,disable_web_page_preview=True)
-        except Exception:
-            log.exception ( 'V10.9 status card failed completely for %s',cid)
-            return None
-    try:
-        with _v109_conn ( ) as c:c.execute ( 'UPDATE v109_war_games SET status_message_id=?,updated_at=? WHERE chat_id=?', ( m.message_id,_v109_now (  ) ,cid ) )
-        if pin:await _v109_pin ( ctx,cid,m.message_id)
-        if replace and old and old!=m.message_id:
-            try:await ctx.bot.delete_message ( cid,old)
-            except Exception:pass
-    except Exception:
-        log.exception ( 'V10.9 status card bookkeeping failed for %s',cid)
-    return m
-
-
-async def _v109_send_event_card ( ctx,cid,kind,title,caption,markup=None,ai_scene=None,critical=False ) :
-    try:
-        await ctx.bot.send_photo ( cid,_v109_card_image ( kind,title,caption ) ,caption=caption[:1024],parse_mode='HTML',reply_markup=markup)
-    except Exception:
-        try:await ctx.bot.send_message ( cid,caption[:4000],parse_mode='HTML',reply_markup=markup)
-        except Exception:pass
-    if ai_scene:
-        _v109_asyncio.create_task ( _v109_send_ai_scene ( ctx,cid,kind,ai_scene,caption,critical=critical ) )
-
-
-def _v109_lobby_caption ( cid ) :
-    ps=_v109_players ( cid)
-    names='\n'.join ( f"• {_v109_safe ( p['name'] ) }" for p in ps[-12:]) or 'Hozircha hech kim qo‘shilmadi.'
-    extra='' if len ( ps ) <=12 else f"\n… yana {len ( ps ) -12} ishtirokchi"
-    return ("⚔️ <b>LASHKAR YIG‘ILMOQDA</b>\n\n"
-            "🏰 Ikki davlat o‘rtasidagi katta yurish uchun qo‘mondonlar saf tortmoqda.\n"
-            f"👥 Ishtirokchilar: <b>{len ( ps ) }</b> / {V109_MAX_PLAYERS}\n\n{names}{extra}\n\n"
-            "👇 O‘yinga kirish uchun <b>Qo‘shilish</b> tugmasini bosing. Yetarli odam yig‘ilgach administrator o‘yinni boshlaydi.")
-
-
-async def _v109_refresh_lobby ( ctx,cid,force=False ) :
-    game=_v109_game ( cid)
-    if not game or game['status']!='lobby':return None
-    key=f'v109_lobby_refresh_{cid}';now=_v109_now (  ) ;last=int ( ctx.application.bot_data.get ( key,0) or 0)
-    if not force and now-last<4:return None
-    ctx.application.bot_data[key]=now
-    return await _v109_send_status_card ( ctx,cid,'lobby','LASHKAR YIG‘ILMOQDA',_v109_lobby_caption ( cid ) ,_v109_lobby_markup (  ) ,pin=False,replace=True)
-
-
-def _v109_reset_game ( cid ) :
-    now=_v109_now ( )
-    with _v109_conn ( ) as c:
-        c.execute ( 'BEGIN IMMEDIATE')
-        c.execute ( 'DELETE FROM v109_war_players WHERE chat_id=?', ( cid, ) )
-        c.execute ( 'DELETE FROM v109_war_forts WHERE chat_id=?', ( cid, ) )
-        c.execute ( 'DELETE FROM v109_war_votes WHERE chat_id=?', ( cid, ) )
-        c.execute ( 'DELETE FROM v109_war_moves WHERE chat_id=?', ( cid, ) )
-        c.execute ( 'DELETE FROM v109_war_events WHERE chat_id=?', ( cid, ) )
-        c.execute ( 'INSERT OR REPLACE INTO v109_war_games ( chat_id,status,created_at,updated_at,next_event_at,team1_name,team2_name,winner_team,locked) VALUES ( ?,?,?,?,?,?,?,?,0 ) ',
-                  (cid,'lobby',now,now,now+_v109_random.randint ( V109_EVENT_MIN_SECONDS,V109_EVENT_MAX_SECONDS ) ,'Moviy Saltanat','Qizil Saltanat',0 ) )
-
-
-async def _v109_open_lobby ( update,ctx ) :
-    q=update.callback_query;cid=q.message.chat_id;uid=q.from_user.id
-    # Callbackni darhol tasdiqlaymiz — admin tekshiruvi tarmoq orqali bo‘lsa ham query eskirib qolmaydi.
-    try:await q.answer ( )
-    except Exception:pass
-    if q.message.chat.type=='private':
-        return await q.message.reply_text ( 'Qal’alar urushi guruhda ochiladi.')
-    if not await _v109_is_admin ( ctx,cid,uid ) :
-        return await q.message.reply_text ( '⛔ Qal’alar urushini faqat guruh administratori ochadi.')
-    g=_v109_game ( cid)
-    if g and g['status'] in ('election','playing' ) :
-        return await q.message.reply_text ( '⚔️ Bu guruhda o‘yin allaqachon davom etmoqda.')
-    if g and g['status']=='stopping':
-        age=max ( 0,_v109_now (  ) -int ( g['updated_at'] or 0 ) )
-        if age<=120:
-            return await q.message.reply_text ( '⏳ O‘yin to‘xtatilmoqda. Bir necha soniyadan keyin qayta urinib ko‘ring.')
-        # Qotib qolgan stop holatini tiklashga urinish.
-        if int ( g['locked'] or 0) and not await _v109_unlock_group ( ctx,cid ) :
-            return await q.message.reply_text ( '⛔ Eski to‘xtatish holati qotib qolgan va guruhni ochib bo‘lmadi.')
-        with _v109_conn ( ) as c:
-            c.execute ( 'UPDATE v109_war_games SET status="stopped",updated_at=? WHERE chat_id=? AND status="stopping"', ( _v109_now (  ) ,cid ) )
-        g=_v109_game ( cid)
-    if g and g['status']=='launching':
-        age=max ( 0,_v109_now (  ) -int ( g['updated_at'] or 0 ) )
-        if age<=120:
-            return await q.message.reply_text ( '⏳ Urush ishga tushirilmoqda. Bir necha soniya kuting.')
-        if not await _v109_prepare_reset ( ctx,cid ) :
-            return await q.message.reply_text ( '⛔ Eski sessiyani tiklash uchun guruhni ochib bo‘lmadi.')
-        g=_v109_game ( cid)
-    if not g:
-        _v109_reset_game ( cid)
-    elif g['status'] in ('finished','stopped' ) :
-        if not await _v109_prepare_reset ( ctx,cid ) :
-            return await q.message.reply_text ( '⛔ Avval guruhni qayta ochish kerak.')
-    card=await _v109_refresh_lobby ( ctx,cid,True)
-    if not card:
-        return await q.message.reply_text ( '⛔ Lobby yuborilmadi. Veritasning guruhda xabar yuborish huquqini tekshiring.')
-    _v109_asyncio.create_task ( _v109_send_ai_scene ( ctx,cid,'lobby','Commanders and soldiers gathering peacefully outside two opposing medieval Central Asian fortresses before a campaign.','🏰 Lashkar yig‘ilishi boshlandi.',critical=True ) )
-
-async def _v109_join ( q,ctx ) :
-    cid=q.message.chat_id;uid=q.from_user.id;g=_v109_game ( cid)
-    if not g or g['status']!='lobby':
-        return await q.answer ( 'Hozir qo‘shilish yopiq.',show_alert=True)
-    err=None
-    try:
-        with _v109_conn ( ) as c:
-            c.execute ( 'BEGIN IMMEDIATE')
-            current=c.execute ( 'SELECT status FROM v109_war_games WHERE chat_id=?', ( cid, )  ) .fetchone ( )
-            if not current or current['status']!='lobby':
-                err='Hozir qo‘shilish yopildi.'
-                c.rollback ( )
-            else:
-                exists=c.execute ( 'SELECT 1 FROM v109_war_players WHERE chat_id=? AND user_id=?', ( cid,uid )  ) .fetchone ( )
-                if exists:
-                    err='Siz allaqachon safdasiz.'
-                    c.rollback ( )
-                else:
-                    count=c.execute ( 'SELECT COUNT ( *) FROM v109_war_players WHERE chat_id=?', ( cid, )  ) .fetchone (  ) [0]
-                    if count>=V109_MAX_PLAYERS:
-                        err='Bu o‘yin uchun joylar to‘ldi.'
-                        c.rollback ( )
-                    else:
-                        c.execute ( 'INSERT INTO v109_war_players ( chat_id,user_id,name,joined_at,last_action) VALUES ( ?,?,?,?,? ) ', ( cid,uid,q.from_user.full_name[:80],_v109_now (  ) ,_v109_now (  )  ) )
-    except Exception:
-        log.exception ( 'V10.9 join failed')
-        return await q.answer ( '⚠️ Safga qo‘shishda xato bo‘ldi. Qayta urinib ko‘ring.',show_alert=True)
-    if err:
-        return await q.answer ( err,show_alert=True)
-    try:await q.answer ( '✅ Safga qo‘shildingiz!',show_alert=True)
-    except Exception:pass
-    dm=await _v109_safe_dm ( ctx,uid,"⚔️ <b>Qal’alar urushiga qo‘shildingiz!</b>\n\nO‘yin boshlanganda maxfiy harbiy panelingiz shu yerga keladi. Botni bloklamang.")
-    with _v109_conn ( ) as c:
-        c.execute ( 'UPDATE v109_war_players SET dm_ok=? WHERE chat_id=? AND user_id=?', ( 1 if dm else 0,cid,uid ) )
-    await _v109_refresh_lobby ( ctx,cid,True)
-
-async def _v109_leave ( q,ctx ) :
-    cid=q.message.chat_id;uid=q.from_user.id;err=None
-    try:
-        with _v109_conn ( ) as c:
-            c.execute ( 'BEGIN IMMEDIATE')
-            g=c.execute ( 'SELECT status FROM v109_war_games WHERE chat_id=?', ( cid, )  ) .fetchone ( )
-            if not g or g['status']!='lobby':
-                err='O‘yin boshlanganidan keyin safdan chiqib bo‘lmaydi.'
-                c.rollback ( )
-            else:
-                cur=c.execute ( 'DELETE FROM v109_war_players WHERE chat_id=? AND user_id=?', ( cid,uid ) )
-                if cur.rowcount!=1:
-                    err='Siz hozir safda emassiz.'
-                    c.rollback ( )
-    except Exception:
-        log.exception ( 'V10.9 leave failed')
-        return await q.answer ( '⚠️ Safdan chiqishda xato bo‘ldi.',show_alert=True)
-    if err:return await q.answer ( err,show_alert=True)
-    try:await q.answer ( '✅ Safdan chiqdingiz.',show_alert=True)
-    except Exception:pass
-    await _v109_refresh_lobby ( ctx,cid,True)
-
-async def _v109_start_election ( q,ctx ) :
-    cid=q.message.chat_id;uid=q.from_user.id
-    # Birinchi ish — callbackni yopish. Keyingi Telegram/DB amallari queryni eskirtirmaydi.
-    try:await q.answer ( )
-    except Exception:pass
-    if not await _v109_is_admin ( ctx,cid,uid ) :
-        return await q.message.reply_text ( '⛔ Faqat guruh administratori o‘yinni boshlaydi.')
-    g=_v109_game ( cid)
-    if not g:
-        _v109_reset_game ( cid)
-        await _v109_refresh_lobby ( ctx,cid,True)
-        return await q.message.reply_text ( 'ℹ️ Yangi lobby ochildi. Avval a’zolar Qo‘shilish tugmasini bossin.')
-    status=str ( g['status'] or '')
-    if status in ('finished','stopped' ) :
-        if not await _v109_prepare_reset ( ctx,cid ) :
-            return await q.message.reply_text ( '⛔ Avval guruh yozishmalarini qayta ochish kerak.')
-        await _v109_refresh_lobby ( ctx,cid,True)
-        return await q.message.reply_text ( 'ℹ️ Yangi o‘yin lobbysi ochildi. A’zolarni yig‘ing, keyin Start bosing.')
-    if status=='election':
-        return await q.message.reply_text ( '👑 Podshoh saylovi allaqachon boshlangan. Natija avtomatik chiqadi.')
-    if status=='launching':
-        age=max ( 0,_v109_now (  ) -int ( g['updated_at'] or 0 ) )
-        if age>120:
-            if not await _v109_prepare_reset ( ctx,cid ) :
-                return await q.message.reply_text ( '⛔ Eski sessiyani tiklashda guruhni qayta ochib bo‘lmadi.')
-            await _v109_refresh_lobby ( ctx,cid,True)
-            return await q.message.reply_text ( 'ℹ️ Eski yarim qolgan sessiya tiklandi. A’zolarni qayta yig‘ing.')
-        return await q.message.reply_text ( '⚔️ Urush ishga tushirilmoqda. Bir necha soniya kuting.')
-    if status=='playing':
-        return await q.message.reply_text ( '⚔️ Urush allaqachon boshlangan. Maxfiy panel orqali boshqaring.')
-    if status=='stopping':
-        age=max ( 0,_v109_now (  ) -int ( g['updated_at'] or 0 ) )
-        if age>120:
-            if int ( g['locked'] or 0) and not await _v109_unlock_group ( ctx,cid ) :
-                return await q.message.reply_text ( '⛔ Qotib qolgan to‘xtatish holatida guruhni ochib bo‘lmadi.')
-            with _v109_conn ( ) as c:
-                c.execute ( 'UPDATE v109_war_games SET status="stopped",updated_at=? WHERE chat_id=? AND status="stopping"', ( _v109_now (  ) ,cid ) )
-            return await q.message.reply_text ( 'ℹ️ Eski to‘xtatish holati tiklandi. Endi yangi lobby ochishingiz mumkin.')
-        return await q.message.reply_text ( '⛔ O‘yin to‘xtatilmoqda. Bir necha soniya kuting.')
-    if status!='lobby':
-        return await q.message.reply_text ( f'ℹ️ O‘yin holati: {status}. Lobby kartasini qayta oching.')
-
-    # Davlatlar son jihatdan teng bo‘lishi uchun ishtirokchilar soni juft bo‘lishi shart.
-    pre_players=[dict ( x) for x in _v109_players ( cid ) ]
-    if len ( pre_players ) <V109_MIN_PLAYERS:
-        return await q.message.reply_text ( f'⛔ Kamida {V109_MIN_PLAYERS} ishtirokchi kerak. Hozir {len ( pre_players ) } kishi bor.')
-    if len ( pre_players ) %2:
-        return await q.message.reply_text ( '⚖️ Davlatlar teng bo‘lishi uchun ishtirokchilar soni juft bo‘lishi kerak. Yana 1 kishi qo‘shilsin yoki bir ishtirokchi “➖ O‘yindan chiqish”ni bossin.')
-
-    # Saylovdan oldin: ishtirokchi hali ham guruhda bo‘lishi va Veritasning shaxsiy chati ochiq bo‘lishi kerak.
-    async def _preflight ( p ) :
-        try:
-            member=await ctx.bot.get_chat_member ( cid,p['user_id'])
-            if getattr ( member,'status','') in ('left','kicked' ) :
-                return ('left',False)
-        except Exception:
-            return ('unknown',False)
-        dm=await _v109_safe_dm ( ctx,p['user_id'],'✅ <b>QAL’ALAR URUSHI — TAYYORLIK TEKSHIRUVI</b>\n\nShaxsiy harbiy kabinet ishlashga tayyor. Guruhda podshoh saylovi boshlanishini kuting.')
-        return ('ok',bool ( dm ) )
-    checks=await _v109_asyncio.gather ( *[_preflight ( p) for p in pre_players],return_exceptions=True)
-    left_ids=[];unknown=[];failed=[]
-    with _v109_conn ( ) as c:
-        for p,res in zip ( pre_players,checks ) :
-            if isinstance ( res,Exception ) :
-                state,dm='unknown',False
-            else:
-                state,dm=res
-            if state=='left':
-                left_ids.append ( int ( p['user_id'] ) )
-            elif state=='unknown':
-                unknown.append ( p['name'])
-            else:
-                c.execute ( 'UPDATE v109_war_players SET dm_ok=? WHERE chat_id=? AND user_id=?', ( 1 if dm else 0,cid,p['user_id'] ) )
-                if not dm:failed.append ( p['name'])
-        if left_ids:
-            marks=','.join ( '?' for _ in left_ids)
-            c.execute ( f'DELETE FROM v109_war_players WHERE chat_id=? AND user_id IN ({marks} ) ', ( cid,*left_ids ) )
-    if left_ids:
-        await _v109_refresh_lobby ( ctx,cid,True)
-        return await q.message.reply_text ( f'♻️ Guruhdan chiqib ketgan <b>{len ( left_ids ) }</b> ishtirokchi safdan avtomatik olib tashlandi. O‘yinchilar sonini tekshirib, Startni yana bosing.',parse_mode='HTML')
-    if unknown:
-        names=', '.join ( _v109_safe ( x) for x in unknown[:12])
-        return await q.message.reply_text ( f'⚠️ Quyidagi ishtirokchilarning guruh a’zoligini Telegramdan tekshirib bo‘lmadi: {names}. Veritasning administrator huquqlarini tekshirib, qayta urinib ko‘ring.',parse_mode='HTML')
-    if failed:
-        names=', '.join ( _v109_safe ( x) for x in failed[:12])
-        return await q.message.reply_text ( f'⛔ O‘yin hali boshlanmaydi. Quyidagi a’zolar Veritasning shaxsiy chatiga kirib <b>Start</b> bosishi kerak:\n\n{names}\n\nShundan keyin Start tugmasini yana bosing.',parse_mode='HTML')
-
-    now=_v109_now (  ) ;deadline=now+V109_ELECTION_SECONDS
-    # 1-bosqich: faqat STARTNI atomik band qilamiz. Hali saylovga o‘tmaymiz.
-    try:
-        with _v109_conn ( ) as c:
-            c.execute ( 'BEGIN IMMEDIATE')
-            claim_err=None
-            current=c.execute ( 'SELECT status FROM v109_war_games WHERE chat_id=?', ( cid, )  ) .fetchone ( )
-            if not current or current['status']!='lobby':
-                claim_err='⏳ Start boshqa administrator tomonidan allaqachon qabul qilindi.';c.rollback ( )
-            else:
-                players=[dict ( r) for r in c.execute ( 'SELECT * FROM v109_war_players WHERE chat_id=? ORDER BY joined_at,user_id', ( cid, )  ) .fetchall (  ) ]
-                if len ( players ) <V109_MIN_PLAYERS:
-                    claim_err=f'⛔ Kamida {V109_MIN_PLAYERS} ishtirokchi kerak. Hozir {len ( players ) } kishi bor.';c.rollback ( )
-                elif len ( players ) %2:
-                    claim_err='⚖️ Start tekshiruvi vaqtida ishtirokchilar soni o‘zgardi. Davlatlar teng bo‘lishi uchun juft son kerak.';c.rollback ( )
-                else:
-                    not_ready=[p['name'] for p in players if int ( p.get ( 'dm_ok') or 0 ) !=1]
-                    if not_ready:
-                        names=', '.join ( _v109_safe ( x) for x in not_ready[:12] ) ;claim_err=f'⛔ Start tekshiruvi vaqtida ayrim shaxsiy chatlar tayyor emas: {names}. Ular Veritasga Start bosib, keyin qayta urinilsin.';c.rollback ( )
-                    else:
-                        _v109_random.shuffle ( players)
-                        cur=c.execute ( 'UPDATE v109_war_games SET status="launching",updated_at=? WHERE chat_id=? AND status="lobby"', ( now,cid ) )
-                        if cur.rowcount!=1:
-                            claim_err='⏳ Start boshqa administrator tomonidan allaqachon qabul qilindi.';c.rollback ( )
-    except Exception:
-        log.exception ( 'V10.9 atomic start claim failed')
-        return await q.message.reply_text ( '⚠️ Startni bazada boshlashda xato bo‘ldi. Qayta urinib ko‘ring.')
-    if claim_err:
-        return await q.message.reply_text ( claim_err)
-
-    # 2-bosqich: avval guruhni haqiqatan yopamiz. Server shu yerda uzilsa holat launching bo‘lib qoladi va auto-recovery uni tiklaydi.
-    locked=await _v109_lock_group ( ctx,cid)
-    if not locked:
-        with _v109_conn ( ) as c:
-            c.execute ( 'UPDATE v109_war_games SET status="lobby",started_at=0,election_deadline=0,updated_at=? WHERE chat_id=? AND status="launching"', ( _v109_now (  ) ,cid ) )
-        await _v109_refresh_lobby ( ctx,cid,True)
-        return await q.message.reply_text ( '⛔ Veritas guruhni yopa olmadi. Botga administrator va “Restrict members” huquqini bering.')
-
-    election_card=await _v109_send_status_card ( ctx,cid,'election','PODSHOH SAYLOVI',
-        "👑 <b>PODSHOH SAYLOVI BOSHLANDI</b>\n\nIkki davlat tashkil topmoqda. Har bir a’zo o‘z davlatining podshohini <b>Veritas shaxsiy chatida</b> yashirin saylaydi.\n\n⏳ Saylov avtomatik yakunlanadi — hech qanday buyruq yozish shart emas.\n🔒 Guruh urush tugaguncha suhbat uchun yopildi.",
-        _v109_group_play_markup ( cid ) ,pin=True,replace=True)
-    if not election_card:
-        await _v109_unlock_group ( ctx,cid)
-        with _v109_conn ( ) as c:
-            c.execute ( 'UPDATE v109_war_games SET status="lobby",started_at=0,election_deadline=0,updated_at=? WHERE chat_id=? AND status="launching"', ( _v109_now (  ) ,cid ) )
-        await _v109_refresh_lobby ( ctx,cid,True)
-        return await q.message.reply_text ( '⛔ Saylov kartasini yuborib bo‘lmadi. O‘yin lobby holatiga qaytarildi.')
-
-    # 3-bosqich: guruh yopilib, karta chiqqandan keyingina jamoalar va election holatini atomik yozamiz.
-    try:
-        with _v109_conn ( ) as c:
-            c.execute ( 'BEGIN IMMEDIATE')
-            current=c.execute ( 'SELECT status FROM v109_war_games WHERE chat_id=?', ( cid, )  ) .fetchone ( )
-            if not current or current['status']!='launching':
-                c.rollback (  ) ;raise RuntimeError ( 'launching state lost before election setup')
-            c.execute ( 'DELETE FROM v109_war_votes WHERE chat_id=?', ( cid, ) )
-            c.execute ( 'UPDATE v109_war_players SET team=0,king=0 WHERE chat_id=?', ( cid, ) )
-            for i,p in enumerate ( players ) :
-                c.execute ( 'UPDATE v109_war_players SET team=?,king=0,last_action=? WHERE chat_id=? AND user_id=?', ( 1+ ( i%2 ) ,now,cid,p['user_id'] ) )
-            cur=c.execute ( 'UPDATE v109_war_games SET status="election",started_at=?,updated_at=?,election_deadline=? WHERE chat_id=? AND status="launching"', ( now,now,deadline,cid ) )
-            if cur.rowcount!=1:
-                c.rollback (  ) ;raise RuntimeError ( 'launching state lost before election commit')
-    except Exception:
-        log.exception ( 'V10.9 election commit failed')
-        await _v109_unlock_group ( ctx,cid)
-        with _v109_conn ( ) as c:
-            c.execute ( 'UPDATE v109_war_players SET team=0,king=0 WHERE chat_id=?', ( cid, ) )
-            c.execute ( 'DELETE FROM v109_war_votes WHERE chat_id=?', ( cid, ) )
-            c.execute ( 'UPDATE v109_war_games SET status="lobby",started_at=0,election_deadline=0,updated_at=? WHERE chat_id=? AND status="launching"', ( _v109_now (  ) ,cid ) )
-        await _v109_refresh_lobby ( ctx,cid,True)
-        return await q.message.reply_text ( '⛔ Saylovni bazada yakuniy ishga tushirishda xato bo‘ldi. Lobby tiklandi.')
-
-    with _v109_conn ( ) as c:
-        allp=[dict ( r) for r in c.execute ( 'SELECT * FROM v109_war_players WHERE chat_id=?', ( cid, )  ) ]
-    byteam={1:[p for p in allp if p['team']==1],2:[p for p in allp if p['team']==2]}
-    dm_failed=[]
-    for p in allp:
-        rows=[[_V109B ( '👑 '+cand['name'][:32],callback_data=f'v109:vote:{cid}:{cand["user_id"]}' ) ] for cand in byteam[p['team']]]
-        ok=await _v109_safe_dm ( ctx,p['user_id'],
-            f"👑 <b>MAXFIY SAYLOV</b>\n\nSiz <b>{'Moviy Saltanat' if p['team']==1 else 'Qizil Saltanat'}</b> safidasiz.\nDavlatingiz podshohini tanlang:",_V109M ( rows ) )
-        with _v109_conn ( ) as c:
-            c.execute ( 'UPDATE v109_war_players SET dm_ok=? WHERE chat_id=? AND user_id=?', ( 1 if ok else 0,cid,p['user_id'] ) )
-        if not ok:dm_failed.append ( p['name'])
-    if dm_failed:
-        names=', '.join ( _v109_safe ( x) for x in dm_failed[:8])
-        try:
-            await ctx.bot.send_message ( cid,
-                f"⚠️ <b>SHAXSIY CHAT OCHILMAGAN</b>\n\n{names}\n\nBu a’zolar Veritasning shaxsiy chatiga kirib <b>Start</b> bosishi kerak. Saylov muddati tugasa, ularning ovozisiz ham o‘yin davom etadi.",parse_mode='HTML')
-        except Exception:pass
-    _v109_asyncio.create_task ( _v109_send_ai_scene ( ctx,cid,'election','A solemn council of medieval Central Asian commanders in a fortress courtyard choosing a ruler, banners and guards, no combat.','👑 Davlatlar o‘z podshohini saylamoqda.',critical=True ) )
-
-async def _v109_cast_vote ( q,ctx,cid,candidate ) :
-    uid=q.from_user.id
-    if q.message and q.message.chat.type!='private':
-        return await q.answer ( 'Podshoh saylovi faqat shaxsiy chatda o‘tadi.',show_alert=True)
-    accepted=False;total=0;votes=0
-    try:
-        with _v109_conn ( ) as c:
-            c.execute ( 'BEGIN IMMEDIATE')
-            g=c.execute ( 'SELECT status FROM v109_war_games WHERE chat_id=?', ( cid, )  ) .fetchone ( )
-            p=c.execute ( 'SELECT * FROM v109_war_players WHERE chat_id=? AND user_id=?', ( cid,uid )  ) .fetchone ( )
-            cand=c.execute ( 'SELECT * FROM v109_war_players WHERE chat_id=? AND user_id=?', ( cid,candidate )  ) .fetchone ( )
-            if not g or g['status']!='election' or not p or not cand or int ( p['team'] ) !=int ( cand['team'] ) :
-                c.rollback ( )
-            else:
-                exists=c.execute ( 'SELECT 1 FROM v109_war_votes WHERE chat_id=? AND voter_id=?', ( cid,uid )  ) .fetchone ( )
-                if not exists:
-                    c.execute ( 'INSERT INTO v109_war_votes ( chat_id,team,voter_id,candidate_id) VALUES ( ?,?,?,? ) ', ( cid,p['team'],uid,candidate ) )
-                    accepted=True
-                total=c.execute ( 'SELECT COUNT ( *) FROM v109_war_players WHERE chat_id=?', ( cid, )  ) .fetchone (  ) [0]
-                votes=c.execute ( 'SELECT COUNT ( *) FROM v109_war_votes WHERE chat_id=?', ( cid, )  ) .fetchone (  ) [0]
-    except Exception:
-        log.exception ( 'V10.9 vote failed')
-        return await q.answer ( '⚠️ Ovozni saqlashda xato bo‘ldi. Qayta urinib ko‘ring.',show_alert=True)
-    if not accepted:
-        # Either election ended / invalid candidate / voter already voted.
-        g=_v109_game ( cid)
-        with _v109_conn ( ) as c:
-            old=c.execute ( 'SELECT candidate_id FROM v109_war_votes WHERE chat_id=? AND voter_id=?', ( cid,uid )  ) .fetchone ( )
-        if old:
-            return await q.answer ( '✅ Siz bu saylovda allaqachon ovoz bergansiz.',show_alert=True)
-        return await q.answer ( 'Bu saylov uchun ovoz bera olmaysiz.',show_alert=True)
-    try:await q.answer ( '✅ Ovozingiz qabul qilindi!',show_alert=True)
-    except Exception:pass
-    try:await q.edit_message_reply_markup ( reply_markup=None)
-    except Exception:pass
-    # Hamma ovoz bergan bo‘lsa 45 soniyani kutmaymiz; finalize atomik claim bilan himoyalangan.
-    if total and votes>=total:
-        await _v109_finalize_election ( ctx,cid)
-
-
-def _v109_assign_coordinates ( team,idx,total,kind ) :
-    if kind=='palace':
-        return ( ( 90 if int ( team ) ==1 else 910 ) ,500)
-    y=150+ ( int ( idx ) +1 ) * ( 650/max ( 2,int ( total ) +1 ) )
-    return ( ( 260 if int ( team ) ==1 else 740 ) ,y)
-
-
-async def _v109_finalize_election ( ctx,cid ) :
-    g=_v109_game ( cid)
-    if not g or g['status']!='election':return
-    now=_v109_now ( )
-    with _v109_conn ( ) as c:
-        c.execute ( 'BEGIN IMMEDIATE')
-        # claim finalization atomically
-        claimed=c.execute ( 'UPDATE v109_war_games SET status="launching",updated_at=? WHERE chat_id=? AND status="election"', ( now,cid ) )
-        if claimed.rowcount!=1:return
-        players=[dict ( r) for r in c.execute ( 'SELECT * FROM v109_war_players WHERE chat_id=?', ( cid, )  ) ]
-        c.execute ( 'DELETE FROM v109_war_forts WHERE chat_id=?', ( cid, ) )
-        kings={}
-        for team in (1,2 ) :
-            candidates=[p for p in players if p['team']==team]
-            counts={p['user_id']:c.execute ( 'SELECT COUNT ( *) FROM v109_war_votes WHERE chat_id=? AND candidate_id=?', ( cid,p['user_id'] )  ) .fetchone (  ) [0] for p in candidates}
-            mx=max ( counts.values (  ) ) if counts else 0
-            tied=[p for p in candidates if counts.get ( p['user_id'],0 ) ==mx]
-            king=_v109_random.choice ( tied or candidates ) ;kings[team]=king
-            c.execute ( 'UPDATE v109_war_players SET king=1 WHERE chat_id=? AND user_id=?', ( cid,king['user_id'] ) )
-            x,y=_v109_assign_coordinates ( team,0,len ( candidates ) ,'palace')
-            c.execute ( 'INSERT INTO v109_war_forts ( chat_id,original_team,team,owner_id,kind,label,troops,updated_at,x,y) VALUES ( ?,?,?,?,?,?,?,?,?,? ) ',
-                      (cid,team,team,king['user_id'],'palace','Qasr',V109_PALACE_START_TROOPS,now,x,y ) )
-            non=[p for p in candidates if p['user_id']!=king['user_id']]
-            for idx,p in enumerate ( non ) :
-                x,y=_v109_assign_coordinates ( team,idx,len ( non ) ,'castle')
-                c.execute ( 'INSERT INTO v109_war_forts ( chat_id,original_team,team,owner_id,kind,label,troops,updated_at,x,y) VALUES ( ?,?,?,?,?,?,?,?,?,? ) ',
-                          (cid,team,team,p['user_id'],'castle',f"{p['name'][:24]} qal’asi",V109_CASTLE_START_TROOPS,now,x,y ) )
-        c.execute ( 'UPDATE v109_war_games SET status="playing",updated_at=?,next_event_at=? WHERE chat_id=?', ( now,now+_v109_random.randint ( V109_EVENT_MIN_SECONDS,V109_EVENT_MAX_SECONDS ) ,cid ) )
-    g=_v109_game ( cid)
-    k1=kings[1]['name'];k2=kings[2]['name']
-    caption= ( "⚔️ <b>URUSH BOSHLANDI!</b>\n\n"
-             f"🔵 {_v109_safe ( g['team1_name'] ) } — Podshoh <b>{_v109_safe ( k1 ) }</b>\n"
-             f"🔴 {_v109_safe ( g['team2_name'] ) } — Podshoh <b>{_v109_safe ( k2 ) }</b>\n\n"
-             "🏰 Har bir qo‘mondon o‘z qal’asini boshqaradi. Harbiy qarorlar shaxsiy Veritas chatida tugmalar bilan beriladi.\n"
-             "🔐 Guruhda aniq qo‘shin sonlari ko‘rsatilmaydi. Bu yerda faqat jang yilnomasi va umumiy xarita chiqadi.")
-    await _v109_send_status_card ( ctx,cid,'start','URUSH BOSHLANDI',caption,_v109_group_play_markup ( cid ) ,pin=True,replace=True)
-    _v109_asyncio.create_task ( _v109_send_ai_scene ( ctx,cid,'start','Two rival medieval Central Asian armies facing each other between fortified settlements, commanders preparing campaign, dramatic but no gore.',caption,critical=True ) )
-    for p in _v109_players ( cid ) :
-        role='👑 Podshoh va Qasr sohibi' if p['king'] else '🏰 Qal’a qo‘mondoni'
-        await _v109_safe_dm ( ctx,p['user_id'],
-            f"🔐 <b>MAXFIY HARBIY KENGASH</b>\n\n⚔️ Urush boshlandi.\n🏳 Davlatingiz: <b>{_v109_safe ( _v109_team_name ( g,p['team'] )  ) }</b>\n🎖 Vazifangiz: {role}\n\nNima qilmoqchi ekaningizni faqat quyidagi tugmalar orqali tanlang.",
-            _v109_private_panel_markup ( cid,p['user_id'] ) )
-
-
-def _v109_own_forts ( cid,uid ) :
-    with _v109_conn ( ) as c:return c.execute ( 'SELECT * FROM v109_war_forts WHERE chat_id=? AND owner_id=? AND active=1 ORDER BY kind DESC,id', ( cid,uid )  ) .fetchall ( )
-
-
-def _v109_enemy_forts ( cid,team ) :
-    with _v109_conn ( ) as c:return c.execute ( 'SELECT * FROM v109_war_forts WHERE chat_id=? AND team!=? AND active=1 ORDER BY kind,id', ( cid,team )  ) .fetchall ( )
-
-
-def _v109_friendly_forts ( cid,team ) :
-    with _v109_conn ( ) as c:return c.execute ( 'SELECT * FROM v109_war_forts WHERE chat_id=? AND team=? AND active=1 ORDER BY kind DESC,id', ( cid,team )  ) .fetchall ( )
-
-
-def _v109_name_map ( cid ) :
-    with _v109_conn ( ) as c:return {r['user_id']:r['name'] for r in c.execute ( 'SELECT user_id,name FROM v109_war_players WHERE chat_id=?', ( cid, )  ) }
-
-
-def _v109_fort_button_text ( f,names,viewer=None ) :
-    owner=names.get ( f['owner_id'],'Noma’lum')
-    kind='👑 Qasr' if f['kind']=='palace' else '🏰 Qal’a'
-    extra=f" · {_v109_visible_troops ( f ) } askar" if viewer and int ( f['owner_id'] ) ==int ( viewer) else ''
-    return f"{kind} · {owner[:22]}{extra}"
-
-
-def _v109_travel_seconds ( src,dst ) :
-    dist=_v109_math.hypot ( float ( src['x'] ) -float ( dst['x'] ) ,float ( src['y'] ) -float ( dst['y'] ) )
-    return max ( 8,min ( 30,int ( dist/32 )  ) )
-
-
-async def _v109_show_panel ( q,ctx,cid ) :
-    uid=q.from_user.id;p=_v109_player ( cid,uid ) ;g=_v109_game ( cid)
-    if not p or not g or g['status']!='playing':return await q.answer ( 'Sizda faol harbiy panel yo‘q.',show_alert=True)
-    await q.answer ( )
-    forts=_v109_own_forts ( cid,uid)
-    total=sum ( _v109_visible_troops ( f) for f in forts)
-    await _v109_safe_dm ( ctx,uid,
-        f"🔐 <b>HARBIY KENGASH</b>\n\n🏳 {_v109_safe ( _v109_team_name ( g,p['team'] )  ) }\n🎖 {'Podshoh' if p['king'] else 'Qo‘mondon'}\n🏰 Nazoratingizdagi qal’a/qasrlar: <b>{len ( forts ) }</b>\n⚔️ Siz boshqarayotgan jami askar: <b>{total}</b>\n\nQaroringizni tanlang:",
-        _v109_private_panel_markup ( cid,uid ) )
-
-
-async def _v109_choose_source ( q,ctx,cid,action ) :
-    uid=q.from_user.id;p=_v109_player ( cid,uid ) ;g=_v109_game ( cid)
-    if not p or not g or g['status']!='playing':return await q.answer ( 'Faol urush topilmadi.',show_alert=True)
-    forts=_v109_own_forts ( cid,uid ) ;names=_v109_name_map ( cid)
-    if not forts:return await q.answer ( 'Siz boshqarayotgan qal’a qolmagan.',show_alert=True)
-    rows=[[_V109B ( _v109_fort_button_text ( f,names,uid ) [:55],callback_data=f'v109:src:{cid}:{action}:{f["id"]}' ) ] for f in forts]
-    rows.append ( [_V109B ( '⬅️ Harbiy panel',callback_data=f'v109:panel:{cid}' ) ])
-    await q.answer (  ) ;await _v109_safe_dm ( ctx,uid,'🏰 <b>Qaysi qal’adan qo‘shin chiqadi?</b>',_V109M ( rows ) )
-
-
-async def _v109_choose_target ( q,ctx,cid,action,src_id ) :
-    uid=q.from_user.id;p=_v109_player ( cid,uid ) ;src=_v109_fort ( src_id,cid ) ;names=_v109_name_map ( cid)
-    if not p or not src or src['owner_id']!=uid:return await q.answer ( 'Manba qal’a topilmadi.',show_alert=True)
-    if action=='attack':
-        targets=list ( _v109_enemy_forts ( cid,p['team'] ) )
-        # qasrga yo‘l faqat barcha dushman qal’alari olinganda ochiladi
-        enemy_castles=[f for f in targets if f['kind']=='castle']
-        if enemy_castles:targets=enemy_castles
-    elif action=='palhelp':
-        targets=[f for f in _v109_friendly_forts ( cid,p['team']) if f['kind']=='palace' and f['id']!=src_id]
-    else:
-        targets=[f for f in _v109_friendly_forts ( cid,p['team']) if f['id']!=src_id]
-    if not targets:return await q.answer ( 'Hozir mos nishon yo‘q.',show_alert=True)
-    rows=[[_V109B ( _v109_fort_button_text ( f,names ) [:55],callback_data=f'v109:dst:{cid}:{action}:{src_id}:{f["id"]}' ) ] for f in targets[:20]]
-    rows.append ( [_V109B ( '⬅️ Orqaga',callback_data=f'v109:{"attack" if action=="attack" else "help"}:{cid}' ) ])
-    await q.answer (  ) ;await _v109_safe_dm ( ctx,uid,'🎯 <b>Manzilni tanlang</b>\n\nVeritas faqat hozir ochiq va ruxsat etilgan nishonlarni ko‘rsatmoqda.',_V109M ( rows ) )
-
-
-async def _v109_choose_amount ( q,ctx,cid,action,src_id,dst_id ) :
-    uid=q.from_user.id;src=_v109_fort ( src_id,cid ) ;dst=_v109_fort ( dst_id,cid)
-    if not src or not dst or src['owner_id']!=uid:return await q.answer ( 'Qal’a topilmadi.',show_alert=True)
-    available=_v109_visible_troops ( src)
-    if available<=0:return await q.answer ( 'Bu qal’ada askar yo‘q.',show_alert=True)
-    values=[]
-    for pct,label in ( ( 25,'¼ qo‘shin' ) , ( 50,'½ qo‘shin' ) , ( 75,'¾ qo‘shin' ) , ( 100,'Hammasi' )  ) :
-        n=max ( 1, ( available*pct ) //100)
-        if n not in [v[0] for v in values]:values.append (  ( n,label ) )
-    rows=[[_V109B ( f'{label} · {n}',callback_data=f'v109:go:{cid}:{action}:{src_id}:{dst_id}:{n}' ) ] for n,label in values]
-    rows.append ( [_V109B ( '⬅️ Manzilga qaytish',callback_data=f'v109:src:{cid}:{action}:{src_id}' ) ])
-    await q.answer (  ) ;await _v109_safe_dm ( ctx,uid,f'⚔️ <b>Nechta askar yuborasiz?</b>\n\nBu qal’ada hozir <b>{available}</b> askar bor.',_V109M ( rows ) )
-
-
-async def _v109_schedule_move ( q,ctx,cid,action,src_id,dst_id,n ) :
-    uid=q.from_user.id;p=_v109_player ( cid,uid ) ;g=_v109_game ( cid)
-    if not p or not g or g['status']!='playing':return await q.answer ( 'Urush faol emas.',show_alert=True)
-    now=_v109_now (  ) ;err=None;move_id=None;opposite=None;travel=0
-    try:
-        with _v109_conn ( ) as c:
-            c.execute ( 'BEGIN IMMEDIATE')
-            current=c.execute ( 'SELECT status FROM v109_war_games WHERE chat_id=?', ( cid, )  ) .fetchone ( )
-            if not current or current['status']!='playing':
-                err='Urush faol emas.';c.rollback ( )
-            else:
-                src=c.execute ( 'SELECT * FROM v109_war_forts WHERE id=? AND chat_id=? AND active=1', ( src_id,cid )  ) .fetchone ( )
-                dst=c.execute ( 'SELECT * FROM v109_war_forts WHERE id=? AND chat_id=? AND active=1', ( dst_id,cid )  ) .fetchone ( )
-                if not src or not dst or src['owner_id']!=uid:
-                    err='Qal’a holati o‘zgargan. Qayta tanlang.';c.rollback ( )
-                else:
-                    available=_v109_realize_troops_row ( c,src,now)
-                    if n<=0 or n>available:
-                        err=f'Askar yetarli emas. Hozir {available} askar bor.';c.rollback ( )
-                    elif action=='attack' and src['team']==dst['team']:
-                        err='Bu ittifoqchi qal’a.';c.rollback ( )
-                    elif action!='attack' and src['team']!=dst['team']:
-                        err='Yordam faqat ittifoqchiga yuboriladi.';c.rollback ( )
-                    else:
-                        if action=='attack' and dst['kind']=='palace':
-                            rem=c.execute ( 'SELECT COUNT ( *) FROM v109_war_forts WHERE chat_id=? AND team=? AND kind="castle" AND active=1', ( cid,dst['team'] )  ) .fetchone (  ) [0]
-                            if rem:
-                                err=f'Qasrga yo‘l yopiq. Dushmanning yana {rem} qal’asi turibdi.';c.rollback ( )
-                        if not err:
-                            travel=_v109_travel_seconds ( src,dst)
-                            c.execute ( 'UPDATE v109_war_forts SET troops=?,updated_at=? WHERE id=?', ( available-n,now,src_id ) )
-                            cur=c.execute ( 'INSERT INTO v109_war_moves ( chat_id,owner_id,team,src_id,dst_id,troops,kind,departed_at,arrival_at,status) VALUES ( ?,?,?,?,?,?,?,?,?,"moving" ) ',
-                                          (cid,uid,src['team'],src_id,dst_id,n,action,now,now+travel ) )
-                            move_id=cur.lastrowid
-                            c.execute ( 'UPDATE v109_war_players SET last_action=? WHERE chat_id=? AND user_id=?', ( now,cid,uid ) )
-                            opposite=c.execute ( 'SELECT * FROM v109_war_moves WHERE chat_id=? AND status="moving" AND id!=? AND src_id=? AND dst_id=? AND team!=? ORDER BY id LIMIT 1',
-                                               (cid,move_id,dst_id,src_id,src['team'] )  ) .fetchone ( )
-    except Exception:
-        log.exception ( 'V10.9 schedule move failed')
-        return await q.answer ( '⚠️ Harbiy buyruqni saqlashda xato bo‘ldi.',show_alert=True)
-    if err:return await q.answer ( err,show_alert=True)
-    await q.answer ( '🐎 Buyruq qabul qilindi!')
-    commander=_v109_safe ( p['name'])
-    if opposite:
-        await _v109_resolve_field_collision ( ctx,cid,move_id,int ( opposite['id'] ) )
-        return
-    verb='hujumga' if action=='attack' else ('qasr mudofaasiga' if action=='palhelp' else 'yordamga')
-    cap= ( f"🐎 <b>QO‘SHIN SAFARGA CHIQDI</b>\n\n🎖 Qo‘mondon <b>{commander}</b> lashkari bilan {verb} yo‘l oldi.\n"
-         "🔐 Qo‘shin soni va aniq manzil harbiy sir sifatida saqlanmoqda.\n\n📜 <i>Veritas harbiy yilnomasi</i>")
-    await _v109_send_event_card ( ctx,cid,'move','LASHKAR YO‘LGA CHIQDI',cap,ai_scene=f'Commander {p["name"]} leading a medieval Central Asian column of cavalry and infantry departing a fortress for {verb}.')
-    await _v109_safe_dm ( ctx,uid,f"🔐 <b>BUYRUQ BAJARILDI</b>\n\n🐎 {n} askar yo‘lga chiqdi.\n⏳ Yetib borish: taxminan {travel} soniya.\n\nDushman guruhda bu sonni ko‘rmaydi.",_v109_private_panel_markup ( cid,uid ) )
-
-def _v109_return_survivors ( c,m,survivors,now ) :
-    """Return survivors only to a fort still held by their side; otherwise retreat to another allied fort."""
-    survivors=max ( 0,int ( survivors or 0 ) )
-    if survivors<=0:return 'lost'
-    src=c.execute ( 'SELECT * FROM v109_war_forts WHERE id=? AND active=1', ( m['src_id'], )  ) .fetchone ( )
-    target=None;mode='home'
-    if src and int ( src['team'] ) ==int ( m['team'] ) :
-        target=src
-    else:
-        target=c.execute ( 'SELECT * FROM v109_war_forts WHERE chat_id=? AND team=? AND owner_id=? AND active=1 ORDER BY CASE kind WHEN "palace" THEN 0 ELSE 1 END,id LIMIT 1',
-                         (m['chat_id'],m['team'],m['owner_id'] )  ) .fetchone ( )
-        mode='ally'
-        if not target:
-            target=c.execute ( 'SELECT * FROM v109_war_forts WHERE chat_id=? AND team=? AND active=1 ORDER BY CASE kind WHEN "palace" THEN 0 ELSE 1 END,id LIMIT 1',
-                             (m['chat_id'],m['team'] )  ) .fetchone ( )
-    if not target:return 'lost'
-    base=_v109_realize_troops_row ( c,target,now)
-    c.execute ( 'UPDATE v109_war_forts SET troops=?,updated_at=? WHERE id=?', ( base+survivors,now,target['id'] ) )
-    return mode
-
-
-async def _v109_resolve_field_collision ( ctx,cid,move1_id,move2_id ) :
-    now=_v109_now (  ) ;ret_a='lost';ret_b='lost'
-    with _v109_conn ( ) as c:
-        c.execute ( 'BEGIN IMMEDIATE')
-        game=c.execute ( 'SELECT status FROM v109_war_games WHERE chat_id=?', ( cid, )  ) .fetchone ( )
-        a=c.execute ( 'SELECT * FROM v109_war_moves WHERE id=? AND status="moving"', ( move1_id, )  ) .fetchone ( )
-        b=c.execute ( 'SELECT * FROM v109_war_moves WHERE id=? AND status="moving"', ( move2_id, )  ) .fetchone ( )
-        if not a or not b:return
-        if not game or game['status']!='playing':
-            c.execute ( 'UPDATE v109_war_moves SET status="cancelled" WHERE id IN (?,? ) ', ( a['id'],b['id'] ) )
-            return
-        surv_a=int ( a['troops'] ) //2;surv_b=int ( b['troops'] ) //2
-        ret_a=_v109_return_survivors ( c,a,surv_a,now)
-        ret_b=_v109_return_survivors ( c,b,surv_b,now)
-        c.execute ( 'UPDATE v109_war_moves SET status="field_battle" WHERE id IN (?,? ) ', ( a['id'],b['id'] ) )
-        pa=c.execute ( 'SELECT name FROM v109_war_players WHERE chat_id=? AND user_id=?', ( cid,a['owner_id'] )  ) .fetchone ( )
-        pb=c.execute ( 'SELECT name FROM v109_war_players WHERE chat_id=? AND user_id=?', ( cid,b['owner_id'] )  ) .fetchone ( )
-    na=pa['name'] if pa else 'Birinchi qo‘mondon';nb=pb['name'] if pb else 'Ikkinchi qo‘mondon'
-    cap= ( "🔥 <b>OCHIQ MAYDONDA TO‘QNASHUV!</b>\n\n"
-         f"⚔️ Qo‘mondon <b>{_v109_safe ( na ) }</b> lashkari bilan Qo‘mondon <b>{_v109_safe ( nb ) }</b> lashkari yo‘lda yuzma-yuz keldi.\n\n"
-         "Qattiq jangdan so‘ng har ikki tomon qo‘shinining qariyb yarmi yo‘qotildi. Hech bir qal’a egallanmadi — qolgan askarlar o‘z tomonidagi xavfsiz qal’aga chekindi.\n\n"
-         "📜 <i>Veritas harbiy yilnomasi</i>")
-    await _v109_send_event_card ( ctx,cid,'battle','YO‘LDA TO‘QNASHUV',cap,ai_scene=f'Two rival medieval Central Asian armies commanded by {na} and {nb} colliding in an open field between fortresses; intense cavalry and archery, non-graphic.',critical=True)
-    msg_a='o‘z qal’angizga qaytdi' if ret_a=='home' else ('ittifoqchi qal’aga chekindi' if ret_a=='ally' else 'qaytadigan xavfsiz qal’a topilmadi')
-    msg_b='o‘z qal’angizga qaytdi' if ret_b=='home' else ('ittifoqchi qal’aga chekindi' if ret_b=='ally' else 'qaytadigan xavfsiz qal’a topilmadi')
-    await _v109_safe_dm ( ctx,a['owner_id'],f"🔐 <b>MAXFIY HISOBOT</b>\n\nYo‘ldagi jangda {a['troops']-surv_a} askar yo‘qotildi. <b>{surv_a}</b> askar {msg_a}.",_v109_private_panel_markup ( cid,a['owner_id'] ) )
-    await _v109_safe_dm ( ctx,b['owner_id'],f"🔐 <b>MAXFIY HISOBOT</b>\n\nYo‘ldagi jangda {b['troops']-surv_b} askar yo‘qotildi. <b>{surv_b}</b> askar {msg_b}.",_v109_private_panel_markup ( cid,b['owner_id'] ) )
-
-
-async def _v109_finish_game ( ctx,cid,winner_team ) :
-    g=_v109_game ( cid)
-    if not g or g['status']=='finished':return
-    with _v109_conn ( ) as c:
-        c.execute ( 'BEGIN IMMEDIATE')
-        claim=c.execute ( 'UPDATE v109_war_games SET status="finished",winner_team=?,updated_at=? WHERE chat_id=? AND status="playing"', ( winner_team,_v109_now (  ) ,cid ) )
-        if claim.rowcount!=1:return
-        winners=[dict ( r) for r in c.execute ( 'SELECT * FROM v109_war_players WHERE chat_id=? AND team=?', ( cid,winner_team, )  ) ]
-        gold_each=V109_REWARD_GOLD_POOL//max ( 1,len ( winners )  ) ;dia_each=V109_REWARD_DIAMOND_POOL//max ( 1,len ( winners ) )
-        for p in winners:
-            c.execute ( 'INSERT OR IGNORE INTO v109_war_wallets ( user_id,updated_at) VALUES ( ?,? ) ', ( p['user_id'],_v109_now (  )  ) )
-            c.execute ( 'UPDATE v109_war_wallets SET gold=gold+?,diamonds=diamonds+?,updated_at=? WHERE user_id=?', ( gold_each,dia_each,_v109_now (  ) ,p['user_id'] ) )
-        c.execute ( 'UPDATE v109_war_moves SET status="cancelled" WHERE chat_id=? AND status="moving"', ( cid, ) )
-    unlocked=await _v109_unlock_group ( ctx,cid)
-    g=_v109_game ( cid ) ;name=_v109_team_name ( g,winner_team)
-    unlock_line='🔓 Guruh suhbatlari qayta ochildi.' if unlocked else '⚠️ Guruhni avtomatik ochib bo‘lmadi. Administrator “Guruhni ochish” tugmasini bossin.'
-    cap= ( "🏆 <b>URUSH YAKUNLANDI!</b>\n\n"
-         f"👑 <b>{_v109_safe ( name ) }</b> dushman qasrini egalladi va g‘alaba qozondi.\n\n"
-         f"💰 G‘oliblar xazinasi: {V109_REWARD_GOLD_POOL} oltin\n💎 Olmos xazinasi: {V109_REWARD_DIAMOND_POOL} olmos\n"
-         f"Mukofot g‘olib davlat a’zolari o‘rtasida teng taqsimlandi.\n\n{unlock_line}")
-    rows=[[_V109B ( '🔄 Yangi o‘yin',callback_data='v109:open' ) ,_V109B ( '🏆 Natijalar',callback_data=f'v109:results:{cid}' ) ]]
-    if not unlocked:rows.insert ( 0,[_V109B ( '🔓 Guruhni ochish',callback_data=f'v109:stop:{cid}' ) ])
-    await _v109_send_status_card ( ctx,cid,'victory','G‘ALABA',cap,_V109M ( rows ) ,pin=True,replace=True)
-    _v109_asyncio.create_task ( _v109_send_ai_scene ( ctx,cid,'victory',f'Victorious medieval Central Asian army of {name} entering a captured palace courtyard, banners raised, celebratory and non-graphic.',cap,critical=True ) )
-    for p in winners:
-        await _v109_safe_dm ( ctx,p['user_id'],f"🏆 <b>G‘ALABA MUKOFOTI</b>\n\n💰 +{gold_each} oltin\n💎 +{dia_each} olmos",_V109M ( [[_V109B ( '💰 Hamyonim',callback_data='v109:wallet' ) ]] ) )
-
-
-async def _v109_resolve_move ( ctx,move_id ) :
-    now=_v109_now (  ) ;draw_return='lost'
-    with _v109_conn ( ) as c:
-        c.execute ( 'BEGIN IMMEDIATE')
-        m=c.execute ( 'SELECT * FROM v109_war_moves WHERE id=? AND status="moving"', ( move_id, )  ) .fetchone ( )
-        if not m:return
-        game=c.execute ( 'SELECT status FROM v109_war_games WHERE chat_id=?', ( m['chat_id'], )  ) .fetchone ( )
-        if not game or game['status']!='playing':
-            c.execute ( 'UPDATE v109_war_moves SET status="cancelled" WHERE id=?', ( move_id, )  ) ;return
-        src=c.execute ( 'SELECT * FROM v109_war_forts WHERE id=? AND active=1', ( m['src_id'], )  ) .fetchone ( )
-        dst=c.execute ( 'SELECT * FROM v109_war_forts WHERE id=? AND active=1', ( m['dst_id'], )  ) .fetchone ( )
-        if not src or not dst:
-            c.execute ( 'UPDATE v109_war_moves SET status="cancelled" WHERE id=?', ( move_id, )  ) ;return
-        defender=_v109_realize_troops_row ( c,dst,now)
-        n=int ( m['troops'] ) ;before_team=int ( dst['team'] ) ;defender_owner=int ( dst['owner_id'])
-        attacker_name= ( c.execute ( 'SELECT name FROM v109_war_players WHERE chat_id=? AND user_id=?', ( m['chat_id'],m['owner_id'] )  ) .fetchone ( ) or {'name':'Qo‘mondon'} ) ['name']
-        defender_name= ( c.execute ( 'SELECT name FROM v109_war_players WHERE chat_id=? AND user_id=?', ( m['chat_id'],defender_owner )  ) .fetchone ( ) or {'name':'Qo‘mondon'} ) ['name']
-        result='';captured=False;winner_team=0;hero_kills=0;attacker_effective=n
-        if before_team==int ( m['team'] ) :
-            c.execute ( 'UPDATE v109_war_forts SET troops=?,updated_at=? WHERE id=?', ( defender+n,now,dst['id'] ) )
-            result='help'
-        else:
-            if dst['kind']=='palace':
-                hero_kills,hero=_v109_hero_power ( defender_owner)
-                hero_kills=min ( hero_kills,attacker_effective ) ;attacker_effective-=hero_kills
-            if attacker_effective>defender:
-                new_force=attacker_effective-defender
-                c.execute ( 'UPDATE v109_war_forts SET team=?,owner_id=?,troops=?,updated_at=? WHERE id=?', ( m['team'],m['owner_id'],new_force,now,dst['id'] ) )
-                captured=True;result='captured'
-                if dst['kind']=='palace':winner_team=int ( m['team'])
-            elif attacker_effective<defender:
-                c.execute ( 'UPDATE v109_war_forts SET troops=?,updated_at=? WHERE id=?', ( defender-attacker_effective,now,dst['id'] ) )
-                result='defended'
-            else:
-                defender_surv=defender//2;attacker_surv=attacker_effective//2
-                c.execute ( 'UPDATE v109_war_forts SET troops=?,updated_at=? WHERE id=?', ( defender_surv,now,dst['id'] ) )
-                draw_return=_v109_return_survivors ( c,m,attacker_surv,now)
-                result='draw'
-        c.execute ( 'UPDATE v109_war_moves SET status="done" WHERE id=?', ( move_id, ) )
-    cid=int ( m['chat_id'] ) ;uid=int ( m['owner_id'])
-    if result=='help':
-        cap= ( f"🛡 <b>MADAD LASHKARI YETIB KELDI</b>\n\n🎖 Qo‘mondon <b>{_v109_safe ( attacker_name ) }</b> ittifoqchi mudofaasiga yordam yetkazdi.\n"
-             "Qal’a safi mustahkamlandi. Aniq qo‘shin sonlari maxfiy saqlanmoqda.\n\n📜 <i>Veritas harbiy yilnomasi</i>")
-        await _v109_send_event_card ( ctx,cid,'help','MADAD YETIB KELDI',cap,ai_scene=f'Reinforcement column of medieval Central Asian soldiers commanded by {attacker_name} arriving at an allied fortress.')
-        await _v109_safe_dm ( ctx,uid,f"🔐 <b>HISOBOT</b>\n\n{n} askaringiz ittifoqchi qal’aga muvaffaqiyatli yetib bordi.",_v109_private_panel_markup ( cid,uid )  ) ;return
-    if result=='captured':
-        target_word='qasr' if dst['kind']=='palace' else 'qal’a'
-        cap= ( f"🏆 <b>{target_word.upper (  ) } ZABT ETILDI!</b>\n\n🎖 Qo‘mondon <b>{_v109_safe ( attacker_name ) }</b> boshchiligidagi lashkar dushman {target_word}ini egalladi.\n"
-             f"🛡 {_v109_safe ( defender_name ) } mudofaasi chekinishga majbur bo‘ldi.\n"
-             "🏳 Hudud g‘olib davlat tasarrufiga o‘tdi.\n\n📜 <i>Veritas harbiy yilnomasi</i>")
-        if hero_kills:cap+='\n🦸 Qasr qahramoni hujumning bir qismini qaytardi, ammo mudofaa baribir yorildi.'
-        await _v109_send_event_card ( ctx,cid,'battle',f'{target_word.upper (  ) } ZABT ETILDI',cap,ai_scene=f'Historic siege victory: commander {attacker_name} capturing a medieval Central Asian {target_word} defended by {defender_name}; banners changing, non-graphic.',critical=True)
-        await _v109_safe_dm ( ctx,uid,f"🔐 <b>G‘ALABA HISOBOTI</b>\n\n{target_word.title (  ) } qo‘lga olindi. Endi uni ham siz boshqarasiz.",_v109_private_panel_markup ( cid,uid ) )
-        await _v109_safe_dm ( ctx,defender_owner,f"🔐 <b>OGOHLANTIRISH</b>\n\nSiz boshqargan {target_word} qo‘ldan ketdi. Agar boshqa qal’angiz bo‘lsa, urushni davom ettirasiz.",_v109_private_panel_markup ( cid,defender_owner ) )
-        if winner_team:
-            await _v109_finish_game ( ctx,cid,winner_team ) ;return
-        try:await ctx.bot.send_photo ( cid,_v109_map_image ( cid ) ,caption='🗺 <b>XARITA YANGILANDI</b>\nQal’a yangi davlat tasarrufiga o‘tdi.',parse_mode='HTML',reply_markup=_v109_group_play_markup ( cid ) )
-        except Exception:pass
-        return
-    if result=='defended':
-        cap= ( f"🛡 <b>MUDOFAA SAQLANDI</b>\n\n🎖 Qo‘mondon <b>{_v109_safe ( attacker_name ) }</b> hujumga keldi, ammo <b>{_v109_safe ( defender_name ) }</b> boshchiligidagi mudofaa qal’ani saqlab qoldi.\n"
-             "Jang yakunlandi, hudud egasi o‘zgarmadi.\n\n📜 <i>Veritas harbiy yilnomasi</i>")
-        if hero_kills:cap+='\n🦸 Qasr qahramoni mudofaada muhim rol o‘ynadi.'
-        await _v109_send_event_card ( ctx,cid,'battle','MUDOFAA SAQLANDI',cap,ai_scene=f'Medieval Central Asian fortress defenders under {defender_name} repelling an attack led by {attacker_name}, non-graphic, arrows and cavalry.',critical=True)
-        await _v109_safe_dm ( ctx,uid,'🔐 <b>HUJUM HISOBOTI</b>\n\nHujum qaytarildi. Keyingi qarorni paneldan tanlang.',_v109_private_panel_markup ( cid,uid ) )
-        await _v109_safe_dm ( ctx,defender_owner,'🔐 <b>MUDOFAA HISOBOTI</b>\n\nQal’angiz hujumga bardosh berdi.',_v109_private_panel_markup ( cid,defender_owner )  ) ;return
-    cap= ( f"⚔️ <b>JANG DURANG BILAN TUGADI</b>\n\nQo‘mondon <b>{_v109_safe ( attacker_name ) }</b> va <b>{_v109_safe ( defender_name ) }</b> kuchlari teng keldi.\n"
-         "Har ikki tomon katta yo‘qotish ko‘rdi; hujumchilarning qolgan qismi o‘z tomonidagi xavfsiz qal’aga chekindi. Hudud egasi o‘zgarmadi.\n\n📜 <i>Veritas harbiy yilnomasi</i>")
-    await _v109_send_event_card ( ctx,cid,'battle','JANG DURANG',cap,ai_scene=f'Two evenly matched medieval Central Asian forces fighting near a fortress then disengaging, non-graphic.',critical=True)
-    where='o‘z qal’angizga qaytdi' if draw_return=='home' else ('ittifoqchi qal’aga chekindi' if draw_return=='ally' else 'qaytadigan xavfsiz qal’a topilmadi')
-    await _v109_safe_dm ( ctx,uid,f'🔐 <b>JANG HISOBOTI</b>\n\nKuchlar teng keldi. Tirik qolgan hujumchilar {where}.',_v109_private_panel_markup ( cid,uid ) )
-
-
-async def _v109_stop_game ( ctx,cid,uid ) :
-    if not await _v109_is_admin ( ctx,cid,uid ) :
-        return False,'⛔ Faqat administrator yoki Super Ega to‘xtata oladi.'
-    previous=None;need_finished_unlock=False;claim_err=None
-    try:
-        with _v109_conn ( ) as c:
-            c.execute ( 'BEGIN IMMEDIATE')
-            row=c.execute ( 'SELECT status,locked FROM v109_war_games WHERE chat_id=?', ( cid, )  ) .fetchone ( )
-            if row and row['status']=='finished' and int ( row['locked'] or 0 ) ==1:
-                need_finished_unlock=True;c.rollback ( )
-            elif not row or row['status'] not in ('lobby','election','launching','playing' ) :
-                claim_err='ℹ️ Faol o‘yin yo‘q.';c.rollback ( )
-            else:
-                previous=str ( row['status'])
-                cur=c.execute ( 'UPDATE v109_war_games SET status="stopping",updated_at=? WHERE chat_id=? AND status=?', ( _v109_now (  ) ,cid,previous ) )
-                if cur.rowcount!=1:
-                    claim_err='⏳ O‘yin holati boshqa administrator tomonidan o‘zgartirilmoqda.';c.rollback ( )
-    except Exception:
-        log.exception ( 'V10.9 stop claim failed')
-        return False,'⚠️ O‘yinni to‘xtatishni boshlashda xato bo‘ldi.'
-    if need_finished_unlock:
-        unlocked=await _v109_unlock_group ( ctx,cid)
-        return (True,'✅ Guruh qayta ochildi.') if unlocked else (False,'⛔ Guruhni ochib bo‘lmadi. Veritasning admin huquqlarini tekshiring.')
-    if claim_err:return False,claim_err
-
-    unlocked=await _v109_unlock_group ( ctx,cid)
-    if not unlocked:
-        try:
-            with _v109_conn ( ) as c:
-                c.execute ( 'UPDATE v109_war_games SET status=?,updated_at=? WHERE chat_id=? AND status="stopping"', ( previous,_v109_now (  ) ,cid ) )
-        except Exception:pass
-        return False,'⛔ Guruh yozishmalarini qayta ochib bo‘lmadi. Veritasning admin huquqlarini tekshiring.'
-
-    final_err=None
-    try:
-        with _v109_conn ( ) as c:
-            c.execute ( 'BEGIN IMMEDIATE')
-            cur=c.execute ( 'UPDATE v109_war_games SET status="stopped",updated_at=? WHERE chat_id=? AND status="stopping"', ( _v109_now (  ) ,cid ) )
-            if cur.rowcount!=1:
-                final_err='⏳ O‘yin holati allaqachon o‘zgartirilgan.';c.rollback ( )
-            else:
-                c.execute ( 'UPDATE v109_war_moves SET status="cancelled" WHERE chat_id=? AND status="moving"', ( cid, ) )
-    except Exception:
-        log.exception ( 'V10.9 stop finalize DB failed')
-        return False,'⚠️ Guruh ochildi, lekin o‘yin holatini bazada yakunlashda xato bo‘ldi.'
-    if final_err:return False,final_err
-    cap="🛑 <b>O‘YIN TO‘XTATILDI</b>\n\nAdministrator farmoni bilan urush yakunlandi.\n🔓 Guruh yozishmalari qayta ochildi.\n\nIstasangiz yangi lashkar yig‘ilishini boshlashingiz mumkin."
-    await _v109_send_status_card ( ctx,cid,'victory','URUSH TO‘XTATILDI',cap,_V109M ( [[_V109B ( '🔄 Yangi o‘yin',callback_data='v109:open' ) ,_V109B ( '📜 Qoidalar',callback_data='v109:rules' ) ]] ) ,pin=True,replace=True)
-    return True,'✅ O‘yin to‘xtatildi va guruh qayta ochildi.'
-
-async def _v109_wallet_message ( ctx,uid,chat_id=None ) :
-    w=_v109_wallet ( uid ) ;points=_v109_total_points ( uid ) ;spent=_v109_spent_points ( uid ) ;available=max ( 0,points-spent)
-    heroes=[]
-    with _v109_conn ( ) as c:heroes=[dict ( r) for r in c.execute ( 'SELECT * FROM v109_war_heroes WHERE user_id=? ORDER BY level DESC,id', ( uid, )  ) ]
-    text= ( "💰 <b>VERITAS HARBIY HAMYONI</b>\n\n"
-          f"🪙 Oltin: <b>{w['gold']}</b>\n💎 Olmos: <b>{w['diamonds']}</b>\n"
-          f"⭐ Jami faoliyat balli: <b>{points}</b>\n♻️ Almashtirishga qolgan ball: <b>{available}</b>\n"
-          f"🦸 Qahramonlar: <b>{len ( heroes ) }</b>\n\n"
-          f"Kurs: {V109_POINTS_FOR_5_DIAMONDS} ball = 5 olmos. Qahramon narxi: {V109_HERO_PRICE} olmos.")
-    rows=[[_V109B ( '💎 1000 ball → 5 olmos',callback_data='v109:exchange' ) ,_V109B ( '🦸 Qahramon sotib olish',callback_data='v109:buyhero' ) ],
-          [_V109B ( '🦸 Qahramonlarim',callback_data='v109:heroes' ) ]]
-    if chat_id:rows.append ( [_V109B ( '⬅️ Harbiy panel',callback_data=f'v109:panel:{chat_id}' ) ])
-    await ctx.bot.send_message ( uid,text,parse_mode='HTML',reply_markup=_V109M ( rows ) )
-
-
-async def _v109_exchange_points ( q,ctx ) :
-    uid=q.from_user.id;points=_v109_total_points ( uid ) ;now=_v109_now (  ) ;dia=0;err=None
-    try:
-        with _v109_conn ( ) as c:
-            c.execute ( 'BEGIN IMMEDIATE')
-            c.execute ( 'INSERT OR IGNORE INTO v109_war_exchange ( user_id,spent_points) VALUES ( ?,0 ) ', ( uid, ) )
-            spent=int ( c.execute ( 'SELECT spent_points FROM v109_war_exchange WHERE user_id=?', ( uid, )  ) .fetchone (  ) [0])
-            avail=max ( 0,int ( points ) -spent ) ;units=avail//V109_POINTS_FOR_5_DIAMONDS
-            if units<=0:
-                err=f'Kamida {V109_POINTS_FOR_5_DIAMONDS} bo‘sh ball kerak.';c.rollback ( )
-            else:
-                cost=units*V109_POINTS_FOR_5_DIAMONDS;dia=units*5
-                c.execute ( 'UPDATE v109_war_exchange SET spent_points=spent_points+? WHERE user_id=?', ( cost,uid ) )
-                c.execute ( 'INSERT OR IGNORE INTO v109_war_wallets ( user_id,updated_at) VALUES ( ?,? ) ', ( uid,now ) )
-                c.execute ( 'UPDATE v109_war_wallets SET diamonds=diamonds+?,updated_at=? WHERE user_id=?', ( dia,now,uid ) )
-    except Exception:
-        log.exception ( 'V10.9 exchange failed')
-        return await q.answer ( '⚠️ Ballni olmosga almashtirishda xato bo‘ldi.',show_alert=True)
-    if err:return await q.answer ( err,show_alert=True)
-    await q.answer ( f'✅ {dia} olmos qo‘shildi!',show_alert=True ) ;await _v109_wallet_message ( ctx,uid)
-
-async def _v109_buy_hero ( q,ctx ) :
-    uid=q.from_user.id;names=['Alp Bahodir','Qutlug‘ Bahodir','Temir Qalqon','Sahro Burguti','Ko‘k Nayza','Oq Qalqon','Jasur Alp']
-    name=_v109_random.choice ( names ) ;now=_v109_now (  ) ;ok=False
-    try:
-        with _v109_conn ( ) as c:
-            c.execute ( 'BEGIN IMMEDIATE')
-            c.execute ( 'INSERT OR IGNORE INTO v109_war_wallets ( user_id,updated_at) VALUES ( ?,? ) ', ( uid,now ) )
-            cur=c.execute ( 'UPDATE v109_war_wallets SET diamonds=diamonds-?,updated_at=? WHERE user_id=? AND diamonds>=?', ( V109_HERO_PRICE,now,uid,V109_HERO_PRICE ) )
-            if cur.rowcount==1:
-                c.execute ( 'INSERT INTO v109_war_heroes ( user_id,name,level,created_at) VALUES ( ?,?,1,? ) ', ( uid,name,now )  ) ;ok=True
-            else:c.rollback ( )
-    except Exception:
-        log.exception ( 'V10.9 buy hero failed')
-        return await q.answer ( '⚠️ Qahramon xaridida xato bo‘ldi.',show_alert=True)
-    if not ok:return await q.answer ( f'Qahramon uchun {V109_HERO_PRICE} olmos kerak.',show_alert=True)
-    await q.answer ( '🦸 Qahramon sotib olindi!',show_alert=True ) ;await _v109_show_heroes ( ctx,uid)
-
-
-async def _v109_show_heroes ( ctx,uid ) :
-    with _v109_conn ( ) as c:hs=[dict ( r) for r in c.execute ( 'SELECT * FROM v109_war_heroes WHERE user_id=? ORDER BY level DESC,id', ( uid, )  ) ]
-    if not hs:
-        return await ctx.bot.send_message ( uid,'🦸 Sizda hali qahramon yo‘q.\n\n100 olmosga doimiy qahramon sotib olishingiz mumkin.',reply_markup=_V109M ( [[_V109B ( '🦸 Qahramon sotib olish',callback_data='v109:buyhero' ) ]] ) )
-    text=['🦸 <b>QAHRAMONLARIM</b>','']
-    rows=[]
-    for h in hs:
-        power=2+h['level'];cost=V109_HERO_UPGRADE_BASE*h['level']
-        text.append ( f"• <b>{_v109_safe ( h['name'] ) }</b> — {h['level']}-daraja · qasr jangida {power} askar kuchi")
-        rows.append ( [_V109B ( f'⬆️ {h["name"][:20]} · {cost}💎',callback_data=f'v109:uph:{h["id"]}' ) ])
-    rows.append ( [_V109B ( '💰 Hamyonim',callback_data='v109:wallet' ) ])
-    await ctx.bot.send_message ( uid,'\n'.join ( text ) ,parse_mode='HTML',reply_markup=_V109M ( rows ) )
-
-
-async def _v109_upgrade_hero ( q,ctx,hid ) :
-    uid=q.from_user.id;err=None
-    try:
-        with _v109_conn ( ) as c:
-            c.execute ( 'BEGIN IMMEDIATE')
-            h=c.execute ( 'SELECT * FROM v109_war_heroes WHERE id=? AND user_id=?', ( hid,uid )  ) .fetchone ( )
-            if not h:
-                c.rollback (  ) ;err='Qahramon topilmadi.'
-            else:
-                cost=V109_HERO_UPGRADE_BASE*int ( h['level'])
-                cur=c.execute ( 'UPDATE v109_war_wallets SET diamonds=diamonds-?,updated_at=? WHERE user_id=? AND diamonds>=?', ( cost,_v109_now (  ) ,uid,cost ) )
-                if cur.rowcount!=1:
-                    c.rollback (  ) ;err=f'Kuchaytirish uchun {cost} olmos kerak.'
-                else:
-                    cur2=c.execute ( 'UPDATE v109_war_heroes SET level=level+1 WHERE id=? AND user_id=? AND level=?', ( hid,uid,h['level'] ) )
-                    if cur2.rowcount!=1:
-                        c.rollback (  ) ;err='Qahramon holati o‘zgardi. Qayta urinib ko‘ring.'
-    except Exception:
-        log.exception ( 'V10.9 upgrade hero failed' ) ;err='⚠️ Qahramonni kuchaytirishda xato bo‘ldi.'
-    if err:return await q.answer ( err,show_alert=True)
-    await q.answer ( '⬆️ Qahramon kuchaydi!',show_alert=True ) ;await _v109_show_heroes ( ctx,uid)
-
-
-async def _v109_show_mine ( q,ctx,cid ) :
-    uid=q.from_user.id;forts=_v109_own_forts ( cid,uid ) ;names=_v109_name_map ( cid ) ;g=_v109_game ( cid)
-    if not forts:return await q.answer ( 'Siz boshqarayotgan qal’a qolmagan.',show_alert=True)
-    lines=['🏰 <b>SIZNING MULKLARINGIZ</b>','']
-    for f in forts:
-        lines.append ( f"{'👑 Qasr' if f['kind']=='palace' else '🏰 Qal’a'} · {_v109_safe ( f['label'] ) } — <b>{_v109_visible_troops ( f ) }</b> askar")
-    await q.answer (  ) ;await _v109_safe_dm ( ctx,uid,'\n'.join ( lines ) ,_v109_private_panel_markup ( cid,uid ) )
-
-
-async def _v109_results ( q,ctx,cid ) :
-    g=_v109_game ( cid ) ;ps=_v109_players ( cid)
-    if not g:return await q.answer ( 'Natija topilmadi.',show_alert=True)
-    win=int ( g['winner_team'] or 0 ) ;name=_v109_team_name ( g,win) if win else 'G‘olib aniqlanmagan'
-    lines=[f"🏆 <b>{_v109_safe ( name ) }</b>",'']
-    for p in ps:
-        if p['team']==win:lines.append ( '🏅 '+_v109_safe ( p['name'] ) )
-    await q.answer (  ) ;await q.message.reply_text ( '\n'.join ( lines ) ,parse_mode='HTML')
-
-
-async def _v109_set_rename_state ( q,ctx,cid ) :
-    uid=q.from_user.id;p=_v109_player ( cid,uid)
-    if not p or not p['king']:return await q.answer ( 'Davlat nomini faqat podshoh o‘zgartiradi.',show_alert=True)
-    with _v109_conn ( ) as c:c.execute ( 'INSERT OR REPLACE INTO v109_war_input_state ( user_id,chat_id,mode,payload,updated_at) VALUES ( ?,?,?,?,? ) ', ( uid,cid,'rename','',_v109_now (  )  ) )
-    await q.answer (  ) ;await _v109_safe_dm ( ctx,uid,'🏳 <b>Davlat nomini yuboring</b>\n\n3–30 belgidan iborat nom yozing. Masalan: <i>Samarqand Saltanati</i>.')
-
-
-async def _v109_private_input ( update,ctx ) :
-    if update.effective_chat.type!='private' or not update.effective_message or not update.effective_message.text:return
-    uid=update.effective_user.id
-    with _v109_conn ( ) as c:st=c.execute ( 'SELECT * FROM v109_war_input_state WHERE user_id=?', ( uid, )  ) .fetchone ( )
-    if not st:return
-    txt=update.effective_message.text.strip (  ) ;cid=int ( st['chat_id'])
-    if st['mode']=='rename':
-        if not (3<=len ( txt ) <=30 ) :
-            await update.effective_message.reply_text ( 'Nom 3–30 belgi bo‘lsin. Qayta yozing.' ) ;raise _V109Stop
-        p=_v109_player ( cid,uid)
-        if not p or not p['king']:
-            with _v109_conn ( ) as c:c.execute ( 'DELETE FROM v109_war_input_state WHERE user_id=?', ( uid, ) )
-            raise _V109Stop
-        col='team1_name' if p['team']==1 else 'team2_name'
-        with _v109_conn ( ) as c:
-            c.execute ( f'UPDATE v109_war_games SET {col}=?,updated_at=? WHERE chat_id=?', ( txt,_v109_now (  ) ,cid )  ) ;c.execute ( 'DELETE FROM v109_war_input_state WHERE user_id=?', ( uid, ) )
-        await update.effective_message.reply_text ( f'🏳 Davlatingiz endi <b>{_v109_safe ( txt ) }</b> deb ataladi.',parse_mode='HTML',reply_markup=_v109_private_panel_markup ( cid,uid ) )
-        try:await ctx.bot.send_message ( cid,f'🏳 <b>YANGI FARMON</b>\nPodshoh o‘z davlatiga yangi nom berdi: <b>{_v109_safe ( txt ) }</b>.',parse_mode='HTML')
-        except Exception:pass
-        raise _V109Stop
-
-
-async def _v109_handle_gift_text ( update,ctx,text ) :
-    msg=update.effective_message;uid=update.effective_user.id
-    if not msg.reply_to_message or not msg.reply_to_message.from_user:return False
-    rid=msg.reply_to_message.from_user.id
-    if rid==uid:return False
-    norm=text.lower (  ) .replace ( '’',"'" ) .replace ( '‘',"'")
-    m=_v109_re.search ( r' ( \d{1,6} ) \s* ( ?:ta\s* ) ? ( ?:olmos|diamond ) ',norm)
-    if m and ('sovg' in norm or 'ber' in norm or 'yubor' in norm ) :
-        amount=int ( m.group ( 1 )  ) ;w=_v109_wallet ( uid)
-        if amount<=0 or int ( w['diamonds'] ) <amount:
-            await msg.reply_text ( '💎 Balansingizda buncha olmos yo‘q.' ) ;return True
-        gift_ok=False
-        with _v109_conn ( ) as c:
-            c.execute ( 'BEGIN IMMEDIATE' ) ;c.execute ( 'INSERT OR IGNORE INTO v109_war_wallets ( user_id,updated_at) VALUES ( ?,? ) ', ( rid,_v109_now (  )  ) )
-            cur=c.execute ( 'UPDATE v109_war_wallets SET diamonds=diamonds-?,updated_at=? WHERE user_id=? AND diamonds>=?', ( amount,_v109_now (  ) ,uid,amount ) )
-            if cur.rowcount==1:
-                c.execute ( 'UPDATE v109_war_wallets SET diamonds=diamonds+?,updated_at=? WHERE user_id=?', ( amount,_v109_now (  ) ,rid )  ) ;c.execute ( 'INSERT INTO v109_war_gifts ( sender_id,receiver_id,kind,amount,created_at) VALUES ( ?,?,?,?,? ) ', ( uid,rid,'diamond',amount,_v109_now (  )  )  ) ;gift_ok=True
-            else:c.rollback ( )
-        if not gift_ok:
-            await msg.reply_text ( '💎 Balansingiz o‘zgargan. Buncha olmos qolmagan.' ) ;return True
-        await msg.reply_text ( f'🎁 <b>SOVG‘A YUBORILDI</b>\n\n💎 {amount} olmos {_v109_safe ( msg.reply_to_message.from_user.full_name ) } hisobiga o‘tkazildi.',parse_mode='HTML' ) ;return True
-    if ('qahramon' in norm or 'geroy' in norm) and ('sovg' in norm or 'ber' in norm or 'yubor' in norm ) :
-        with _v109_conn ( ) as c:hs=[dict ( r) for r in c.execute ( 'SELECT * FROM v109_war_heroes WHERE user_id=? ORDER BY level DESC,id', ( uid, )  ) ]
-        if not hs:
-            await msg.reply_text ( '🦸 Sizda sovg‘a qiladigan qahramon yo‘q.' ) ;return True
-        if len ( hs ) ==1:
-            h=hs[0]
-            moved=False
-            with _v109_conn ( ) as c:
-                c.execute ( 'BEGIN IMMEDIATE' ) ;cur=c.execute ( 'UPDATE v109_war_heroes SET user_id=? WHERE id=? AND user_id=?', ( rid,h['id'],uid ) )
-                if cur.rowcount==1:
-                    c.execute ( 'INSERT INTO v109_war_gifts ( sender_id,receiver_id,kind,hero_id,created_at) VALUES ( ?,?,?,?,? ) ', ( uid,rid,'hero',h['id'],_v109_now (  )  )  ) ;moved=True
-                else:c.rollback ( )
-            if not moved:
-                await msg.reply_text ( '🦸 Qahramon holati o‘zgargan. Qayta urinib ko‘ring.' ) ;return True
-            await msg.reply_text ( f'🎁 <b>{_v109_safe ( h["name"] ) }</b> barcha darajasi bilan {_v109_safe ( msg.reply_to_message.from_user.full_name ) }ga sovg‘a qilindi.',parse_mode='HTML' ) ;return True
-        rows=[[_V109B ( f'🎁 {h["name"][:24]} · Lv{h["level"]}',callback_data=f'v109:gifth:{h["id"]}:{rid}' ) ] for h in hs[:10]]
-        await _v109_safe_dm ( ctx,uid,f'🎁 {_v109_safe ( msg.reply_to_message.from_user.full_name ) }ga qaysi qahramonni sovg‘a qilasiz?',_V109M ( rows )  ) ;return True
-    return False
-
-
-async def _v109_gift_hero_callback ( q,ctx,hid,rid ) :
-    uid=q.from_user.id;moved=False
-    try:
-        with _v109_conn ( ) as c:
-            c.execute ( 'BEGIN IMMEDIATE')
-            cur=c.execute ( 'UPDATE v109_war_heroes SET user_id=? WHERE id=? AND user_id=?', ( rid,hid,uid ) )
-            if cur.rowcount==1:
-                c.execute ( 'INSERT INTO v109_war_gifts ( sender_id,receiver_id,kind,hero_id,created_at) VALUES ( ?,?,?,?,? ) ', ( uid,rid,'hero',hid,_v109_now (  )  )  ) ;moved=True
-            else:c.rollback ( )
-    except Exception:
-        log.exception ( 'V10.9 hero gift failed')
-    if not moved:return await q.answer ( 'Qahramon topilmadi yoki allaqachon yuborilgan.',show_alert=True)
-    await q.answer ( '🎁 Qahramon sovg‘a qilindi!',show_alert=True)
-
-
-async def _v109_call_all ( update,ctx ) :
-    cid=update.effective_chat.id;uid=update.effective_user.id
-    if not await _v109_is_admin ( ctx,cid,uid ) :
-        await update.effective_message.reply_text ( '⛔ Hammani faqat administrator yoki Super Ega chaqira oladi.' ) ;return
-    rows=[]
-    try:
-        with _v109_conn ( ) as c:
-            rows=c.execute ( 'SELECT m.user_id,COALESCE ( NULLIF ( u.first_name,"" ) ,NULLIF ( u.username,"" ) ,"A’zo") AS display FROM members m LEFT JOIN users u ON u.user_id=m.user_id WHERE m.chat_id=? ORDER BY m.messages DESC LIMIT 200', ( cid, )  ) .fetchall ( )
-    except Exception:pass
-    if not rows:
-        rows=[{'user_id':p['user_id'],'display':p['name']} for p in _v109_players ( cid ) ]
-    chunks=[];cur=[];length=0
-    for r in rows:
-        mention=f'<a href="tg://user?id={int ( r["user_id"] ) }">{_v109_safe ( r["display"] ) }</a>'
-        if length+len ( mention ) >3300:
-            chunks.append ( ' • '.join ( cur )  ) ;cur=[];length=0
-        cur.append ( mention ) ;length+=len ( mention ) +3
-    if cur:chunks.append ( ' • '.join ( cur ) )
-    for i,ch in enumerate ( chunks[:5] ) :
-        await ctx.bot.send_message ( cid, ( '📢 <b>VERITAS — UMUMIY CHAQIRUV</b>\n\n' if i==0 else '' ) +ch,parse_mode='HTML',disable_web_page_preview=True)
-
-
-async def _v109_group_router ( update,ctx ) :
-    msg=update.effective_message;chat=update.effective_chat;u=update.effective_user
-    if not msg or not chat or chat.type not in ('group','supergroup') or not u or u.is_bot:return
-    text= ( msg.text or msg.caption or '' ) .strip (  ) ;norm=text.lower (  ) .replace ( '’',"'" ) .replace ( '‘',"'")
-    # Natural entry points — no slash command required.
-    if text and 'veritas' in norm and ('hammani chaqir' in norm or 'hammani chaq' in norm ) :
-        await _v109_call_all ( update,ctx ) ;raise _V109Stop
-    if text and 'veritas' in norm and ( ( 'qal' in norm and 'urush' in norm and ('och' in norm or 'boshl' in norm ) ) or 'o\'yinlar' in norm or 'oyinlar' in norm ) :
-        if not await _v109_is_admin ( ctx,chat.id,u.id ) :
-            await msg.reply_text ( '⛔ Qal’alar urushini faqat guruh administratori ochadi.')
-            raise _V109Stop
-        g=_v109_game ( chat.id)
-        if g and g['status'] in ('election','playing' ) :
-            await msg.reply_text ( '⚔️ Bu guruhda Qal’alar urushi allaqachon davom etmoqda.')
-            raise _V109Stop
-        if g and g['status']=='launching':
-            age=max ( 0,_v109_now (  ) -int ( g['updated_at'] or 0 ) )
-            if age<=90:
-                await msg.reply_text ( '⏳ O‘yin ishga tushirilmoqda. Bir necha soniya kuting.' ) ;raise _V109Stop
-            if not await _v109_prepare_reset ( ctx,chat.id ) :
-                await msg.reply_text ( '⛔ Eski sessiyani tiklash uchun guruhni ochib bo‘lmadi.' ) ;raise _V109Stop
-        elif g and g['status']=='stopping':
-            await msg.reply_text ( '⏳ O‘yin hozir to‘xtatilmoqda. Bir necha soniya kuting.' ) ;raise _V109Stop
-        elif not g:
-            _v109_reset_game ( chat.id)
-        elif g['status'] in ('finished','stopped' ) :
-            if not await _v109_prepare_reset ( ctx,chat.id ) :
-                await msg.reply_text ( '⛔ Avval guruhni qayta ochish kerak.' ) ;raise _V109Stop
-        card=await _v109_refresh_lobby ( ctx,chat.id,True)
-        if not card:await msg.reply_text ( '⛔ Lobby yuborilmadi. Veritasning guruhdagi yuborish huquqlarini tekshiring.')
-        raise _V109Stop
-    if text and 'veritas' in norm and _v109_re.search ( r' ( o.?yin|urush|jang ) .{0,25} ( to.?xtat|tugat|bekor ) ',norm ) :
-        ok,reply=await _v109_stop_game ( ctx,chat.id,u.id)
-        try:await msg.delete ( )
-        except Exception:pass
-        if not ok:
-            try:await ctx.bot.send_message ( chat.id,reply)
-            except Exception:pass
-        raise _V109Stop
-    if text and ('olmos' in norm or 'qahramon' in norm or 'geroy' in norm) and ('sovg' in norm or 'ber' in norm or 'yubor' in norm ) :
-        if await _v109_handle_gift_text ( update,ctx,text ) :raise _V109Stop
-    g=_v109_game ( chat.id)
-    if not g:return
-    if g['status']=='lobby':
-        # Keep the join card at the bottom when ordinary chat scrolls it upward.
-        await _v109_refresh_lobby ( ctx,chat.id,False)
-        return
-    locked_battle= ( g['status'] in ('election','launching','playing' ) ) or (g['status']=='stopping' and int ( g['locked'] or 0 ) ==1)
-    if locked_battle:
-        # Group is a clean battlefield feed. Once stopping has already unlocked the group, do not delete new chat messages.
-        try:await msg.delete ( )
-        except Exception:pass
-        raise _V109Stop
-
-
-async def _v109_random_event ( ctx,cid ) :
-    g=_v109_game ( cid)
-    if not g or g['status']!='playing':return
-    now=_v109_now ( )
-    with _v109_conn ( ) as c:
-        c.execute ( 'BEGIN IMMEDIATE')
-        still=c.execute ( 'SELECT status FROM v109_war_games WHERE chat_id=?', ( cid, )  ) .fetchone ( )
-        if not still or still['status']!='playing':
-            c.rollback (  ) ;return
-        open_ev=c.execute ( 'SELECT 1 FROM v109_war_events WHERE chat_id=? AND status="open" AND expires_at>?', ( cid,now )  ) .fetchone ( )
-        if open_ev:
-            c.rollback (  ) ;return
-        c.execute ( 'UPDATE v109_war_events SET status="expired" WHERE chat_id=? AND status="open" AND expires_at<=?', ( cid,now ) )
-        kind=_v109_random.choice ( ['caravan','scout','banner'])
-        cur=c.execute ( 'INSERT INTO v109_war_events ( chat_id,kind,status,created_at,expires_at) VALUES ( ?,?,"open",?,? ) ', ( cid,kind,now,now+45 )  ) ;eid=cur.lastrowid
-        c.execute ( 'UPDATE v109_war_games SET next_event_at=? WHERE chat_id=?', ( now+_v109_random.randint ( V109_EVENT_MIN_SECONDS,V109_EVENT_MAX_SECONDS ) ,cid ) )
-    if kind=='caravan':title='💰 KARVON KO‘RINDI';body='Sahro yo‘lida boy karvon ko‘rindi. Birinchi bo‘lib tugmani bosgan faol qo‘mondon 20 oltin oladi.'
-    elif kind=='scout':title='🕵️ RAZVEDKACHI XABARI';body='Chegara yaqinida razvedkachi qaytdi. Birinchi javob bergan qo‘mondon shaxsiy harbiy maslahat oladi.'
-    else:title='🚩 YO‘QOLGAN TUG‘';body='Jang maydonida qadimiy tug‘ topildi. Birinchi topgan qo‘mondon 1 olmos bilan mukofotlanadi.'
-    markup=_V109M ( [[_V109B ( '⚡ Men olaman!',callback_data=f'v109:event:{cid}:{eid}' ) ]])
-    await _v109_send_event_card ( ctx,cid,'event','KUTILMAGAN VOQEA',f"✦ <b>{title}</b>\n\n{body}\n\n⏳ 45 soniya ichida qaror qiling.",markup,ai_scene=body)
-
-
-async def _v109_claim_event ( q,ctx,cid,eid ) :
-    uid=q.from_user.id;p=_v109_player ( cid,uid ) ;g=_v109_game ( cid)
-    if not p or not g or g['status']!='playing':return await q.answer ( 'Siz bu urushda qatnashmaysiz.',show_alert=True)
-    now=_v109_now (  ) ;err=None;ev=None;reward=''
-    try:
-        with _v109_conn ( ) as c:
-            c.execute ( 'BEGIN IMMEDIATE' ) ;ev=c.execute ( 'SELECT * FROM v109_war_events WHERE id=? AND chat_id=?', ( eid,cid )  ) .fetchone ( )
-            if not ev or ev['status']!='open' or ev['expires_at']<now:
-                err='Bu voqea yakunlangan.';c.rollback ( )
-            else:
-                c.execute ( 'UPDATE v109_war_events SET status="claimed",winner_id=? WHERE id=?', ( uid,eid )  ) ;c.execute ( 'INSERT OR IGNORE INTO v109_war_wallets ( user_id,updated_at) VALUES ( ?,? ) ', ( uid,now ) )
-                if ev['kind']=='banner':c.execute ( 'UPDATE v109_war_wallets SET diamonds=diamonds+1,updated_at=? WHERE user_id=?', ( now,uid )  ) ;reward='💎 +1 olmos'
-                elif ev['kind']=='caravan':c.execute ( 'UPDATE v109_war_wallets SET gold=gold+20,updated_at=? WHERE user_id=?', ( now,uid )  ) ;reward='🪙 +20 oltin'
-                else:reward='🕵️ Maxfiy maslahat'
-    except Exception:
-        log.exception ( 'V10.9 event claim failed')
-        return await q.answer ( '⚠️ Voqea mukofotini olishda xato bo‘ldi.',show_alert=True)
-    if err:return await q.answer ( err,show_alert=True)
-    await q.answer ( '✅ Siz ulgurib qoldingiz!',show_alert=True)
-    try:await q.edit_message_reply_markup ( reply_markup=None)
-    except Exception:pass
-    if ev['kind']=='scout':
-        enemies=_v109_enemy_forts ( cid,p['team'])
-        castles=[f for f in enemies if f['kind']=='castle'] or list ( enemies)
-        if castles:
-            weakest=min ( castles,key=lambda f:_v109_visible_troops ( f )  ) ;names=_v109_name_map ( cid)
-            await _v109_safe_dm ( ctx,uid,f"🕵️ <b>RAZVEDKA MAXFIY XABARI</b>\n\nDushman safida nisbatan zaif ko‘ringan nuqta: <b>{_v109_safe ( names.get ( weakest['owner_id'],'Noma’lum' )  ) }</b> boshqarayotgan qal’a.\n\nAniq askar soni oshkor qilinmaydi.",_v109_private_panel_markup ( cid,uid ) )
-    else:
-        await _v109_safe_dm ( ctx,uid,f'🎁 Voqea mukofoti: <b>{reward}</b>',_v109_private_panel_markup ( cid,uid ) )
-    await ctx.bot.send_message ( cid,f"✦ <b>VOQEA YAKUNLANDI</b>\nQo‘mondon <b>{_v109_safe ( p['name'] ) }</b> birinchi bo‘lib harakat qildi.",parse_mode='HTML')
-
-async def _v109_nudge_players ( ctx,cid ) :
-    now=_v109_now (  ) ;key=f'v109_nudge_{cid}';last=int ( ctx.application.bot_data.get ( key,0) or 0)
-    if now-last<60:return
-    ctx.application.bot_data[key]=now
-    for p in _v109_players ( cid ) :
-        if now-int ( p['last_action'] or 0 ) >90:
-            await _v109_safe_dm ( ctx,p['user_id'],
-                "📯 <b>HARBIY KENGASH SIZNI KUTMOQDA</b>\n\nJang maydonida vaziyat o‘zgarib bormoqda. Hujum qilasizmi, ittifoqchiga yordam berasizmi yoki mudofaada qolasizmi?",
-                _v109_private_panel_markup ( cid,p['user_id'] ) )
-            with _v109_conn ( ) as c:c.execute ( 'UPDATE v109_war_players SET last_action=? WHERE chat_id=? AND user_id=?', ( now,cid,p['user_id'] ) )
-
-
-async def _v109_tick ( ctx ) :
-    now=_v109_now ( )
-    # Crash-recovery: launching/stopping holatlari abadiy qotib qolmasin.
-    cutoff=now-120
-    with _v109_conn ( ) as c:
-        stale_launch=[r['chat_id'] for r in c.execute ( 'SELECT chat_id FROM v109_war_games WHERE status="launching" AND updated_at<=?', ( cutoff, )  ) ]
-        stale_stop=[dict ( r) for r in c.execute ( 'SELECT chat_id,locked FROM v109_war_games WHERE status="stopping" AND updated_at<=?', ( cutoff, )  ) ]
-    for cid in stale_launch:
-        try:
-            if await _v109_prepare_reset ( ctx,cid ) :
-                await _v109_refresh_lobby ( ctx,cid,True)
-                try:await ctx.bot.send_message ( cid,'♻️ Yarim qolgan Start sessiyasi avtomatik tiklandi. Lashkarni qayta yig‘ib Start bosing.')
-                except Exception:pass
-        except Exception:
-            log.exception ( 'V10.9 stale launching recovery failed for %s',cid)
-    for row in stale_stop:
-        cid=int ( row['chat_id'])
-        try:
-            ok=True
-            if int ( row.get ( 'locked') or 0 ) :
-                ok=await _v109_unlock_group ( ctx,cid)
-            if ok:
-                with _v109_conn ( ) as c:
-                    c.execute ( 'BEGIN IMMEDIATE')
-                    cur=c.execute ( 'UPDATE v109_war_games SET status="stopped",updated_at=? WHERE chat_id=? AND status="stopping"', ( now,cid ) )
-                    if cur.rowcount:
-                        c.execute ( 'UPDATE v109_war_moves SET status="cancelled" WHERE chat_id=? AND status="moving"', ( cid, ) )
-                try:await ctx.bot.send_message ( cid,'♻️ Qotib qolgan to‘xtatish jarayoni avtomatik yakunlandi. Guruh qayta ishlashga tayyor.')
-                except Exception:pass
-        except Exception:
-            log.exception ( 'V10.9 stale stopping recovery failed for %s',cid)
-
-    # auto-finalize elections
-    with _v109_conn ( ) as c:
-        elections=[r['chat_id'] for r in c.execute ( 'SELECT chat_id FROM v109_war_games WHERE status="election" AND election_deadline<=?', ( now, )  ) ]
-    for cid in elections:
-        try:await _v109_finalize_election ( ctx,cid)
-        except Exception:log.exception ( 'V10.9 finalize election failed')
-    # due movements
-    with _v109_conn ( ) as c:
-        due=[r['id'] for r in c.execute ( 'SELECT m.id FROM v109_war_moves m JOIN v109_war_games g ON g.chat_id=m.chat_id WHERE m.status="moving" AND g.status="playing" AND m.arrival_at<=? ORDER BY m.arrival_at,m.id LIMIT 100', ( now, )  ) ]
-    for mid in due:
-        try:await _v109_resolve_move ( ctx,mid)
-        except Exception:log.exception ( 'V10.9 resolve move failed')
-    # random events + private nudges
-    with _v109_conn ( ) as c:
-        games=[dict ( r) for r in c.execute ( 'SELECT * FROM v109_war_games WHERE status="playing"' ) ]
-    for g in games:
-        cid=g['chat_id']
-        if int ( g['next_event_at'] or 0 ) <=now:
-            try:await _v109_random_event ( ctx,cid)
-            except Exception:log.exception ( 'V10.9 random event failed')
-        try:await _v109_nudge_players ( ctx,cid)
-        except Exception:pass
-
-async def _v109_lobby_refresh_job ( ctx ) :
-    with _v109_conn ( ) as c:cids=[r['chat_id'] for r in c.execute ( 'SELECT chat_id FROM v109_war_games WHERE status="lobby"' ) ]
-    for cid in cids:
-        try:await _v109_refresh_lobby ( ctx,cid,False)
-        except Exception:pass
-
-
-async def _v109_callback ( update,ctx ) :
-    q=update.callback_query;d=q.data or '';parts=d.split ( ':' ) ;act=parts[1] if len ( parts ) >1 else ''
-    try:
-        if act=='open':return await _v109_open_lobby ( update,ctx)
-        if act=='pstartmenu':return await _v109_private_start_menu ( q,ctx)
-        if act=='pstopmenu':return await _v109_private_stop_menu ( q,ctx)
-        if act=='pstart':return await _v109_private_start_group ( q,ctx,int ( parts[2] ) )
-        if act=='pstop':return await _v109_private_stop_group ( q,ctx,int ( parts[2] ) )
-        if act=='join':return await _v109_join ( q,ctx)
-        if act=='leave':return await _v109_leave ( q,ctx)
-        if act=='start':return await _v109_start_election ( q,ctx)
-        if act=='rules':
-            await q.answer (  ) ;return await q.message.reply_text ( V109_RULES,parse_mode='HTML',reply_markup=_V109M ( [[_V109B ( '⬅️ O‘yinlar',callback_data='games:menu' ) ]] ) )
-        if act=='players':
-            cid=q.message.chat_id;ps=_v109_players ( cid ) ;await q.answer (  ) ;return await q.message.reply_text ( '👥 <b>SAFDAGILAR</b>\n\n'+'\n'.join ( '• '+_v109_safe ( p['name']) for p in ps ) ,parse_mode='HTML')
-        if act=='vote':return await _v109_cast_vote ( q,ctx,int ( parts[2] ) ,int ( parts[3] ) )
-        if act=='panel':return await _v109_show_panel ( q,ctx,int ( parts[2] ) )
-        if act in ('attack','help','palhelp' ) :return await _v109_choose_source ( q,ctx,int ( parts[2] ) ,act)
-        if act=='src':return await _v109_choose_target ( q,ctx,int ( parts[2] ) ,parts[3],int ( parts[4] ) )
-        if act=='dst':return await _v109_choose_amount ( q,ctx,int ( parts[2] ) ,parts[3],int ( parts[4] ) ,int ( parts[5] ) )
-        if act=='go':return await _v109_schedule_move ( q,ctx,int ( parts[2] ) ,parts[3],int ( parts[4] ) ,int ( parts[5] ) ,int ( parts[6] ) )
-        if act=='stay':
-            cid=int ( parts[2] ) ;p=_v109_player ( cid,q.from_user.id)
-            if not p:return await q.answer ( 'Siz bu urushda emassiz.',show_alert=True)
-            with _v109_conn ( ) as c:c.execute ( 'UPDATE v109_war_players SET last_action=? WHERE chat_id=? AND user_id=?', ( _v109_now (  ) ,cid,q.from_user.id ) )
-            await q.answer ( '🧱 Mudofaada qoldingiz.',show_alert=True ) ;return await _v109_safe_dm ( ctx,q.from_user.id,'🧱 <b>MUDOFAA HOLATI</b>\n\nQo‘shinlaringiz hozircha o‘z joyida qoladi.',_v109_private_panel_markup ( cid,q.from_user.id ) )
-        if act=='mine':return await _v109_show_mine ( q,ctx,int ( parts[2] ) )
-        if act=='gmap':
-            cid=int ( parts[2] ) ;await q.answer (  ) ;return await ctx.bot.send_photo ( q.message.chat_id,_v109_map_image ( cid ) ,caption='🗺 <b>UMUMIY JANG XARITASI</b>\nAskar sonlari harbiy sir.',parse_mode='HTML',reply_markup=_v109_group_play_markup ( cid ) )
-        if act=='pmap':
-            cid=int ( parts[2] ) ;await q.answer (  ) ;return await ctx.bot.send_photo ( q.from_user.id,_v109_map_image ( cid,q.from_user.id ) ,caption='🔐 <b>MAXFIY XARITA</b>\nFaqat siz boshqarayotgan mulklarda askar soni ko‘rsatiladi.',parse_mode='HTML',reply_markup=_v109_private_panel_markup ( cid,q.from_user.id ) )
-        if act=='stop':
-            cid=int ( parts[2])
-            try:await q.answer ( '⏳ O‘yin holati tekshirilmoqda...')
-            except Exception:pass
-            ok,text=await _v109_stop_game ( ctx,cid,q.from_user.id)
-            if not ok:
-                try:return await q.message.reply_text ( text)
-                except Exception:return None
-            return None
-        if act=='wallet':
-            await q.answer (  ) ;return await _v109_wallet_message ( ctx,q.from_user.id)
-        if act=='exchange':return await _v109_exchange_points ( q,ctx)
-        if act=='buyhero':return await _v109_buy_hero ( q,ctx)
-        if act=='heroes':
-            await q.answer (  ) ;return await _v109_show_heroes ( ctx,q.from_user.id)
-        if act=='uph':return await _v109_upgrade_hero ( q,ctx,int ( parts[2] ) )
-        if act=='gifth':return await _v109_gift_hero_callback ( q,ctx,int ( parts[2] ) ,int ( parts[3] ) )
-        if act=='rename':return await _v109_set_rename_state ( q,ctx,int ( parts[2] ) )
-        if act=='event':return await _v109_claim_event ( q,ctx,int ( parts[2] ) ,int ( parts[3] ) )
-        if act=='results':return await _v109_results ( q,ctx,int ( parts[2] ) )
-        if act=='home':
-            await q.answer (  ) ;games=[]
-            with _v109_conn ( ) as c:games=[dict ( r) for r in c.execute ( 'SELECT g.chat_id,g.status,g.team1_name,g.team2_name FROM v109_war_games g JOIN v109_war_players p ON p.chat_id=g.chat_id WHERE p.user_id=? AND g.status IN ("election","launching","playing" ) ', ( q.from_user.id, )  ) ]
-            rows=[[_V109B ( '▶️ O‘yinni boshlash',callback_data='v109:pstartmenu' ) ,_V109B ( '⛔ O‘yinni to‘xtatish',callback_data='v109:pstopmenu' ) ]]
-            rows += [[_V109B ( f"⚔️ {g['team1_name'][:12]} vs {g['team2_name'][:12]}",callback_data=f'v109:panel:{g["chat_id"]}' ) ] for g in games[:10]]
-            rows += [[_V109B ( '💰 Hamyonim',callback_data='v109:wallet' ) ,_V109B ( '🦸 Qahramonlar',callback_data='v109:heroes' ) ],[_V109B ( '📜 Qoidalar',callback_data='v109:rules' ) ]]
-            return await q.message.reply_text ( '⚔️ <b>QAL’ALAR URUSHI</b>\n\nShaxsiy boshqaruv: o‘yinni guruhda ochish/to‘xtatish va faol harbiy kabinetlar.',parse_mode='HTML',reply_markup=_V109M ( rows ) )
-        await q.answer ( 'Noma’lum tugma.',show_alert=True)
-    except Exception as exc:
-        log.exception ( 'V10.9 callback failed: %s',d)
-        # Ko‘p handlerlar callbackni boshida allaqachon answer qiladi.
-        # Xatoda ikkinchi q.answer ( ) yuborish Telegramda “query id is invalid” chiqarishi mumkin.
-        try:
-            if q.message:
-                await q.message.reply_text ( '⚠️ Tugmani bajarishda xato yuz berdi. Qayta urinib ko‘ring.')
-        except Exception:
-            pass
-
-
-def v109_war_register ( app,db_path ) :
-    _v109_init_db ( )
-    app.add_handler ( _V109Callback ( _v109_callback,pattern=r'^v109:' ) ,group=-40)
-    app.add_handler ( _V109MessageHandler ( _v109_filters.ChatType.PRIVATE & _v109_filters.TEXT & ~_v109_filters.COMMAND,_v109_private_input ) ,group=-39)
-    app.add_handler ( _V109MessageHandler ( _v109_filters.ChatType.GROUPS & ~_v109_filters.StatusUpdate.ALL,_v109_group_router ) ,group=-39)
-    if app.job_queue:
-        app.job_queue.run_repeating ( _v109_tick,2,first=2)
-        app.job_queue.run_repeating ( _v109_lobby_refresh_job,90,first=15)
-    else:
-        log.warning ( 'V10.9 Qal’alar urushi: JobQueue yo‘q — avtomatik jang/taymerlar ishlamaydi.')
 
 # ================================================================
 # V10.8 — Vasatiya: verified excerpts from uploaded PDF text
@@ -9460,9 +7573,7 @@ def main (  ) :
     i18n_init_db ( )
     v10_init_db ( )
     app=Application.builder (  ) .bot ( VeritasV10Bot ( token=TOKEN )  ) .build ( )
-    v109_war_register ( app, DB_PATH)
     excerpt_register ( app)
-    app.add_handler ( CallbackQueryHandler ( veritas_games_callback,pattern=r"^games:" ) ,group=-20)
     app.add_handler ( CommandHandler ( "start",v9_start_selector ) )
     app.add_handler ( CommandHandler ( "help",cmd_help ) )
     app.add_handler ( CommandHandler ( "id",cmd_id ) )
@@ -9500,7 +7611,7 @@ def main (  ) :
         app.job_queue.run_repeating ( v10_task_job,30,first=12)
         app.job_queue.run_repeating ( v10_autopost_job,60,first=20)
     app.add_error_handler ( v10_error_handler)
-    log.info ( "VERITAS v10.9.5 starting")
+    log.info ( "VERITAS v10.10 stable starting")
     app.run_polling ( allowed_updates=Update.ALL_TYPES)
 
 if __name__=="__main__":
