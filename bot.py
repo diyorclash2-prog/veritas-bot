@@ -4422,7 +4422,14 @@ async def callback ( update,ctx ) :
         return await v9_callback ( update,ctx)
 
     ensure_user ( u)
-    await q.answer ( )
+    try:
+        await q.answer ( )
+    except TelegramError as _cb_answer_exc:
+        _cb_answer_text=str ( _cb_answer_exc)
+        if ('Query is too old' not in _cb_answer_text and
+            'query id is invalid' not in _cb_answer_text.lower ( ) and
+            'response timeout expired' not in _cb_answer_text.lower (  )  ) :
+            raise
 
     if d=="owner:message":
         if q.message.chat.type != "private":
@@ -7358,7 +7365,13 @@ async def new_members ( update,ctx ) :
 _v10_prev_callback=callback
 async def callback ( update,ctx ) :
     data= ( update.callback_query.data or '') if update.callback_query else ''
-    if data.startswith ( 'v10:' ) :return await v10_callback ( update,ctx)
+    # These prefixes have their own earlier CallbackQueryHandlers. Letting them
+    # continue into the legacy callback chain causes a second q.answer (  ) , which
+    # Telegram rejects as "Query is too old / query id is invalid".
+    if data.startswith (  ( 'v109:','games:','excerpt:' )  ) :
+        return
+    if data.startswith ( 'v10:' ) :
+        return await v10_callback ( update,ctx)
     return await _v10_prev_callback ( update,ctx)
 
 
@@ -7386,6 +7399,10 @@ async def v10_error_handler ( update,ctx ) :
 
 
 # ================================================================
+# VERITAS V10.9.2 — QAL'ALAR URUSHI (PRIVATE START/STOP + CALLBACK RECOVERY)
+# Adds private-cabinet Start/Stop controls and keeps callback/stale-state recovery.
+# Based on V10.9 clean isolated engine.
+#
 # VERITAS V10.9 — QAL'ALAR URUSHI (CLEAN ISOLATED ENGINE)
 # All tables/callbacks are version-prefixed so Bayram/Library/AI state
 # cannot collide with the game state. Core rules are deterministic;
@@ -7809,6 +7826,7 @@ def _v109_private_panel_markup ( cid,uid ) :
         [_V109B ( '💰 Hamyon / Olmos',callback_data='v109:wallet' ) ,_V109B ( '🦸 Qahramonlar',callback_data='v109:heroes' ) ],
     ]
     if king:rows.append ( [_V109B ( '🏳 Davlat nomini o‘zgartirish',callback_data=f'v109:rename:{cid}' ) ])
+    rows.append ( [_V109B ( '⛔ O‘yinni to‘xtatish',callback_data=f'v109:pstop:{cid}' ) ])
     rows.append ( [_V109B ( '📜 Qoidalar',callback_data='v109:rules' ) ])
     return _V109M ( rows)
 
@@ -7816,6 +7834,7 @@ def _v109_private_panel_markup ( cid,uid ) :
 def _v109_games_markup ( private=False ) :
     if private:
         return _V109M ( [
+            [_V109B ( '▶️ O‘yinni boshlash',callback_data='v109:pstartmenu' ) ,_V109B ( '⛔ O‘yinni to‘xtatish',callback_data='v109:pstopmenu' ) ],
             [_V109B ( '⚔️ Qal’alar urushi',callback_data='v109:home' ) ],
             [_V109B ( '💰 Hamyonim',callback_data='v109:wallet' ) ,_V109B ( '🦸 Qahramonlarim',callback_data='v109:heroes' ) ],
             [_V109B ( '📜 To‘liq qoidalar',callback_data='v109:rules' ) ],
@@ -7845,6 +7864,104 @@ async def _v109_safe_dm ( ctx,uid,text,reply_markup=None ) :
         return True
     except Exception:
         return False
+
+
+def _v109_manageable_groups ( uid ) :
+    with _v109_conn ( ) as c:
+        if uid in SUPER_OWNERS:
+            rows=c.execute ( 'SELECT chat_id,COALESCE ( title,CAST ( chat_id AS TEXT ) ) title FROM groups ORDER BY COALESCE ( title,CAST ( chat_id AS TEXT ) ) LIMIT 40' ) .fetchall ( )
+        else:
+            rows=c.execute ( '''SELECT DISTINCT g.chat_id,COALESCE ( g.title,CAST ( g.chat_id AS TEXT ) ) title
+                              FROM groups g
+                              LEFT JOIN vadmins v ON v.chat_id=g.chat_id AND v.user_id=?
+                              WHERE g.owner_id=? OR v.user_id=?
+                              ORDER BY COALESCE ( g.title,CAST ( g.chat_id AS TEXT ) ) LIMIT 40''', ( uid,uid,uid )  ) .fetchall ( )
+    return [dict ( r) for r in rows]
+
+
+def _v109_group_title ( cid ) :
+    try:
+        with _v109_conn ( ) as c:
+            r=c.execute ( 'SELECT title FROM groups WHERE chat_id=?', ( cid, )  ) .fetchone ( )
+        return r['title'] if r and r['title'] else str ( cid)
+    except Exception:
+        return str ( cid)
+
+
+def _v109_private_control_markup (  ) :
+    return _V109M ( [
+        [_V109B ( '▶️ O‘yinni boshlash',callback_data='v109:pstartmenu' ) ,_V109B ( '⛔ O‘yinni to‘xtatish',callback_data='v109:pstopmenu' ) ],
+        [_V109B ( '⚔️ Harbiy kabinet',callback_data='v109:home' ) ,_V109B ( '📜 Qoidalar',callback_data='v109:rules' ) ],
+    ])
+
+
+async def _v109_private_start_menu ( q,ctx ) :
+    await q.answer ( )
+    if q.message.chat.type!='private':
+        return await q.message.reply_text ( 'Bu boshqaruv shaxsiy kabinetda ishlaydi.')
+    groups=_v109_manageable_groups ( q.from_user.id)
+    if not groups:
+        return await q.message.reply_text ( '🏰 Siz boshqaradigan guruh topilmadi. Veritasni guruhga administrator qilib qo‘shing va guruhni botda ro‘yxatdan o‘tkazing.',reply_markup=_v109_private_control_markup (  ) )
+    rows=[[_V109B ( '🏰 '+str ( g['title'] ) [:42],callback_data=f'v109:pstart:{g["chat_id"]}' ) ] for g in groups[:30]]
+    rows.append ( [_V109B ( '⬅️ Qal’alar kabineti',callback_data='v109:home' ) ])
+    return await q.message.reply_text ( '▶️ <b>O‘YINNI BOSHLASH</b>\n\nQaysi guruhda Qal’alar urushi uchun lashkar yig‘ilishini ochamiz?',parse_mode='HTML',reply_markup=_V109M ( rows ) )
+
+
+async def _v109_private_stop_menu ( q,ctx ) :
+    await q.answer ( )
+    if q.message.chat.type!='private':
+        return await q.message.reply_text ( 'Bu boshqaruv shaxsiy kabinetda ishlaydi.')
+    allowed={int ( g['chat_id'] ) :g for g in _v109_manageable_groups ( q.from_user.id ) }
+    with _v109_conn ( ) as c:
+        games=[dict ( r) for r in c.execute ( 'SELECT chat_id,status FROM v109_war_games WHERE status IN ("lobby","election","launching","playing") ORDER BY updated_at DESC' ) ]
+    games=[g for g in games if int ( g['chat_id']) in allowed]
+    if not games:
+        return await q.message.reply_text ( 'ℹ️ Hozir siz boshqaradigan guruhlarda faol Qal’alar urushi yo‘q.',reply_markup=_v109_private_control_markup (  ) )
+    labels={'lobby':'Lashkar','election':'Saylov','launching':'Start','playing':'Urush'}
+    rows=[[_V109B ( f"⛔ {str ( allowed[int ( g['chat_id'] ) ]['title'] ) [:30]} · {labels.get ( g['status'],g['status'] ) }",callback_data=f"v109:pstop:{g['chat_id']}" ) ] for g in games[:30]]
+    rows.append ( [_V109B ( '⬅️ Qal’alar kabineti',callback_data='v109:home' ) ])
+    return await q.message.reply_text ( '⛔ <b>O‘YINNI TO‘XTATISH</b>\n\nTo‘xtatiladigan guruhni tanlang:',parse_mode='HTML',reply_markup=_V109M ( rows ) )
+
+
+async def _v109_private_start_group ( q,ctx,cid ) :
+    uid=q.from_user.id
+    if q.message.chat.type!='private':
+        return await q.answer ( 'Bu tugma shaxsiy kabinet uchun.',show_alert=True)
+    allowed={int ( g['chat_id']) for g in _v109_manageable_groups ( uid ) }
+    if cid not in allowed:
+        return await q.answer ( 'Bu guruhni boshqarish huquqingiz yo‘q.',show_alert=True)
+    if not await _v109_is_admin ( ctx,cid,uid ) :
+        return await q.answer ( 'Siz bu guruhda administrator emassiz.',show_alert=True)
+    g=_v109_game ( cid)
+    if g and g['status'] in ('election','playing' ) :
+        return await q.answer ( 'Bu guruhda o‘yin allaqachon davom etmoqda.',show_alert=True)
+    if g and g['status']=='launching':
+        age=max ( 0,_v109_now (  ) -int ( g['updated_at'] or 0 ) )
+        with _v109_conn ( ) as c:
+            forts=c.execute ( 'SELECT COUNT ( *) FROM v109_war_forts WHERE chat_id=? AND active=1', ( cid, )  ) .fetchone (  ) [0]
+        if age<=45 or forts:
+            return await q.answer ( 'Urush ishga tushirilmoqda.',show_alert=True)
+        _v109_reset_game ( cid)
+    if not g or g['status'] in ('finished','stopped' ) :
+        _v109_reset_game ( cid)
+    await _v109_refresh_lobby ( ctx,cid,True)
+    title=_v109_group_title ( cid)
+    await q.answer ( '✅ Lashkar yig‘ilishi ochildi!',show_alert=True)
+    await q.message.reply_text ( f'✅ <b>{_v109_safe ( title ) }</b> guruhida Qal’alar urushi ochildi.\n\nA’zolar <b>➕ O‘yinga qo‘shilish</b>ni bosadi. Kamida {V109_MIN_PLAYERS} kishi yig‘ilgach, guruhdagi <b>🚀 O‘yinni boshlash</b> tugmasi bilan podshoh saylovi boshlanadi.',parse_mode='HTML',reply_markup=_v109_private_control_markup (  ) )
+    _v109_asyncio.create_task ( _v109_send_ai_scene ( ctx,cid,'lobby','Commanders and soldiers gathering peacefully outside two opposing medieval Central Asian fortresses before a campaign.','🏰 Lashkar yig‘ilishi boshlandi.',critical=True ) )
+
+
+async def _v109_private_stop_group ( q,ctx,cid ) :
+    uid=q.from_user.id
+    if q.message.chat.type!='private':
+        return await q.answer ( 'Bu tugma shaxsiy kabinet uchun.',show_alert=True)
+    allowed={int ( g['chat_id']) for g in _v109_manageable_groups ( uid ) }
+    if cid not in allowed:
+        return await q.answer ( 'Bu guruhni boshqarish huquqingiz yo‘q.',show_alert=True)
+    ok,text=await _v109_stop_game ( ctx,cid,uid)
+    await q.answer ( text,show_alert=True)
+    if ok:
+        await q.message.reply_text ( f'⛔ <b>{_v109_safe ( _v109_group_title ( cid )  ) }</b> guruhidagi o‘yin to‘xtatildi. Guruh yozishmalari qayta ochildi.',parse_mode='HTML',reply_markup=_v109_private_control_markup (  ) )
 
 
 def _v109_saved_permissions ( chat ) :
@@ -7964,6 +8081,13 @@ async def _v109_open_lobby ( update,ctx ) :
     g=_v109_game ( cid)
     if g and g['status'] in ('election','playing' ) :
         await q.answer ( 'Bu guruhda o‘yin allaqachon davom etmoqda.',show_alert=True ) ;return
+    if g and g['status']=='launching':
+        age=max ( 0,_v109_now (  ) -int ( g['updated_at'] or 0 ) )
+        with _v109_conn ( ) as c:
+            _launch_forts=c.execute ( 'SELECT COUNT ( *) FROM v109_war_forts WHERE chat_id=? AND active=1', ( cid, )  ) .fetchone (  ) [0]
+        if age<=45 or _launch_forts:
+            await q.answer ( 'Urush ishga tushirilmoqda. Bir necha soniya kuting.',show_alert=True ) ;return
+        _v109_reset_game ( cid)
     if not g or g['status'] in ('finished','stopped' ) :_v109_reset_game ( cid)
     await q.answer ( 'Lashkar yig‘ilishi ochildi!')
     await _v109_refresh_lobby ( ctx,cid,True)
@@ -7987,10 +8111,37 @@ async def _v109_join ( q,ctx ) :
 
 async def _v109_start_election ( q,ctx ) :
     cid=q.message.chat_id;uid=q.from_user.id;g=_v109_game ( cid)
-    if not g or g['status']!='lobby':return await q.answer ( 'O‘yin lobby holatida emas.',show_alert=True)
+    # Stale/finished cards should never trap the user behind the cryptic
+    # "lobby holatida emas" message. Recover safely where possible.
+    if not g:
+        _v109_reset_game ( cid)
+        await _v109_refresh_lobby ( ctx,cid,True)
+        return await q.answer ( 'Yangi lobby ochildi. Avval a’zolar Qo‘shilish tugmasini bossin.',show_alert=True)
+    status=str ( g['status'] or '')
+    if status in ('finished','stopped' ) :
+        _v109_reset_game ( cid)
+        await _v109_refresh_lobby ( ctx,cid,True)
+        return await q.answer ( 'Yangi o‘yin lobbysi ochildi. A’zolarni yig‘ing, keyin Start bosing.',show_alert=True)
+    if status=='election':
+        return await q.answer ( '👑 Podshoh saylovi allaqachon boshlangan. Natija avtomatik chiqadi.',show_alert=True)
+    if status=='launching':
+        # launching is normally only a few milliseconds. If an old process died in
+        # that state and no forts exist, let an admin recover the lobby.
+        age=max ( 0,_v109_now (  ) -int ( g['updated_at'] or 0 ) )
+        with _v109_conn ( ) as c:
+            forts=c.execute ( 'SELECT COUNT ( *) FROM v109_war_forts WHERE chat_id=? AND active=1', ( cid, )  ) .fetchone (  ) [0]
+        if age>45 and not forts and await _v109_is_admin ( ctx,cid,uid ) :
+            _v109_reset_game ( cid)
+            await _v109_refresh_lobby ( ctx,cid,True)
+            return await q.answer ( 'Eski yarim qolgan sessiya tiklandi. A’zolarni qayta yig‘ing.',show_alert=True)
+        return await q.answer ( '⚔️ Urush ishga tushirilmoqda. Bir necha soniya kuting.',show_alert=True)
+    if status=='playing':
+        return await q.answer ( '⚔️ Urush allaqachon boshlangan. Maxfiy panel orqali boshqaring.',show_alert=True)
+    if status!='lobby':
+        return await q.answer ( f'O‘yin holati: {status}. Lobby kartasini qayta oching.',show_alert=True)
     if not await _v109_is_admin ( ctx,cid,uid ) :return await q.answer ( 'Faqat guruh administratori boshlaydi.',show_alert=True)
     players=[dict ( p) for p in _v109_players ( cid ) ]
-    if len ( players ) <V109_MIN_PLAYERS:return await q.answer ( f'Kamida {V109_MIN_PLAYERS} ishtirokchi kerak.',show_alert=True)
+    if len ( players ) <V109_MIN_PLAYERS:return await q.answer ( f'Kamida {V109_MIN_PLAYERS} ishtirokchi kerak. Hozir {len ( players ) } kishi bor.',show_alert=True)
     _v109_random.shuffle ( players ) ;now=_v109_now (  ) ;deadline=now+V109_ELECTION_SECONDS
     with _v109_conn ( ) as c:
         c.execute ( 'BEGIN IMMEDIATE')
@@ -8007,11 +8158,19 @@ async def _v109_start_election ( q,ctx ) :
     with _v109_conn ( ) as c:
         allp=[dict ( r) for r in c.execute ( 'SELECT * FROM v109_war_players WHERE chat_id=?', ( cid, )  ) ]
     byteam={1:[p for p in allp if p['team']==1],2:[p for p in allp if p['team']==2]}
+    dm_failed=[]
     for p in allp:
         rows=[[_V109B ( '👑 '+cand['name'][:32],callback_data=f'v109:vote:{cid}:{cand["user_id"]}' ) ] for cand in byteam[p['team']]]
         ok=await _v109_safe_dm ( ctx,p['user_id'],
             f"👑 <b>MAXFIY SAYLOV</b>\n\nSiz <b>{'Moviy Saltanat' if p['team']==1 else 'Qizil Saltanat'}</b> safidasiz.\nDavlatingiz podshohini tanlang:",_V109M ( rows ) )
         with _v109_conn ( ) as c:c.execute ( 'UPDATE v109_war_players SET dm_ok=? WHERE chat_id=? AND user_id=?', ( 1 if ok else 0,cid,p['user_id'] ) )
+        if not ok:dm_failed.append ( p['name'])
+    if dm_failed:
+        names=', '.join ( _v109_safe ( x) for x in dm_failed[:8])
+        try:
+            await ctx.bot.send_message ( cid,
+                f"⚠️ <b>SHAXSIY CHAT OCHILMAGAN</b>\n\n{names}\n\nBu a’zolar Veritasning shaxsiy chatiga kirib <b>Start</b> bosishi kerak. Saylov muddati tugasa, ularning ovozisiz ham o‘yin davom etadi.",parse_mode='HTML')
+        except Exception:pass
     _v109_asyncio.create_task ( _v109_send_ai_scene ( ctx,cid,'election','A solemn council of medieval Central Asian commanders in a fortress courtyard choosing a ruler, banners and guards, no combat.','👑 Davlatlar o‘z podshohini saylamoqda.',critical=True ) )
 
 
@@ -8644,6 +8803,10 @@ async def _v109_callback ( update,ctx ) :
     q=update.callback_query;d=q.data or '';parts=d.split ( ':' ) ;act=parts[1] if len ( parts ) >1 else ''
     try:
         if act=='open':return await _v109_open_lobby ( update,ctx)
+        if act=='pstartmenu':return await _v109_private_start_menu ( q,ctx)
+        if act=='pstopmenu':return await _v109_private_stop_menu ( q,ctx)
+        if act=='pstart':return await _v109_private_start_group ( q,ctx,int ( parts[2] ) )
+        if act=='pstop':return await _v109_private_stop_group ( q,ctx,int ( parts[2] ) )
         if act=='join':return await _v109_join ( q,ctx)
         if act=='start':return await _v109_start_election ( q,ctx)
         if act=='rules':
@@ -8682,9 +8845,10 @@ async def _v109_callback ( update,ctx ) :
         if act=='home':
             await q.answer (  ) ;games=[]
             with _v109_conn ( ) as c:games=[dict ( r) for r in c.execute ( 'SELECT g.chat_id,g.status,g.team1_name,g.team2_name FROM v109_war_games g JOIN v109_war_players p ON p.chat_id=g.chat_id WHERE p.user_id=? AND g.status IN ("election","launching","playing" ) ', ( q.from_user.id, )  ) ]
-            rows=[[_V109B ( f"⚔️ {g['team1_name'][:12]} vs {g['team2_name'][:12]}",callback_data=f'v109:panel:{g["chat_id"]}' ) ] for g in games[:10]]
+            rows=[[_V109B ( '▶️ O‘yinni boshlash',callback_data='v109:pstartmenu' ) ,_V109B ( '⛔ O‘yinni to‘xtatish',callback_data='v109:pstopmenu' ) ]]
+            rows += [[_V109B ( f"⚔️ {g['team1_name'][:12]} vs {g['team2_name'][:12]}",callback_data=f'v109:panel:{g["chat_id"]}' ) ] for g in games[:10]]
             rows += [[_V109B ( '💰 Hamyonim',callback_data='v109:wallet' ) ,_V109B ( '🦸 Qahramonlar',callback_data='v109:heroes' ) ],[_V109B ( '📜 Qoidalar',callback_data='v109:rules' ) ]]
-            return await q.message.reply_text ( '⚔️ <b>QAL’ALAR URUSHI</b>\n\nFaol urushlaringiz va shaxsiy harbiy kabinet:',parse_mode='HTML',reply_markup=_V109M ( rows ) )
+            return await q.message.reply_text ( '⚔️ <b>QAL’ALAR URUSHI</b>\n\nShaxsiy boshqaruv: o‘yinni guruhda ochish/to‘xtatish va faol harbiy kabinetlar.',parse_mode='HTML',reply_markup=_V109M ( rows ) )
         await q.answer ( 'Noma’lum tugma.',show_alert=True)
     except Exception as exc:
         log.exception ( 'V10.9 callback failed: %s',d)
@@ -8832,7 +8996,7 @@ def main (  ) :
         app.job_queue.run_repeating ( v10_task_job,30,first=12)
         app.job_queue.run_repeating ( v10_autopost_job,60,first=20)
     app.add_error_handler ( v10_error_handler)
-    log.info ( "VERITAS v10.9 starting")
+    log.info ( "VERITAS v10.9.1 starting")
     app.run_polling ( allowed_updates=Update.ALL_TYPES)
 
 if __name__=="__main__":
