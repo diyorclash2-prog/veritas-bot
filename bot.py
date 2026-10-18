@@ -6040,20 +6040,20 @@ async def bayram_private_input ( update,ctx ) :
     ctx.user_data['bayram_consumed_message_id']=msg.message_id
     greeting= ( msg.text or '' ) .strip ( )
     if not greeting or len ( greeting ) >120:
-        return await msg.reply_text ( '💌 Gift ichidagi tabriknoma 120 belgidan oshmasin. Iltimos, qisqaroq matn yozing.')
+        return await ctx.bot.send_message ( chat_id=msg.chat_id, text='💌 Gift ichidagi tabriknoma 120 belgidan oshmasin. Iltimos, qisqaroq matn yozing.')
     cid=st['bayram_id'];camp=one ( 'SELECT * FROM bayram_campaigns WHERE id=? AND creator_id=? AND status="draft"', ( cid,u.id ) )
     if not camp:
-        STATE.pop ( u.id,None ) ;return await msg.reply_text ( 'Bu bayram sessiyasi tugagan.')
+        STATE.pop ( u.id,None ) ;return await ctx.bot.send_message ( chat_id=msg.chat_id, text='Bu bayram sessiyasi tugagan.')
     winners=bayram_candidates ( camp['chat_id'],camp['winner_count'])
     if not winners:
-        return await msg.reply_text ( 'Oxirgi 10 soatda faol a’zolar topilmadi.')
+        return await ctx.bot.send_message ( chat_id=msg.chat_id, text='Oxirgi 10 soatda faol a’zolar topilmadi.')
     with db ( ) as c:
         c.execute ( 'DELETE FROM bayram_winners WHERE campaign_id=?', ( cid, ) )
         c.executemany ( 'INSERT INTO bayram_winners ( campaign_id,user_id,msg_count) VALUES ( ?,?,? ) ',[ ( cid,r['user_id'],r['n']) for r in winners])
         c.execute ( 'UPDATE bayram_campaigns SET greeting=? WHERE id=?', ( greeting,cid ) )
     STATE.pop ( u.id,None)
     count=len ( winners ) ;total=count*camp['gift_price']
-    await msg.reply_text ( f'🎉 BAYRAM TASDIQLASH\n\n👥 G‘oliblar: {count} kishi\n⏱ Oxirgi 10 soat\n🎁 Har biriga: {camp["gift_price"]} ⭐ Gift\n💰 Jami: {total} ⭐\n⭐ Kabinet balansingiz: {wallet ( u.id ) } ⭐\n\n💌 {greeting}\n\n⚠️ TASDIQLASH bosilsa jami summa sizning Veritas kabinet balansingizdan yechiladi. Haqiqiy Giftni bot yuboradi; shaxsiy Telegram Stars hisobingizdan yechilmaydi.',reply_markup=bayram_markup ( cid,'confirm' ) )
+    await ctx.bot.send_message ( chat_id=msg.chat_id, text=f'🎉 BAYRAM TASDIQLASH\n\n👥 G‘oliblar: {count} kishi\n⏱ Oxirgi 10 soat\n🎁 Har biriga: {camp["gift_price"]} ⭐ Gift\n💰 Jami: {total} ⭐\n⭐ Kabinet balansingiz: {wallet ( u.id ) } ⭐\n\n💌 {greeting}\n\n⚠️ TASDIQLASH bosilsa jami summa sizning Veritas kabinet balansingizdan yechiladi. Haqiqiy Giftni bot yuboradi; shaxsiy Telegram Stars hisobingizdan yechilmaydi.',reply_markup=bayram_markup ( cid,'confirm' ) )
 
 
 # =========================================================
