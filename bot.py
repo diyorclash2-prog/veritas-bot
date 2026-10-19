@@ -46,7 +46,7 @@ from telegram.ext import (
 TOKEN = os.getenv ( "BOT_TOKEN", "" ) .strip ( )
 DB_PATH = os.getenv ( "DB_PATH", "veritas_v7.sqlite3")
 SUPER_OWNERS = {int ( x) for x in os.getenv ( "SUPER_OWNER_IDS","" ) .split ( ",") if x.strip (  ) .isdigit (  ) }
-VERSION = "10.10.2"
+VERSION = "10.11"
 OPENAI_API_KEY = os.getenv ( "OPENAI_API_KEY", "" ) .strip ( )
 OPENAI_MODEL = os.getenv ( "OPENAI_MODEL", "gpt-5.6-luna" ) .strip ( ) or "gpt-5.6-luna"
 REBUS_IMAGE_MODEL = os.getenv ( "REBUS_IMAGE_MODEL", "gpt-image-2" ) .strip ( ) or "gpt-image-2"
@@ -65,7 +65,7 @@ AI_RATE_CACHE = {}
 TRANSLATION_SEMAPHORE = asyncio.Semaphore ( 2)
 FLOOD_CACHE = {}
 STATE = {}
-URL_RE = re.compile ( r" ( https?://|www\.|t\.me/|telegram\.me/|@\w+ ) ", re.I)
+URL_RE = re.compile ( r" ( ?:https?://|www\.| ( ?:t|telegram ) \.me/| ( ?<!\w ) @[A-Za-z0-9_]{5,32}\b ) ", re.I)
 
 logging.basicConfig ( level=logging.INFO)
 log = logging.getLogger ( "veritas-v8")
@@ -5338,7 +5338,7 @@ NATURAL_PERSON_ACTIONS = {
     "admin","unadmin","vadmin","unvadmin","approve","unapprove","id"
 }
 NATURAL_INFO_ACTIONS = {"id","admins","rules","warns","blacklists","locks","approved","filters","notes","aktiv"}
-NATURAL_PROMOTE_ACTIONS = {"admin","unadmin","vadmin","unvadmin"}
+NATURAL_PROMOTE_ACTIONS = {"admin","unadmin"}
 NATURAL_RESTRICT_ACTIONS = {"ban","kick","mute","unmute","unban","warn","unwarn","clearwarns"}
 NATURAL_TOGGLE_MAP = {
     "links_on": ( "links",["on"] ) , "links_off": ( "links",["off"] ) ,
@@ -5373,39 +5373,63 @@ def _natural_duration_seconds ( text ) :
     return 0
 
 def _natural_local_intent ( text ) :
-    """Eng ko'p ishlatiladigan iboralar uchun tez, AI-siz parser."""
+    """Oddiy gapni buyruq ma'nosiga aylantiradi.
+
+    Muhim farq:
+      - "Veritas admin/ruxsat" -> ichki Veritas huquqi (vadmin)
+      - "Telegram/guruh admin" yoki oddiy "admin qil" -> Telegram admini
+    Bir-biriga o'xshash iboralar avval kontekst bo'yicha ajratiladi.
+    """
     t=_natural_norm ( text)
-    # Qarama-qarshi amallar avval tekshiriladi.
+
+    def has ( *phrases ) :
+        return any ( p in t for p in phrases)
+
+    # 1) Veritas ichki boshqaruv huquqi — Telegram adminidan alohida.
+    veritas_admin_context=bool ( re.search ( r"\bveritas\s+ ( ?:admin|ruxsat|huquq ) ",t ) ) or has ( "veritasga ruxsat","veritas ruxsat")
+    if veritas_admin_context:
+        if has ( "olib tashla","ol","bekor qil","ochir","o'chir","ruxsatsiz","tushir" ) :
+            return {"action":"unvadmin","confidence":1.0,"duration_seconds":0,"reason":"","target_text":""}
+        if has ( "ber","qil","qo'sh","qosh","tayinla","ruxsat ber" ) :
+            return {"action":"vadmin","confidence":1.0,"duration_seconds":0,"reason":"","target_text":""}
+
+    # 2) Telegram/guruh adminligi. "Veritas admin" yuqorida ushlangan.
+    if has ( "telegram admin","guruh admin","gruppa admin","administrator") or ("admin" in t and not veritas_admin_context ) :
+        if has ( "adminlikni ol","adminligini ol","adminlikdan ol","admindan tushir","adminlikdan tushir",
+               "adminni ol","admin huquqini ol","qanotini kes","unadmin","olib tashla" ) :
+            return {"action":"unadmin","confidence":1.0,"duration_seconds":0,"reason":"","target_text":""}
+        if has ( "admin qil","adminlik ber","adminligini ber","admin qilib qo'y","admin qilib qoy",
+               "administrator qil","admin tayinla","qanot ber" ) :
+            return {"action":"admin","confidence":1.0,"duration_seconds":0,"reason":"","target_text":""}
+
+    # 3) Qolgan kundalik iboralar. Qarama-qarshi amallar avval.
     pairs=[
-        ("unadmin", ["adminlikni ol","adminlikdan ol","admindan tushir","qanotini kes","unadmin"] ) ,
-        ("unban", ["unban","bandan chiqar","banini och","blokdan chiqar"] ) ,
-        ("unmute", ["unmute","muteni och","mute och","gapirishga ruxsat","yozishga ruxsat"] ) ,
-        ("unwarn", ["unwarn","warnni kamaytir","ogohlantirishni kamaytir"] ) ,
-        ("clearwarns", ["warnlarni tozala","warnlarini tozala","ogohlantirishlarini tozala"] ) ,
-        ("unvadmin", ["veritas adminligini ol","veritas ruxsatini ol","ruxsatsiz qil"] ) ,
-        ("unapprove", ["unapprove","approvedan chiqar","ishonchdan chiqar"] ) ,
-        ("admin", ["admin qil","admin qilib qo'y","admin qilib qoy","qanot ber","administrator qil"] ) ,
-        ("vadmin", ["veritas admin qil","veritasga ruxsat ber","ruxsat ber"] ) ,
-        ("approve", ["approve qil","ishonchli qil","tasdiqlangan qil"] ) ,
+        ("unban", ["unban","bandan chiqar","banini och","blokdan chiqar","blokini och"] ) ,
+        ("unmute", ["unmute","muteni och","mute och","gapirishga ruxsat","yozishga ruxsat","jimlikni ol"] ) ,
+        ("unwarn", ["unwarn","warnni kamaytir","ogohlantirishni kamaytir","bitta warnni ol"] ) ,
+        ("clearwarns", ["warnlarni tozala","warnlarini tozala","ogohlantirishlarini tozala","hamma warnini ol"] ) ,
+        ("unapprove", ["unapprove","approvedan chiqar","ishonchdan chiqar","tasdiqdan chiqar"] ) ,
+        ("approve", ["approve qil","ishonchli qil","tasdiqlangan qil","himoyaga ol"] ) ,
         ("ban", ["ban qil","blokla","blok qil","hide all","guruhdan butunlay chiqar","qayta kirmasin","yo'qot","yoqot"] ) ,
-        ("kick", ["kick qil","chiqarib yubor","guruhdan chiqar","haydab yubor"] ) ,
-        ("mute", ["mute qil","jim qil","gapirtirma","yozdirma","dam ber","ovozini o'chir"] ) ,
-        ("warn", ["warn ber","ogohlantir","ogohlantirish ber"] ) ,
-        ("delete", ["xabarni o'chir","xabarni ochir","buni o'chir","buni ochir","delete qil"] ) ,
-        ("pin", ["pin qil","tepaga qotir","mahkamla"] ) ,
-        ("unpin", ["unpin","pinni ol","pindan ol"] ) ,
-        ("id", ["id sini ayt","id sini ber","id sini chiqar","idni ayt","idni ber","idni chiqar"] ) ,
-        ("admins", ["adminlarni ko'rsat","adminlar kim","adminlar ro'yxati"] ) ,
-        ("rules", ["qoidalarni ko'rsat","qoidalar nima","qoidani ko'rsat"] ) ,
-        ("aktiv", ["faollikni ko'rsat","aktivlikni ko'rsat","eng faollar","faol a'zolar"] ) ,
-        ("links_off", ["linklarni yop","linkni yop","havolalarni taqiql"] ) ,
-        ("links_on", ["linklarga ruxsat","linkni och","havolalarni och"] ) ,
-        ("antiflood_on", ["antifloodni yoq","flood himoyasini yoq"] ) ,
-        ("antiflood_off", ["antifloodni o'chir","flood himoyasini o'chir"] ) ,
-        ("welcome_on", ["welcome yoq","kutib olishni yoq"] ) ,
-        ("welcome_off", ["welcome o'chir","kutib olishni o'chir"] ) ,
+        ("kick", ["kick qil","chiqarib yubor","guruhdan chiqar","haydab yubor","guruhdan olib tashla"] ) ,
+        ("mute", ["mute qil","jim qil","gapirtirma","yozdirma","dam ber","ovozini o'chir","ovozini ochir"] ) ,
+        ("warn", ["warn ber","ogohlantir","ogohlantirish ber","bir warn ber"] ) ,
+        ("delete", ["xabarni o'chir","xabarni ochir","buni o'chir","buni ochir","delete qil","shu xabarni olib tashla"] ) ,
+        ("pin", ["pin qil","tepaga qotir","mahkamla","tepaga mahkamla"] ) ,
+        ("unpin", ["unpin","pinni ol","pindan ol","pinni yech"] ) ,
+        ("id", ["id sini ayt","id sini ber","id sini chiqar","idni ayt","idni ber","idni chiqar","id raqamini ayt"] ) ,
+        ("admins", ["adminlarni ko'rsat","adminlar kim","adminlar ro'yxati","kim admin"] ) ,
+        ("rules", ["qoidalarni ko'rsat","qoidalar nima","qoidani ko'rsat","guruh qoidasi"] ) ,
+        ("aktiv", ["faollikni ko'rsat","aktivlikni ko'rsat","eng faollar","faol a'zolar","kim faol"] ) ,
+        # groups.links=1 — link HIMOYASI yoqilgan (linklar o‘chiriladi ) .
+        ("links_on", ["linklarni yop","linkni yop","havolalarni taqiql","link tashlashni yop","link himoyasini yoq"] ) ,
+        ("links_off", ["linklarga ruxsat","linkni och","linklarni och","havolalarni och","link tashlashni och","link himoyasini o'chir","link himoyasini ochir"] ) ,
+        ("antiflood_on", ["antifloodni yoq","flood himoyasini yoq","flooddan himoyani yoq"] ) ,
+        ("antiflood_off", ["antifloodni o'chir","antifloodni ochir","flood himoyasini o'chir","flood himoyasini ochir"] ) ,
+        ("welcome_on", ["welcome yoq","kutib olishni yoq","yangi azoni kutib ol"] ) ,
+        ("welcome_off", ["welcome o'chir","welcome ochir","kutib olishni o'chir","kutib olishni ochir"] ) ,
         ("goodbye_on", ["goodbye yoq","xayrlashishni yoq"] ) ,
-        ("goodbye_off", ["goodbye o'chir","xayrlashishni o'chir"] ) ,
+        ("goodbye_off", ["goodbye o'chir","goodbye ochir","xayrlashishni o'chir","xayrlashishni ochir"] ) ,
     ]
     for action,phrases in pairs:
         if any ( p in t for p in phrases ) :
@@ -5419,6 +5443,8 @@ def _natural_intent_sync ( user_text ) :
         "Siz Veritas Telegram guruh boshqaruvi uchun FAQAT buyruq niyatini ajratuvchi klassifikatorsiz. "
         "Foydalanuvchi o'zbekcha/ruscha/inglizcha yoki slang bilan yozishi mumkin. "
         "Masalan 'hide all' -> ban; 'qanot ber' -> admin; 'dam ber' -> mute; 'haydab yubor' -> kick. "
+        "MUHIM: 'Veritas admin/ruxsat ber' -> vadmin, 'Veritas adminligini/ruxsatini ol' -> unvadmin. "
+        "Oddiy 'admin qil' yoki 'Telegram/guruh admini qil' -> admin; 'adminligini ol/admindan tushir' -> unadmin. "
         "Faqat quyidagi actionlardan bittasini tanlang: " + ",".join ( sorted ( NATURAL_ALLOWED_ACTIONS ) ) + ". "
         "Moliyaviy to'lov, gift/premium, superadmin, kitob/hadis admini yoki noma'lum xavfli ish so'ralsa action=none. "
         "Agar oddiy suhbat/savol bo'lsa action=none. "
@@ -5459,6 +5485,9 @@ async def _natural_actor_allowed ( ctx,chat_id,actor_id,action ) :
     is_vadmin=bool ( one ( "SELECT 1 FROM vadmins WHERE chat_id=? AND user_id=?", ( chat_id,actor_id )  ) )
     if action in NATURAL_PROMOTE_ACTIONS:
         return bool ( is_admin and getattr ( m,"can_promote_members",False ) )
+    if action in {"vadmin","unvadmin"}:
+        # Ichki Veritas boshqaruv huquqini faqat haqiqiy Telegram admin/owner yoki Super boshqaradi.
+        return bool ( is_admin)
     if action in NATURAL_RESTRICT_ACTIONS:
         return bool ( is_vadmin or (is_admin and getattr ( m,"can_restrict_members",False )  ) )
     if action=="delete":
@@ -5475,38 +5504,47 @@ async def _natural_actor_allowed ( ctx,chat_id,actor_id,action ) :
 
 async def _natural_target ( update,ctx,target_text="" ) :
     msg=update.effective_message; chat=update.effective_chat
-    # 1) Reply — eng ishonchli.
-    rp=msg.reply_to_message if msg else None
-    if rp and rp.from_user and rp.from_user.id!=ctx.bot.id:
-        return rp.from_user.id, rp.from_user.full_name or rp.from_user.first_name or str ( rp.from_user.id)
     raw= ( target_text or "" ) .strip ( )
     full= ( msg.text or msg.caption or "") if msg else ""
-    # 2) @username
+
+    # 1) Aniq @username yozilgan bo‘lsa replydan ham ustun — foydalanuvchi kimni nazarda tutgani ravshan.
     candidates=[]
     if raw.startswith ( "@" ) :candidates=[raw[1:]]
-    else:
-        candidates=re.findall ( r"@ ( [A-Za-z0-9_]{5,32} ) ",full)
+    else:candidates=re.findall ( r"@ ( [A-Za-z0-9_]{5,32} ) ",full)
     botname= ( getattr ( ctx.bot,"username","") or "" ) .lower ( )
     for uname in candidates:
         if uname.lower (  ) ==botname:continue
         r=one ( "SELECT user_id,first_name,username FROM users WHERE lower ( username ) =lower ( ?) ORDER BY user_id DESC LIMIT 1", ( uname, ) )
         if r:
-            try:await ctx.bot.get_chat_member ( chat.id,int ( r["user_id"] ) )
+            try:
+                cm=await ctx.bot.get_chat_member ( chat.id,int ( r["user_id"] ) )
+                if cm.status in (ChatMemberStatus.LEFT,ChatMemberStatus.BANNED ) :continue
             except TelegramError:continue
             return int ( r["user_id"] ) , ( r["first_name"] or ("@"+ ( r["username"] or uname )  ) )
-    # 3) Raqamli ID
+
+    # 2) Aniq raqamli Telegram ID.
     ids=[]
     if raw.isdigit (  ) :ids=[raw]
     else:ids=re.findall ( r" ( ?<!\d )  ( \d{5,15} )  ( ?!\d ) ",full)
     for sid in ids:
         uid=int ( sid)
-        if uid==update.effective_user.id and len ( ids ) ==1 and not raw:
-            # Gapdagi o'z ID si tasodifan target bo'lib qolmasin; explicit target_text bo'lsa ruxsat.
-            continue
+        if uid==update.effective_user.id and len ( ids ) ==1 and not raw:continue
+        try:
+            cm=await ctx.bot.get_chat_member ( chat.id,uid)
+            if cm.status in (ChatMemberStatus.LEFT,ChatMemberStatus.BANNED ) :continue
+        except TelegramError:
+            # Ban/unban kabi holatda foydalanuvchi chatda bo‘lmasligi mumkin; bazada tanilgan ID bo‘lsa saqlaymiz.
+            if not one ( "SELECT 1 FROM users WHERE user_id=?", ( uid, )  ) :continue
         r=one ( "SELECT first_name,username FROM users WHERE user_id=?", ( uid, ) )
         name= ( r["first_name"] if r and r["first_name"] else ("@"+r["username"] if r and r["username"] else str ( uid )  ) )
         return uid,name
-    # 4) AI ajratgan aniq ism — faqat guruhda bitta mos odam bo'lsa.
+
+    # 3) Reply — eng ishonchli keyingi usul.
+    rp=msg.reply_to_message if msg else None
+    if rp and rp.from_user and rp.from_user.id!=ctx.bot.id:
+        return rp.from_user.id, rp.from_user.full_name or rp.from_user.first_name or str ( rp.from_user.id)
+
+    # 4) AI ajratgan aniq ism — shu guruhda bitta mos odam bo‘lsa.
     if raw and not raw.startswith ( "@") and not raw.isdigit (  ) :
         rows=all_ ( "SELECT u.user_id,u.first_name,u.username FROM users u JOIN members m ON m.user_id=u.user_id WHERE m.chat_id=? AND lower ( u.first_name ) =lower ( ?) LIMIT 3", ( chat.id,raw ) )
         if len ( rows ) ==1:
@@ -5629,7 +5667,15 @@ async def _natural_execute ( update,ctx,intent ) :
         else:return False
         audit ( actor.id,chat.id,"natural_"+action,str ( target_id ) )
         extra= ( f" — {dur//60} daqiqa" if dur and dur%60==0 else (f" — {dur} soniya" if dur else "" ) )
-        await msg.reply_text ( f"✅ {target_name}: {action} bajarildi{extra}.")
+        labels={
+            "ban":"bloklandi","kick":"guruhdan chiqarildi","mute":"yozishi cheklandi","unmute":"mute ochildi",
+            "unban":"ban ochildi","warn":"ogohlantirildi","unwarn":"bitta ogohlantirishi olindi",
+            "clearwarns":"ogohlantirishlari tozalandi","admin":"Telegram admini qilindi",
+            "unadmin":"Telegram adminligi olib tashlandi","vadmin":"Veritas boshqaruv huquqi berildi",
+            "unvadmin":"Veritas boshqaruv huquqi olib tashlandi","approve":"himoyalangan a’zo qilindi",
+            "unapprove":"himoya ro‘yxatidan chiqarildi"
+        }
+        await msg.reply_text ( f"✅ {target_name}: {labels.get ( action, action+' bajarildi' ) }{extra}.")
         return True
     except TelegramError as e:
         await msg.reply_text ( f"❌ Telegram bu amalni bajarmadi: {e}")
@@ -6790,14 +6836,14 @@ def v10_help_text ( section,uid,chat_id=0 ) :
     data={
       "ai":"🤖 SUHBAT VA AI\n\nVeritasga oddiy o‘zbekcha gap bilan murojaat qiling. Buyruqlarni yodlash shart emas. Guruhda ‘Veritas ...’ deb yozing, shaxsiy chatda esa to‘g‘ridan-to‘g‘ri savol bering.",
       "memory":"🧠 XOTIRA\n\nVeritas ko‘rgan xabarlarni shaxs va guruh bo‘yicha arxivlaydi. ‘Veritas, bugun nima bo‘ldi?’, ‘kecha nimani gaplashgandik?’, ‘men kimman?’ kabi savollar ishlaydi. Bot ko‘rmagan suhbatni bilmaydi.",
-      "admin":"🛡 GURUH BOSHQARUVI\n\nOddiy tilda mute, warn, ban, kick, qoidalar, faollik va boshqa amallar ishlaydi."+ ( "\nSizda boshqaruv funksiyalari ko‘rinadi." if admin else "\nBoshqaruv amallari faqat ruxsatli adminlarga ochiladi." ) ,
+      "admin":"🛡 GURUH BOSHQARUVI\n\nBuyruq yodlash shart emas. Masalan: ‘Veritas, @userni 2 soat mute qil’, ‘Veritas adminligini ol’, ‘Telegram adminligini ol’, ‘linklarni yop’. Mazgila uchun reply qilib ‘Veritas mazgila qil’, o‘chirish uchun ‘Veritas mazgilani o‘chir’."+ ( "\nSizda boshqaruv funksiyalari ko‘rinadi." if admin else "\nBoshqaruv amallari faqat ruxsatli adminlarga ochiladi." ) ,
       "quiz":"📝 TEST / SAVOL-JAVOB / REBUS\n\nTugma orqali yoki ‘Veritas, menga 5 ta test tayyorla’ deb so‘rang. Reply qilingan xabardan, kutubxona kitobidan, mavzudan, internetdan yoki AI o‘zi tuzgan manbadan foydalanish mumkin. Default — 5 ta.",
       "library":"📚 KITOB VA HADIS\n\nVasatiya kutubxonasi va mahalliy hadis bazasi mavjud. Test uchun kutubxonadagi kitobni manba sifatida tanlash mumkin.",
       "autopost":"📢 SHAXSIY KANAL AVTOPOST\n\nShaxsiy chatda ‘📢 Avtopost’ni bosing. Kanalni ulang, kitob yoki mavzuni tanlang, kunlik vaqtni belgilang. Avtomatik yoki avval tasdiqlash rejimi, rasmli yoki faqat matnli post tanlanadi.",
       "tasks":"⏰ ESLATMA VA KUZATUV\n\nMasalan: ‘Veritas, ertaga soat 8 da kitobni eslat’. Guruhda biror a’zoga reply qilib ‘u yozsa menga ayt’ desa, Veritas kuzatuv yaratadi.",
       "bayram":"🎉 BAYRAM\n\nGuruhdagi har bir a’zo Bayram ochishi mumkin. Xarajat Bayramni ochgan odamning Veritas kabinet balansidan yechiladi; yuborilmagan Giftlar uchun kredit qaytariladi. Haqiqiy Giftni bot yuboradi.",
       "voice":"🎙 VOICE\n\nVoice xabar Veritas tomonidan matnga aylantiriladi va mazmuniga qarab javob beriladi. Veritasga aytilgan oddiy AI so‘rovlari voice orqali ham ishlaydi.",
-      "power":"⚡ UYG‘ON / UXLA\n\nGuruh admini: ‘Veritas uyg‘on’ yoki ‘Veritas uxla’. Har guruh holati alohida saqlanadi. Super Ega barcha guruhlarni birdan uyg‘otishi yoki uxlatishi mumkin.",
+      "power":"⚡ UYG‘ON / UXLA\n\nGuruh admini: ‘Veritas uyg‘on’, ‘ishga tush’, ‘Veritas uxla’ yoki ‘dam ol’. Uxla rejimi suhbat/AI javobini to‘xtatadi; moderatsiya, arxiv, kuzatuv va yoqilgan avtomatik rejimlar ishlashda davom etadi. Har guruh holati alohida saqlanadi.",
     }
     return data.get ( section,"Bo‘lim topilmadi.")
 
@@ -7439,7 +7485,8 @@ async def passive ( update,ctx ) :
     if msg and chat and u and not u.is_bot and chat.type in ('group','supergroup' ) :
         try:await v10_check_message_watches ( ctx,chat.id,u.id,_v10_message_body ( msg ) )
         except Exception:log.exception ( 'V10 watch check failed')
-        if not v10_group_awake ( chat.id ) :return
+        # "Uxla" faqat suhbat/AI javobini uxlatadi. Moderatsiya, aktivlik, arxiv,
+        # watch va Mazgila avtomatik rejimlari ishlashda davom etadi.
     if msg and (ctx.chat_data.get ( 'v10_consumed_message_id' ) ==msg.message_id or ctx.user_data.get ( 'v10_consumed_message_id' ) ==msg.message_id ) :return
     return await _v10_prev_passive ( update,ctx)
 
@@ -7572,6 +7619,9 @@ async def excerpt_text_trigger ( update,ctx ) :
     msg=update.effective_message
     if not msg or not msg.text:return
     if re.search ( r' ( ?i )  ( ?:veritas[,! ]* ) ? ( ?:kitobdan\s+parcha\s+top|parcha\s+topib\s+ber ) ',msg.text ) :
+        # Keyingi AI/passive handlerlar shu xabarni ikkinchi marta qayta ishlamasin.
+        ctx.user_data['v10_consumed_message_id']=msg.message_id
+        ctx.chat_data['v10_consumed_message_id']=msg.message_id
         await excerpt_menu ( update,ctx)
 
 def excerpt_register ( app ) :
@@ -7585,6 +7635,11 @@ def excerpt_register ( app ) :
 # Handles wake/sleep before generic natural-language/state handlers.
 # ================================================================
 async def v10_power_presence_router ( update,ctx ) :
+    """Uyg'on/uxla va presence buyruqlarini eng oldin ushlaydi.
+
+    Uxla holati AI/suhbatni to'xtatadi, lekin xavfsizlik/moderatsiya/Mazgila kabi
+    avtomatik xizmatlarni o'chirmaydi.
+    """
     msg=update.effective_message; chat=update.effective_chat; u=update.effective_user
     if not msg or not chat or not u or u.is_bot or chat.type not in ('group','supergroup') or not msg.text:
         return
@@ -7597,17 +7652,17 @@ async def v10_power_presence_router ( update,ctx ) :
     if not addressed:
         return
 
-    wake=(
-        'uygon' in low or "uyg'on" in low or 'uyg‘on' in raw.lower ( ) or
-        'uyg on' in low or 'wake up' in low
-    )
-    sleep= ( 'uxla' in low or 'uxlash' in low or 'sleep' in low)
+    wake=any ( x in low for x in (
+        'uygon','uyg on',"uyg'on",'wake up','ishga tush','ishga qayt','yana ishla','faollash','tur veritas'
+    ))
+    sleep=any ( x in low for x in (
+        'uxla','uxlash','sleep','dam ol','jim tur','vaqtincha toxta','vaqtincha to\'xta','suhbatni toxta','suhbatni to\'xta'
+    ))
 
     if wake:
         if 'barcha' in low and is_super ( u.id ) :
             rows=all_ ( 'SELECT chat_id FROM groups')
-            for r in rows:
-                v10_set_group_awake ( r['chat_id'],True,u.id)
+            for r in rows:v10_set_group_awake ( r['chat_id'],True,u.id)
             await msg.reply_text ( f'⚡ {len ( rows ) } ta guruh uchun Veritas uyg‘otildi.')
         elif await can_manage ( ctx.bot,chat.id,u.id ) :
             v10_set_group_awake ( chat.id,True,u.id)
@@ -7620,30 +7675,89 @@ async def v10_power_presence_router ( update,ctx ) :
     if sleep:
         if 'barcha' in low and is_super ( u.id ) :
             rows=all_ ( 'SELECT chat_id FROM groups')
-            for r in rows:
-                v10_set_group_awake ( r['chat_id'],False,u.id)
-            await msg.reply_text ( f'💤 {len ( rows ) } ta guruh uchun Veritas uxlatildi.')
+            for r in rows:v10_set_group_awake ( r['chat_id'],False,u.id)
+            await msg.reply_text ( f'💤 {len ( rows ) } ta guruh uchun Veritas suhbat rejimi uxlatildi.')
         elif await can_manage ( ctx.bot,chat.id,u.id ) :
             v10_set_group_awake ( chat.id,False,u.id)
-            await msg.reply_text ( '💤 Veritas bu guruhda uxlaydi. Uyg‘otish: “Veritas uyg‘on”.')
+            await msg.reply_text ( '💤 Veritasning suhbat/AI rejimi uxlatildi. Moderatsiya va avtomatik xizmatlar ishlashda davom etadi. Uyg‘otish: “Veritas uyg‘on”.')
         else:
             await msg.reply_text ( '⛔ Veritasni uxlatish uchun guruh administratori bo‘lish kerak.')
         ctx.chat_data['v10_consumed_message_id']=msg.message_id
         return
 
-    # Presence check should still answer when asleep, so the user knows why
-    # normal AI/chat requests are being ignored.
     presence=any ( x in low for x in (
-        'shuyerdami','shu yerdami','shu yerdamisan','shu yerdami san',
-        'bormisan','eshityapsanmi','eshityapsan','shu yerdasanmi'
+        'shuyerdami','shu yerdami','shu yerdamisan','shu yerdami san','shu yerdasanmi',
+        'bormisan','eshityapsanmi','eshityapsan','online misan','online mısan'
     ))
     if presence:
         if v10_group_awake ( chat.id ) :
             await msg.reply_text ( '🪶 Ha, shu yerdaman.')
         else:
-            await msg.reply_text ( '💤 Veritas hozir bu guruhda uxlayapti. Guruh admini “Veritas uyg‘on” deb uyg‘otishi mumkin.')
+            await msg.reply_text ( '💤 Men shu yerdaman, lekin suhbat/AI rejimi uxlatilgan. Moderatsiya va avtomatik xizmatlar ishlayapti. Admin “Veritas uyg‘on” desa suhbat ham qaytadi.')
         ctx.chat_data['v10_consumed_message_id']=msg.message_id
         return
+
+
+def _v10_extract_mention ( text ) :
+    m=re.search ( r'@ ( [A-Za-z0-9_]{5,32} ) ',text or '')
+    return ('@'+m.group ( 1 ) ) if m else ''
+
+
+async def v10_natural_mazgila_router ( update,ctx,low ) :
+    """Mazgila rejimini oddiy gap bilan boshqarish."""
+    msg=update.effective_message
+    if 'mazgila' not in low and 'mazgila' not in (msg.text or '' ) .lower (  ) :
+        return False
+    # Ro'yxat
+    if any ( x in low for x in ('royxat','ro yxat',"ro'yxat",'kimni mazgila','kimlar mazgila','mazgila list' )  ) :
+        await mazgila_command ( update,ctx,['list'])
+        return True
+    mention=_v10_extract_mention ( msg.text or '')
+    off=any ( x in low for x in ('ochir','o chir',"o'chir",'toxta','to xta',"to'xta",'bekor qil','stop','olib tashla' ) )
+    args=[]
+    if off:args.append ( 'off')
+    if mention:args.append ( mention)
+    await mazgila_command ( update,ctx,args)
+    return True
+
+
+async def v10_early_management_router ( update,ctx ) :
+    """Tabiiy boshqaruv buyruqlarini AI/sleep routeridan oldin bajaradi.
+
+    Shu sabab "Veritas adminligini ol", "Veritas @userni 2 soat mute qil"
+    kabi gaplar bot uxlayotganda ham admin amali sifatida ishlaydi.
+    """
+    msg=update.effective_message;chat=update.effective_chat;u=update.effective_user
+    if not msg or not chat or not u or u.is_bot or chat.type not in ('group','supergroup') or not msg.text:return
+    raw= ( msg.text or '' ) .strip ( )
+    if not raw or raw.startswith ( '*') or raw.startswith ( '/' ) :return
+    low=_natural_norm ( raw)
+    botname= ( getattr ( ctx.bot,'username','') or '' ) .lower ( )
+    reply_to_bot=bool ( msg.reply_to_message and msg.reply_to_message.from_user and msg.reply_to_message.from_user.id==ctx.bot.id)
+    addressed= ( 'veritas' in low) or (botname and ('@'+botname) in low) or reply_to_bot
+    if not addressed:return
+    if ctx.chat_data.get ( 'v10_consumed_message_id' ) ==msg.message_id:return
+
+    if await v10_natural_mazgila_router ( update,ctx,low ) :
+        ctx.chat_data['v10_consumed_message_id']=msg.message_id
+        return
+
+    intent=_natural_local_intent ( raw)
+    # Local parser topolmasa, AI faqat boshqaruv niyatini ajratsin.
+    if intent is None and OPENAI_API_KEY:
+        try:intent=await asyncio.to_thread ( _natural_intent_sync,raw)
+        except Exception:
+            log.exception ( 'early natural management classify failed')
+            intent=None
+    if not intent:return
+    action=str ( intent.get ( 'action') or 'none')
+    if action=='none':return
+    # Faqat real boshqaruv/info amallari shu erta routerda. Oddiy suhbat keyingi routerga qoladi.
+    handled=await _natural_execute ( update,ctx,intent)
+    if handled:
+        ctx.chat_data['v10_consumed_message_id']=msg.message_id
+        ctx.chat_data['natural_consumed_message_id']=msg.message_id
+
 
 def main (  ) :
     if not TOKEN: raise RuntimeError ( "BOT_TOKEN kiritilmagan.")
@@ -7659,6 +7773,7 @@ def main (  ) :
     app=Application.builder (  ) .bot ( VeritasV10Bot ( token=TOKEN )  ) .build ( )
     # Power/presence must run before every generic text/state handler.
     app.add_handler ( MessageHandler ( filters.ChatType.GROUPS & filters.TEXT & ~filters.COMMAND, v10_power_presence_router ) , group=-340)
+    app.add_handler ( MessageHandler ( filters.ChatType.GROUPS & filters.TEXT & ~filters.COMMAND, v10_early_management_router ) , group=-330)
     excerpt_register ( app)
     app.add_handler ( CommandHandler ( "start",v9_start_selector ) )
     app.add_handler ( CommandHandler ( "help",cmd_help ) )
@@ -7697,7 +7812,7 @@ def main (  ) :
         app.job_queue.run_repeating ( v10_task_job,30,first=12)
         app.job_queue.run_repeating ( v10_autopost_job,60,first=20)
     app.add_error_handler ( v10_error_handler)
-    log.info ( "VERITAS v10.10.2 network-safe starting")
+    log.info ( "VERITAS v10.11 natural-stable starting")
     app.run_polling ( allowed_updates=Update.ALL_TYPES)
 
 if __name__=="__main__":
