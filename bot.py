@@ -37,7 +37,7 @@ from telegram import (
     LabeledPrice
 )
 from telegram.constants import ChatMemberStatus
-from telegram.error import TelegramError, RetryAfter
+from telegram.error import TelegramError, RetryAfter, NetworkError, TimedOut
 from telegram.ext import (
     Application, ContextTypes, CommandHandler, MessageHandler, CallbackQueryHandler,
     PreCheckoutQueryHandler, ChatMemberHandler, ExtBot, filters
@@ -46,7 +46,7 @@ from telegram.ext import (
 TOKEN = os.getenv ( "BOT_TOKEN", "" ) .strip ( )
 DB_PATH = os.getenv ( "DB_PATH", "veritas_v7.sqlite3")
 SUPER_OWNERS = {int ( x) for x in os.getenv ( "SUPER_OWNER_IDS","" ) .split ( ",") if x.strip (  ) .isdigit (  ) }
-VERSION = "10.10"
+VERSION = "10.10.2"
 OPENAI_API_KEY = os.getenv ( "OPENAI_API_KEY", "" ) .strip ( )
 OPENAI_MODEL = os.getenv ( "OPENAI_MODEL", "gpt-5.6-luna" ) .strip ( ) or "gpt-5.6-luna"
 REBUS_IMAGE_MODEL = os.getenv ( "REBUS_IMAGE_MODEL", "gpt-image-2" ) .strip ( ) or "gpt-image-2"
@@ -1130,6 +1130,16 @@ async def _tg_retry_call ( call, *args, **kwargs ) :
             log.warning ( "Telegram flood control: waiting %.1fs before retry (%s ) ", wait, getattr ( call, "__name__", "api_call" ) )
             if attempts >= 3 or wait > 90:
                 raise
+            await asyncio.sleep ( wait)
+        except (TimedOut, NetworkError) as exc:
+            attempts += 1
+            # Short transient Telegram/httpx failures are common on long-running polling bots.
+            # Retry user-facing API calls a few times instead of failing the workflow immediately.
+            if attempts >= 4:
+                raise
+            wait = min ( 8.0, 1.5 * (2 ** (attempts - 1 )  ) )
+            log.warning ( "Temporary Telegram network error; retrying in %.1fs (%s ) : %s",
+                        wait, getattr ( call, "__name__", "api_call" ) , exc)
             await asyncio.sleep ( wait)
 
 
@@ -7353,6 +7363,9 @@ _v10_prev_natural_router=natural_veritas_router
 async def natural_veritas_router ( update,ctx ) :
     msg=update.effective_message;chat=update.effective_chat;u=update.effective_user
     if not msg or not chat or not u or u.is_bot:return
+    # Dedicated early handlers (power/presence, etc.) can consume the message.
+    if ctx.chat_data.get ( 'v10_consumed_message_id' ) ==msg.message_id or ctx.user_data.get ( 'v10_consumed_message_id' ) ==msg.message_id:
+        return
     if await v10_handle_open_answer ( update,ctx ) :
         ctx.user_data['v10_consumed_message_id']=msg.message_id;ctx.chat_data['v10_consumed_message_id']=msg.message_id;return
     if await v10_private_or_group_state_input ( update,ctx ) :
@@ -7466,6 +7479,11 @@ async def v10_error_handler ( update,ctx ) :
     if isinstance ( err_obj, RetryAfter) or 'Flood control exceeded' in err or 'Retry in ' in err:
         log.warning ( 'V10 temporary Telegram flood control ignored by error reporter: %s', err)
         return
+    if isinstance ( err_obj, (TimedOut, NetworkError ) ) or 'httpx.ReadError' in err or 'httpx.ConnectError' in err:
+        # Polling has its own network retry loop. Do not spam Super Owners with transient
+        # connection tracebacks; log once and let python-telegram-bot reconnect.
+        log.warning ( 'V10 temporary Telegram network error; polling will retry: %s', err)
+        return
     if 'Query is too old' in err or 'query id is invalid' in err:
         log.info ( 'Expired Telegram callback ignored by error reporter: %s', err)
         return
@@ -7561,6 +7579,72 @@ def excerpt_register ( app ) :
     app.add_handler ( CallbackQueryHandler ( excerpt_callback,pattern=r'^excerpt: ( ?:page|book|again ) :\d+$' ) ,group=-26)
     app.add_handler ( MessageHandler ( filters.TEXT & ~filters.COMMAND,excerpt_text_trigger ) ,group=-26)
 
+
+# ================================================================
+# V10.10.1 — EARLY POWER / PRESENCE ROUTER
+# Handles wake/sleep before generic natural-language/state handlers.
+# ================================================================
+async def v10_power_presence_router ( update,ctx ) :
+    msg=update.effective_message; chat=update.effective_chat; u=update.effective_user
+    if not msg or not chat or not u or u.is_bot or chat.type not in ('group','supergroup') or not msg.text:
+        return
+    raw= ( msg.text or '' ) .strip ( )
+    if not raw or raw.startswith ( '*') or raw.startswith ( '/' ) :
+        return
+    low=_v10_norm ( raw)
+    reply_to_bot=bool ( msg.reply_to_message and msg.reply_to_message.from_user and msg.reply_to_message.from_user.id==ctx.bot.id)
+    addressed= ( 'veritas' in low) or reply_to_bot
+    if not addressed:
+        return
+
+    wake=(
+        'uygon' in low or "uyg'on" in low or 'uyg‘on' in raw.lower ( ) or
+        'uyg on' in low or 'wake up' in low
+    )
+    sleep= ( 'uxla' in low or 'uxlash' in low or 'sleep' in low)
+
+    if wake:
+        if 'barcha' in low and is_super ( u.id ) :
+            rows=all_ ( 'SELECT chat_id FROM groups')
+            for r in rows:
+                v10_set_group_awake ( r['chat_id'],True,u.id)
+            await msg.reply_text ( f'⚡ {len ( rows ) } ta guruh uchun Veritas uyg‘otildi.')
+        elif await can_manage ( ctx.bot,chat.id,u.id ) :
+            v10_set_group_awake ( chat.id,True,u.id)
+            await msg.reply_text ( '⚡ Veritas uyg‘ondi. Men shu yerdaman.')
+        else:
+            await msg.reply_text ( '⛔ Veritasni uyg‘otish uchun guruh administratori bo‘lish kerak.')
+        ctx.chat_data['v10_consumed_message_id']=msg.message_id
+        return
+
+    if sleep:
+        if 'barcha' in low and is_super ( u.id ) :
+            rows=all_ ( 'SELECT chat_id FROM groups')
+            for r in rows:
+                v10_set_group_awake ( r['chat_id'],False,u.id)
+            await msg.reply_text ( f'💤 {len ( rows ) } ta guruh uchun Veritas uxlatildi.')
+        elif await can_manage ( ctx.bot,chat.id,u.id ) :
+            v10_set_group_awake ( chat.id,False,u.id)
+            await msg.reply_text ( '💤 Veritas bu guruhda uxlaydi. Uyg‘otish: “Veritas uyg‘on”.')
+        else:
+            await msg.reply_text ( '⛔ Veritasni uxlatish uchun guruh administratori bo‘lish kerak.')
+        ctx.chat_data['v10_consumed_message_id']=msg.message_id
+        return
+
+    # Presence check should still answer when asleep, so the user knows why
+    # normal AI/chat requests are being ignored.
+    presence=any ( x in low for x in (
+        'shuyerdami','shu yerdami','shu yerdamisan','shu yerdami san',
+        'bormisan','eshityapsanmi','eshityapsan','shu yerdasanmi'
+    ))
+    if presence:
+        if v10_group_awake ( chat.id ) :
+            await msg.reply_text ( '🪶 Ha, shu yerdaman.')
+        else:
+            await msg.reply_text ( '💤 Veritas hozir bu guruhda uxlayapti. Guruh admini “Veritas uyg‘on” deb uyg‘otishi mumkin.')
+        ctx.chat_data['v10_consumed_message_id']=msg.message_id
+        return
+
 def main (  ) :
     if not TOKEN: raise RuntimeError ( "BOT_TOKEN kiritilmagan.")
     init_db ( )
@@ -7573,6 +7657,8 @@ def main (  ) :
     i18n_init_db ( )
     v10_init_db ( )
     app=Application.builder (  ) .bot ( VeritasV10Bot ( token=TOKEN )  ) .build ( )
+    # Power/presence must run before every generic text/state handler.
+    app.add_handler ( MessageHandler ( filters.ChatType.GROUPS & filters.TEXT & ~filters.COMMAND, v10_power_presence_router ) , group=-340)
     excerpt_register ( app)
     app.add_handler ( CommandHandler ( "start",v9_start_selector ) )
     app.add_handler ( CommandHandler ( "help",cmd_help ) )
@@ -7611,7 +7697,7 @@ def main (  ) :
         app.job_queue.run_repeating ( v10_task_job,30,first=12)
         app.job_queue.run_repeating ( v10_autopost_job,60,first=20)
     app.add_error_handler ( v10_error_handler)
-    log.info ( "VERITAS v10.10 stable starting")
+    log.info ( "VERITAS v10.10.2 network-safe starting")
     app.run_polling ( allowed_updates=Update.ALL_TYPES)
 
 if __name__=="__main__":
