@@ -37,7 +37,7 @@ from telegram import (
     LabeledPrice
 )
 from telegram.constants import ChatMemberStatus
-from telegram.error import TelegramError, RetryAfter, NetworkError, TimedOut
+from telegram.error import TelegramError, RetryAfter, NetworkError, TimedOut, BadRequest
 from telegram.ext import (
     Application, ContextTypes, CommandHandler, MessageHandler, CallbackQueryHandler,
     PreCheckoutQueryHandler, ChatMemberHandler, ExtBot, filters
@@ -46,7 +46,7 @@ from telegram.ext import (
 TOKEN = os.getenv ( "BOT_TOKEN", "" ) .strip ( )
 DB_PATH = os.getenv ( "DB_PATH", "veritas_v7.sqlite3")
 SUPER_OWNERS = {int ( x) for x in os.getenv ( "SUPER_OWNER_IDS","" ) .split ( ",") if x.strip (  ) .isdigit (  ) }
-VERSION = "10.11"
+VERSION = "10.11.1"
 OPENAI_API_KEY = os.getenv ( "OPENAI_API_KEY", "" ) .strip ( )
 OPENAI_MODEL = os.getenv ( "OPENAI_MODEL", "gpt-5.6-luna" ) .strip ( ) or "gpt-5.6-luna"
 REBUS_IMAGE_MODEL = os.getenv ( "REBUS_IMAGE_MODEL", "gpt-image-2" ) .strip ( ) or "gpt-image-2"
@@ -68,6 +68,9 @@ STATE = {}
 URL_RE = re.compile ( r" ( ?:https?://|www\.| ( ?:t|telegram ) \.me/| ( ?<!\w ) @[A-Za-z0-9_]{5,32}\b ) ", re.I)
 
 logging.basicConfig ( level=logging.INFO)
+# SECURITY: httpx INFO logs include the full Telegram Bot API URL (and therefore BOT_TOKEN ) .
+logging.getLogger ( "httpx" ) .setLevel ( logging.WARNING)
+logging.getLogger ( "httpcore" ) .setLevel ( logging.WARNING)
 log = logging.getLogger ( "veritas-v8")
 
 def now (  ) : return int ( time.time (  ) )
@@ -801,6 +804,7 @@ async def v9_show_student_home ( msg,uid ) :
 
 async def v9_private_input ( update,ctx ) :
     msg=update.effective_message;u=update.effective_user
+    if ctx.user_data.get ( "nav_consumed_message_id" ) ==getattr ( msg,"message_id",None ) :return
     if ctx.user_data.get ( "news_consumed_message_id" ) ==getattr ( msg,"message_id",None ) :return
     if not msg or not u or msg.chat.type!="private":return
     st=STATE.get ( u.id) or {};mode=st.get ( "mode")
@@ -1131,10 +1135,13 @@ async def _tg_retry_call ( call, *args, **kwargs ) :
             if attempts >= 3 or wait > 90:
                 raise
             await asyncio.sleep ( wait)
+        except BadRequest:
+            # BadRequest is a NetworkError subclass in python-telegram-bot.
+            # Telegram 400 errors are permanent request errors and must not be retried.
+            raise
         except (TimedOut, NetworkError) as exc:
             attempts += 1
-            # Short transient Telegram/httpx failures are common on long-running polling bots.
-            # Retry user-facing API calls a few times instead of failing the workflow immediately.
+            # Retry only genuine transient transport failures.
             if attempts >= 4:
                 raise
             wait = min ( 8.0, 1.5 * (2 ** (attempts - 1 )  ) )
@@ -1245,7 +1252,14 @@ class VeritasI18nBot ( ExtBot ) :
             raise
 
     async def delete_message ( self,*args,**kwargs ) :
-        return await _tg_retry_call ( super (  ) .delete_message,*args,**kwargs)
+        try:
+            return await _tg_retry_call ( super (  ) .delete_message,*args,**kwargs)
+        except BadRequest as exc:
+            text=str ( exc ) .lower ( )
+            if "message to delete not found" in text or "message can't be deleted" in text or "message cannot be deleted" in text:
+                log.info ( "Harmless delete ignored: %s", exc)
+                return False
+            raise
 
 
 def group_lang_markup ( chat_id ) :
@@ -7523,6 +7537,9 @@ async def v10_error_handler ( update,ctx ) :
     if 'Message is not modified' in err:
         log.info ( 'V10 harmless Telegram edit ignored: %s', err)
         return
+    if 'Message to delete not found' in err or "message can't be deleted" in err.lower ( ) or 'message cannot be deleted' in err.lower (  ) :
+        log.info ( 'V10 harmless Telegram delete ignored: %s', err)
+        return
     if isinstance ( err_obj, RetryAfter) or 'Flood control exceeded' in err or 'Retry in ' in err:
         log.warning ( 'V10 temporary Telegram flood control ignored by error reporter: %s', err)
         return
@@ -7628,6 +7645,30 @@ def excerpt_register ( app ) :
     app.add_handler ( CommandHandler ( 'parcha',excerpt_menu ) ,group=-26)
     app.add_handler ( CallbackQueryHandler ( excerpt_callback,pattern=r'^excerpt: ( ?:page|book|again ) :\d+$' ) ,group=-26)
     app.add_handler ( MessageHandler ( filters.TEXT & ~filters.COMMAND,excerpt_text_trigger ) ,group=-26)
+
+
+# ================================================================
+# V10.11.1 — EARLY PRIVATE NAVIGATION
+# Keeps persistent reply-keyboard navigation responsive even during another workflow.
+# ================================================================
+async def v10_fast_private_navigation ( update,ctx ) :
+    msg=update.effective_message; u=update.effective_user; chat=update.effective_chat
+    if not msg or not u or not chat or chat.type!='private' or not msg.text:
+        return
+    txt= ( msg.text or '' ) .strip ( )
+    if txt not in {"🛡 Veritas","🎓 O‘quv • Talaba"}:
+        return
+    STATE.pop ( u.id,None)
+    ctx.user_data.pop ( 'bayram_state',None)
+    mid=msg.message_id
+    ctx.user_data['nav_consumed_message_id']=mid
+    ctx.user_data['v9_consumed_message_id']=mid
+    ctx.user_data['v10_consumed_message_id']=mid
+    ctx.user_data['workflow_message_id']=mid
+    if txt=="🛡 Veritas":
+        return await msg.reply_text ( "🛡 VERITAS\n\nAsosiy bo‘lim:",reply_markup=main_menu_markup ( u.id ) )
+    await msg.reply_text ( "🎓 O‘QUV • TALABA\n\nTa’lim turini tanlang:",reply_markup=v9_entry_markup (  ) )
+    return await msg.reply_text ( "Asosiy panel:",reply_markup=veritas_global_keyboard (  ) )
 
 
 # ================================================================
@@ -7789,6 +7830,7 @@ def main (  ) :
     # Botning o'zi guruhga qo'shilgan/chiqarilgan zahoti groups jadvalini yangilaymiz.
     # Bu global broadcast uchun eng muhim ro'yxat.
     app.add_handler ( ChatMemberHandler ( bot_membership_update, ChatMemberHandler.MY_CHAT_MEMBER ) , group=-350)
+    app.add_handler ( MessageHandler ( filters.ChatType.PRIVATE & filters.TEXT & ~filters.COMMAND, v10_fast_private_navigation ) , group=-330)
     app.add_handler ( MessageHandler ( filters.StatusUpdate.NEW_CHAT_MEMBERS,new_members ) )
     app.add_handler ( MessageHandler ( filters.StatusUpdate.LEFT_CHAT_MEMBER,left_member ) )
     app.add_handler ( MessageHandler ( filters.TEXT & filters.Regex ( r"^\*" ) ,star_text_router ) ,group=0)
@@ -7812,7 +7854,7 @@ def main (  ) :
         app.job_queue.run_repeating ( v10_task_job,30,first=12)
         app.job_queue.run_repeating ( v10_autopost_job,60,first=20)
     app.add_error_handler ( v10_error_handler)
-    log.info ( "VERITAS v10.11 natural-stable starting")
+    log.info ( "VERITAS v10.11.1 recovery-fix starting")
     app.run_polling ( allowed_updates=Update.ALL_TYPES)
 
 if __name__=="__main__":
