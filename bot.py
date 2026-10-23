@@ -7501,7 +7501,7 @@ async def passive ( update,ctx ) :
         except Exception:log.exception ( 'V10 watch check failed')
         # "Uxla" faqat suhbat/AI javobini uxlatadi. Moderatsiya, aktivlik, arxiv,
         # watch va Mazgila avtomatik rejimlari ishlashda davom etadi.
-    if msg and (ctx.chat_data.get ( 'v10_consumed_message_id' ) ==msg.message_id or ctx.user_data.get ( 'v10_consumed_message_id' ) ==msg.message_id ) :return
+    if msg and ( ( ctx.chat_data or {} ) .get ( 'v10_consumed_message_id' ) ==msg.message_id or (ctx.user_data or {} ) .get ( 'v10_consumed_message_id' ) ==msg.message_id ) :return
     return await _v10_prev_passive ( update,ctx)
 
 
