@@ -32,7 +32,7 @@ from telegram import (
     LabeledPrice
 )
 from telegram.constants import ChatMemberStatus
-from telegram.error import TelegramError
+from telegram.error import TelegramError, BadRequest, Forbidden
 from telegram.ext import (
     Application, ContextTypes, CommandHandler, MessageHandler, CallbackQueryHandler,
     PreCheckoutQueryHandler, ChatMemberHandler, ExtBot, filters
@@ -63,6 +63,8 @@ STATE = {}
 URL_RE = re.compile ( r" ( https?://|www\.|t\.me/|telegram\.me/|@\w+ ) ", re.I)
 
 logging.basicConfig ( level=logging.INFO)
+logging.getLogger ( "httpx" ) .setLevel ( logging.WARNING)
+logging.getLogger ( "httpcore" ) .setLevel ( logging.WARNING)
 log = logging.getLogger ( "veritas-v8")
 
 def now (  ) : return int ( time.time (  ) )
@@ -1865,18 +1867,131 @@ def library_book_markup ( uid,book_id,back="library" ) :
     kb.append ( [InlineKeyboardButton ( "⬅️ Kutubxona",callback_data=back ) ,InlineKeyboardButton ( "🏠 Bosh menyu",callback_data="home" ) ])
     return InlineKeyboardMarkup ( kb)
 
-async def library_show_book ( q,ctx,book_id,back="library" ) :
-    r=one ( "SELECT * FROM library_books WHERE id=? AND status='approved'", ( book_id, ) )
-    if not r: return await q.edit_message_text ( "❌ Kitob topilmadi.",reply_markup=back_markup ( "library" ) )
-    execute ( "UPDATE library_books SET views=views+1 WHERE id=?", ( book_id, ) )
-    r=one ( "SELECT * FROM library_books WHERE id=?", ( book_id, ) )
-    text=library_book_text ( r)
-    if r["cover_file_id"]:
+def library_invalid_file_error ( exc ) :
+    error = str ( exc ) .lower ( )
+    return any ( part in error for part in (
+        'wrong file identifier', 'wrong remote file identifier',
+        'invalid file id', 'invalid file_id', 'file identifier',
+        'http url specified', 'failed to get http',
+    ))
+
+
+def library_repair_markup ( uid, bid ) :
+    rows = []
+    if is_library_admin ( uid ) :
+        rows.append ( [InlineKeyboardButton(
+            '🔧 Kitob faylini yangilash',
+            callback_data=f'libeditfield:{bid}:pdf'
+        )])
+    rows.append ( [InlineKeyboardButton(
+        '📖 Kitobga qaytish', callback_data=f'libbook:{bid}'
+    )])
+    return InlineKeyboardMarkup ( rows)
+
+
+def library_refresh_document ( bid, doc ) :
+    """Refresh this book only; keep its metadata, categories and favorites."""
+    filename = str ( doc.file_name or '' ) .strip ( )
+    fmt = Path ( filename ) .suffix.lower (  ) .lstrip ( '.')
+    if not fmt and (doc.mime_type or '' ) .lower ( ) == 'application/pdf':
+        fmt = 'pdf'
+    unique = doc.file_unique_id or ''
+    execute(
+        '''UPDATE library_books SET book_file_id=?, book_unique_id=?,
+           book_file_name=?, book_format=?, book_file_size=?,
+           pdf_file_id=?, pdf_unique_id=? WHERE id=?''',
+        (doc.file_id, unique, filename, fmt, int ( doc.file_size or 0 ) ,
+         doc.file_id if fmt == 'pdf' else '',
+         unique if fmt == 'pdf' else '', bid)
+    )
+
+
+async def library_send_document ( q, ctx, bid ) :
+    book = one(
+        '''SELECT title,book_file_id,pdf_file_id FROM library_books
+           WHERE id=? AND status='approved' ''', (bid,)
+    )
+    if not book:
+        return await q.message.reply_text ( '❌ Kitob topilmadi.')
+    candidates = []
+    for raw in (book['book_file_id'], book['pdf_file_id'] ) :
+        fid = str ( raw or '' ) .strip ( )
+        if fid and fid not in candidates:
+            candidates.append ( fid)
+    for fid in candidates:
         try:
-            await q.message.delete ( )
-            return await ctx.bot.send_photo ( q.message.chat.id,r["cover_file_id"],caption=text[:1024],reply_markup=library_book_markup ( q.from_user.id,book_id,back ) )
-        except Exception: pass
-    return await q.edit_message_text ( text,reply_markup=library_book_markup ( q.from_user.id,book_id,back ) )
+            await ctx.bot.send_document(
+                chat_id=q.from_user.id, document=fid,
+                caption=f"📚 {str ( book['title'] or 'Kitob' ) [:800]}\nVasatiya kutubxonasi"
+            )
+        except Forbidden:
+            return await q.message.reply_text(
+                '⚠️ Veritasning shaxsiy chatiga kirib /start bosing, '
+                'keyin kitobni qayta oling.'
+            )
+        except BadRequest as exc:
+            if library_invalid_file_error ( exc ) :
+                log.warning ( 'Library invalid file reference book_id=%s', bid)
+                continue
+            log.warning ( 'Library request rejected book_id=%s', bid)
+            return await q.message.reply_text(
+                '⚠️ Telegram faylni yuborishni rad etdi. '
+                'Kutubxona adminiga xabar bering.',
+                reply_markup=library_repair_markup ( q.from_user.id, bid)
+            )
+        except TelegramError:
+            log.warning ( 'Library delivery connection error book_id=%s', bid)
+            return await q.message.reply_text(
+                '⚠️ Ulanishda xato bo‘ldi. Kitob kelmagan bo‘lsa, '
+                'birozdan keyin yana urinib ko‘ring.'
+            )
+        else:
+            try:
+                execute(
+                    '''UPDATE library_books SET downloads=COALESCE ( downloads,0 ) +1,
+                       book_file_id=? WHERE id=?''', (fid, bid)
+                )
+            except sqlite3.Error:
+                log.warning ( 'Library delivered; counter update failed book_id=%s', bid)
+            return
+    return await q.message.reply_text(
+        '⚠️ Kitobning saqlangan fayl IDsi mavjud emas yoki ishlamayapti.\n\n'
+        'Kutubxona admini «Kitob faylini yangilash» orqali asl faylni '
+        'shu botga qayta yuborsin. Kitobni o‘chirish shart emas.',
+        reply_markup=library_repair_markup ( q.from_user.id, bid)
+    )
+
+
+async def library_show_book ( q, ctx, book_id, back='library' ) :
+    book = one(
+        "SELECT * FROM library_books WHERE id=? AND status='approved'",
+        (book_id,)
+    )
+    if not book:
+        return await quiz_replace_message(
+            q, ctx, '❌ Kitob topilmadi.', reply_markup=back_markup ( 'library')
+        )
+    execute ( 'UPDATE library_books SET views=COALESCE ( views,0 ) +1 WHERE id=?', (book_id, ) )
+    book = one ( 'SELECT * FROM library_books WHERE id=?', (book_id, ) )
+    text = library_book_text ( book)
+    markup = library_book_markup ( q.from_user.id, book_id, back)
+    if book['cover_file_id']:
+        try:
+            sent = await ctx.bot.send_photo(
+                q.message.chat.id, book['cover_file_id'],
+                caption=text[:1024], reply_markup=markup
+            )
+        except TelegramError:
+            # An invalid old cover must not prevent opening the book.
+            pass
+        else:
+            try:
+                await q.message.delete ( )
+            except TelegramError:
+                pass
+            return sent
+    return await quiz_replace_message ( q, ctx, text[:4000], reply_markup=markup)
+
 
 def library_list_markup ( rows,page,prefix,total,extra="" ) :
     per=8; kb=[]
@@ -2260,14 +2375,10 @@ async def library_private_input ( update,ctx ) :
             if not name.endswith ( allowed ) :
                 return await msg.reply_text ( "❌ Format qabul qilinmaydi.\nPDF, EPUB, DOCX, TXT, FB2, MOBI yoki DJVU yuboring." )
             uniq=doc.file_unique_id or ""
-            dup=one ( "SELECT id FROM library_books WHERE pdf_unique_id=? AND id<>? AND status<>'deleted'", ( uniq,bid ) ) if uniq else None
+            dup=one ( "SELECT id FROM library_books WHERE (pdf_unique_id=? OR book_unique_id=?) AND id<>?", ( uniq,uniq,bid ) ) if uniq else None
             if dup: return await msg.reply_text ( f"⚠️ Bu fayl boshqa kitobda mavjud. ID: {dup['id']}" )
             fmt=name.rsplit ( ".",1 ) [-1] if "." in name else "file"
-            execute ( """UPDATE library_books
-                         SET pdf_file_id=?,pdf_unique_id=?,book_file_id=?,book_unique_id=?,
-                             book_file_name=?,book_format=?,book_file_size=?
-                         WHERE id=?""",
-                      ( doc.file_id,uniq,doc.file_id,uniq,doc.file_name or "",fmt,int ( doc.file_size or 0 ) ,bid ) )
+            library_refresh_document ( bid, doc)
         elif field=="audio":
             af=None
             if msg.audio: af=msg.audio
@@ -2300,12 +2411,18 @@ async def library_private_input ( update,ctx ) :
             )
         uniq=doc.file_unique_id or ""
         if uniq:
-            dup=one ( "SELECT id,title FROM library_books WHERE pdf_unique_id=? AND status<>'deleted'", (uniq, ) )
+            dup=one ( "SELECT id,title,status FROM library_books WHERE (pdf_unique_id=? OR book_unique_id=?) AND status<>'deleted'", (uniq,uniq ) )
             if dup:
-                STATE.pop ( uid,None)
+                if dup['status'] != 'approved':
+                    return await msg.reply_text ( "⚠️ Bu fayl boshqa kitob yozuvida mavjud.")
+                library_refresh_document ( dup['id'], doc)
+                STATE.pop ( uid, None)
+                audit ( uid, 0, 'library_file_refresh', str ( dup['id'] ) )
                 return await msg.reply_text(
-                    f"⚠️ Bu fayl kutubxonada avval qo‘shilgan.\n📖 {dup['title']}\nID: {dup['id']}",
-                    reply_markup=library_home_markup ( uid)
+                    f"✅ Mavjud kitobning fayli yangilandi.\n📖 {dup['title']}",
+                    reply_markup=InlineKeyboardMarkup ( [[InlineKeyboardButton(
+                        '📖 Kitobni ochish', callback_data=f"libbook:{dup['id']}"
+                    )]])
                 )
 
         # Fayl nomidan kitob nomini avtomatik chiqaramiz.
@@ -4884,29 +5001,12 @@ async def callback ( update,ctx ) :
         else: execute ( "INSERT OR IGNORE INTO library_favorites ( user_id,book_id,created_at) VALUES ( ?,?,? ) ", ( u.id,bid,now (  )  ) )
         return await library_show_book ( q,ctx,bid)
 
-    if d.startswith ( "libfile:" ) :
-        bid=int ( d.split ( ":" ) [1])
-        r=one ( """SELECT title,book_file_id,book_file_name,book_format,pdf_file_id
-                 FROM library_books WHERE id=? AND status='approved'""", ( bid, ) )
-        if not r: return await q.answer ( "Kitob topilmadi",show_alert=True)
-        fid=r["book_file_id"] or r["pdf_file_id"]
-        if not fid: return await q.answer ( "Kitob fayli mavjud emas",show_alert=True)
-        execute ( "UPDATE library_books SET downloads=downloads+1 WHERE id=?", ( bid, ) )
+    if d.startswith (  ( "libfile:", "libpdf:" )  ) :
         try:
-            return await ctx.bot.send_document(
-                u.id,fid,
-                caption=f"📚 {r['title']}\n📁 { ( r['book_format'] or 'PDF' ) .upper (  ) }\nVasatiya kutubxonasi"
-            )
-        except TelegramError:
-            log.exception ( "Library file send failed: %s",bid)
-            return await q.answer ( "⚠️ Faylni yuborishda xato.",show_alert=True)
-
-    if d.startswith ( "libpdf:" ) :
-        bid=int ( d.split ( ":" ) [1] ) ; r=one ( "SELECT title,pdf_file_id FROM library_books WHERE id=? AND status='approved'", ( bid, ) )
-        if not r or not r["pdf_file_id"]: return await q.answer ( "Kitob fayli mavjud emas",show_alert=True)
-        execute ( "UPDATE library_books SET downloads=downloads+1 WHERE id=?", ( bid, ) )
-        await ctx.bot.send_document ( u.id,r["pdf_file_id"],caption=f"📚 {r['title']}\nVasatiya kutubxonasi")
-        return
+            bid = int ( d.split ( ":", 1 ) [1])
+        except (ValueError, IndexError ) :
+            return await q.message.reply_text ( "❌ Kitob raqami noto‘g‘ri.")
+        return await library_send_document ( q, ctx, bid)
 
     if d.startswith ( "libaudio:" ) :
         bid=int ( d.split ( ":" ) [1] ) ; r=one ( "SELECT title,audio_file_id FROM library_books WHERE id=? AND status='approved'", ( bid, ) )
@@ -5909,9 +6009,7 @@ async def ai_news_unified_router ( update, ctx ) :
     log.warning ( "AI_NEWS_ROUTER uid=%s data=%s", getattr ( q.from_user, "id", None ) , data)
 
     # Global broadcast gets first priority because it is the final/critical action.
-    # Be tolerant of legacy/new callback suffixes: any broadcast_all:* or news:send:*
-    # belongs to the broadcast handler. The sender extracts the first numeric post id.
-    if data.startswith ( "broadcast_all:") or data.startswith ( "news:send:" ) :
+    if re.fullmatch ( r" ( ?:broadcast_all|news:send ) :\d+", data ) :
         return await ai_news_send_direct ( update, ctx)
 
     # Group-only post send.
@@ -6004,17 +6102,8 @@ async def ai_news_send_direct ( update, ctx ) :
         return
     u = q.from_user
     d = q.data or ""
-    # Accept both current and legacy callback variants, including harmless suffixes.
-    if not (d.startswith ( "broadcast_all:") or d.startswith ( "news:send:" )  ) :
-        return
-    tail = d.split ( ":", 1 ) [1] if ":" in d else ""
-    m = re.search ( r"\d+", tail)
+    m = re.fullmatch ( r" ( ?:broadcast_all|news:send ) : ( \d+ ) ", d)
     if not m:
-        try:
-            await q.answer ( "⚠️ Tarqatish post ID topilmadi.", show_alert=True)
-        except Exception:
-            pass
-        log.error ( "NEWS_SEND malformed callback data=%r", d)
         return
 
     # Answer Telegram immediately, before any DB/network work.
@@ -6026,8 +6115,8 @@ async def ai_news_send_direct ( update, ctx ) :
     if not u or u.id not in SUPER_OWNERS:
         return
 
-    nid = int ( m.group ( 0 ) )
-    log.warning ( "NEWS_SEND_DIRECT START post=%s uid=%s raw_data=%r", nid, u.id, d)
+    nid = int ( m.group ( 1 ) )
+    log.warning ( "NEWS_SEND_DIRECT START post=%s uid=%s", nid, u.id)
 
     try:
         post = one ( "SELECT * FROM ai_news_posts WHERE id=?", (nid, ) )
