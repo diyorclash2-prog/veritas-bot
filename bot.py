@@ -4378,6 +4378,10 @@ async def vse_self_clean ( update,ctx ) :
         return False
     if (msg.text or "" ) .strip (  ) .lower (  ) !="*vse":
         return False
+    # Guruh admini, Veritas admini yoki super egagina tozalay oladi.
+    if not await can_manage ( ctx.bot,chat.id,u.id ) :
+        await msg.reply_text ( "⛔ Bu buyruq faqat adminlar uchun.")
+        return True
     # Buyruq faqat Veritasning xabariga reply qilinganda ishlaydi.
     if not msg.reply_to_message or not msg.reply_to_message.from_user or msg.reply_to_message.from_user.id!=ctx.bot.id:
         return False
@@ -5001,32 +5005,50 @@ async def callback ( update,ctx ) :
         r=one ( """SELECT title,book_file_id,book_file_name,book_format,pdf_file_id
                  FROM library_books WHERE id=? AND status='approved'""", ( bid, ) )
         if not r: return await q.answer ( "Kitob topilmadi",show_alert=True)
-        fid=r["book_file_id"] or r["pdf_file_id"]
-        if not fid: return await q.answer ( "Kitob fayli mavjud emas",show_alert=True)
-        execute ( "UPDATE library_books SET downloads=downloads+1 WHERE id=?", ( bid, ) )
-        try:
-            return await ctx.bot.send_document(
-                u.id,fid,
-                caption=f"📚 {r['title']}\n📁 { ( r['book_format'] or 'PDF' ) .upper (  ) }\nVasatiya kutubxonasi"
-            )
-        except TelegramError:
-            log.exception ( "Library file send failed: %s",bid)
-            return await q.answer ( "⚠️ Faylni yuborishda xato.",show_alert=True)
+        file_ids=list ( dict.fromkeys ( fid for fid in (r["book_file_id"],r["pdf_file_id"]) if fid ) )
+        if not file_ids: return await q.message.reply_text ( "⚠️ Kitob fayli mavjud emas. Admin uni qayta yuklashi kerak.")
+        for fid in file_ids:
+            try:
+                sent=await ctx.bot.send_document(
+                    u.id,fid,
+                    caption=f"📚 {r['title']}\n📁 { ( r['book_format'] or 'PDF' ) .upper (  ) }\nVasatiya kutubxonasi",
+                    _skip_i18n=True
+                )
+            except TelegramError:
+                log.exception ( "Library file send failed: book=%s",bid)
+                continue
+            execute ( "UPDATE library_books SET downloads=downloads+1 WHERE id=?", ( bid, ) )
+            return sent
+        return await q.message.reply_text(
+            "⚠️ Kitobni yubora olmadim. Agar bu tugmani guruhda bosgan bo‘lsangiz, "
+            "avval botning shaxsiy chatida /start ni bosing. Shaxsiy chatda ham "
+            "ishlamasa, admin kitob faylini qayta yuklashi kerak."
+        )
 
     if d.startswith ( "libpdf:" ) :
-        bid=int ( d.split ( ":" ) [1] ) ; r=one ( "SELECT title,pdf_file_id FROM library_books WHERE id=? AND status='approved'", ( bid, ) )
-        if not r or not r["pdf_file_id"]: return await q.answer ( "Kitob fayli mavjud emas",show_alert=True)
+        bid=int ( d.split ( ":" ) [1] ) ;r=one ( "SELECT title,pdf_file_id FROM library_books WHERE id=? AND status='approved'", ( bid, ) )
+        if not r or not r["pdf_file_id"]:return await q.message.reply_text ( "⚠️ Kitob fayli mavjud emas. Admin uni qayta yuklashi kerak.")
+        try:
+            sent=await ctx.bot.send_document ( u.id,r["pdf_file_id"],caption=f"📚 {r['title']}\nVasatiya kutubxonasi",_skip_i18n=True)
+        except TelegramError:
+            log.exception ( "Library PDF send failed: book=%s",bid)
+            return await q.message.reply_text ( "⚠️ PDF yuborilmadi. Botni shaxsiy chatda /start bilan oching; muammo davom etsa, admin faylni qayta yuklasin.")
         execute ( "UPDATE library_books SET downloads=downloads+1 WHERE id=?", ( bid, ) )
-        await ctx.bot.send_document ( u.id,r["pdf_file_id"],caption=f"📚 {r['title']}\nVasatiya kutubxonasi")
-        return
+        return sent
 
     if d.startswith ( "libaudio:" ) :
-        bid=int ( d.split ( ":" ) [1] ) ; r=one ( "SELECT title,audio_file_id FROM library_books WHERE id=? AND status='approved'", ( bid, ) )
-        if not r or not r["audio_file_id"]: return await q.answer ( "Audio mavjud emas",show_alert=True)
+        bid=int ( d.split ( ":" ) [1] ) ;r=one ( "SELECT title,audio_file_id FROM library_books WHERE id=? AND status='approved'", ( bid, ) )
+        if not r or not r["audio_file_id"]:return await q.message.reply_text ( "⚠️ Audio mavjud emas. Admin uni qayta yuklashi kerak.")
+        try:
+            sent=await ctx.bot.send_audio ( u.id,r["audio_file_id"],caption=f"🎧 {r['title']}\nVasatiya kutubxonasi")
+        except TelegramError:
+            try:
+                sent=await ctx.bot.send_document ( u.id,r["audio_file_id"],caption=f"🎧 {r['title']}",_skip_i18n=True)
+            except TelegramError:
+                log.exception ( "Library audio send failed: book=%s",bid)
+                return await q.message.reply_text ( "⚠️ Audio yuborilmadi. Botni shaxsiy chatda /start bilan oching; muammo davom etsa, admin faylni qayta yuklasin.")
         execute ( "UPDATE library_books SET downloads=downloads+1 WHERE id=?", ( bid, ) )
-        try: await ctx.bot.send_audio ( u.id,r["audio_file_id"],caption=f"🎧 {r['title']}\nVasatiya kutubxonasi")
-        except Exception: await ctx.bot.send_document ( u.id,r["audio_file_id"],caption=f"🎧 {r['title']}")
-        return
+        return sent
 
     if d.startswith ( "libedit:" ) :
         if not is_library_admin ( u.id ) : return await q.answer ( "Ruxsat yo‘q",show_alert=True )
