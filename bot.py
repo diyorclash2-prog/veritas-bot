@@ -1,8 +1,3 @@
-# VERITAS V10.10 — GAME-FREE STABLE BUILD
-# Legacy game subsystem removed. Core Veritas features preserved.
-# Includes Telegram flood-control safety and callback/error hardening.
-
-# VERITAS V10.9.3 — ADMIN-SAFE START/STOP + REAL TELEGRAM ADMIN LIST
 # VERITAS BOT v8 — Vasatiya Library build
 # Python 3.11+ | python-telegram-bot[job-queue]>=22.5,<23
 #
@@ -37,7 +32,7 @@ from telegram import (
     LabeledPrice
 )
 from telegram.constants import ChatMemberStatus
-from telegram.error import TelegramError, RetryAfter, NetworkError, TimedOut, BadRequest
+from telegram.error import TelegramError
 from telegram.ext import (
     Application, ContextTypes, CommandHandler, MessageHandler, CallbackQueryHandler,
     PreCheckoutQueryHandler, ChatMemberHandler, ExtBot, filters
@@ -46,7 +41,7 @@ from telegram.ext import (
 TOKEN = os.getenv ( "BOT_TOKEN", "" ) .strip ( )
 DB_PATH = os.getenv ( "DB_PATH", "veritas_v7.sqlite3")
 SUPER_OWNERS = {int ( x) for x in os.getenv ( "SUPER_OWNER_IDS","" ) .split ( ",") if x.strip (  ) .isdigit (  ) }
-VERSION = "10.11.1"
+VERSION = "10.0"
 OPENAI_API_KEY = os.getenv ( "OPENAI_API_KEY", "" ) .strip ( )
 OPENAI_MODEL = os.getenv ( "OPENAI_MODEL", "gpt-5.6-luna" ) .strip ( ) or "gpt-5.6-luna"
 REBUS_IMAGE_MODEL = os.getenv ( "REBUS_IMAGE_MODEL", "gpt-image-2" ) .strip ( ) or "gpt-image-2"
@@ -65,12 +60,9 @@ AI_RATE_CACHE = {}
 TRANSLATION_SEMAPHORE = asyncio.Semaphore ( 2)
 FLOOD_CACHE = {}
 STATE = {}
-URL_RE = re.compile ( r" ( ?:https?://|www\.| ( ?:t|telegram ) \.me/| ( ?<!\w ) @[A-Za-z0-9_]{5,32}\b ) ", re.I)
+URL_RE = re.compile ( r" ( https?://|www\.|t\.me/|telegram\.me/|@\w+ ) ", re.I)
 
 logging.basicConfig ( level=logging.INFO)
-# SECURITY: httpx INFO logs include the full Telegram Bot API URL (and therefore BOT_TOKEN ) .
-logging.getLogger ( "httpx" ) .setLevel ( logging.WARNING)
-logging.getLogger ( "httpcore" ) .setLevel ( logging.WARNING)
 log = logging.getLogger ( "veritas-v8")
 
 def now (  ) : return int ( time.time (  ) )
@@ -361,7 +353,7 @@ def v9_init_db (  ) :
         """)
 
 def root_choice_markup (  ) :
-    return InlineKeyboardMarkup ( [[InlineKeyboardButton ( "🛡 Veritas",callback_data="root:v8" ) ],[InlineKeyboardButton ( "🎓 O‘quv • Talaba",callback_data="root:v9" ) ]])
+    return InlineKeyboardMarkup ( [[InlineKeyboardButton ( "🛡 Veritas",callback_data="root:v8" ) ],[InlineKeyboardButton ( "🎓 O‘quv • Talaba",callback_data="root:v9" ) ],[InlineKeyboardButton ( "🎮 Veritas o‘yinlari",callback_data="games:menu" ) ]])
 
 def v9_entry_markup (  ) :
     return InlineKeyboardMarkup ( [[InlineKeyboardButton ( "🏫 Maktab",callback_data="v9:inst:school" ) ],[InlineKeyboardButton ( "🏛 Institut",callback_data="v9:inst:institute" ) ,InlineKeyboardButton ( "🎓 Universitet",callback_data="v9:inst:university" ) ],[InlineKeyboardButton ( "⬅️ Veritas tanlash",callback_data="root:choose" ) ]])
@@ -804,7 +796,6 @@ async def v9_show_student_home ( msg,uid ) :
 
 async def v9_private_input ( update,ctx ) :
     msg=update.effective_message;u=update.effective_user
-    if ctx.user_data.get ( "nav_consumed_message_id" ) ==getattr ( msg,"message_id",None ) :return
     if ctx.user_data.get ( "news_consumed_message_id" ) ==getattr ( msg,"message_id",None ) :return
     if not msg or not u or msg.chat.type!="private":return
     st=STATE.get ( u.id) or {};mode=st.get ( "mode")
@@ -1115,152 +1106,56 @@ async def i18n_markup ( markup,lang,bot ) :
         log.exception ( "i18n markup failed")
     return markup
 
-async def _tg_retry_call ( call, *args, **kwargs ) :
-    """Retry Telegram API calls when Telegram explicitly asks us to wait.
-    Prevents temporary 429/Flood Control responses from crashing user flows.
-    """
-    attempts = 0
-    while True:
-        try:
-            return await call ( *args, **kwargs)
-        except RetryAfter as exc:
-            attempts += 1
-            raw = getattr ( exc, "retry_after", 1)
-            try:
-                wait = float ( raw.total_seconds (  ) ) if hasattr ( raw, "total_seconds") else float ( raw)
-            except Exception:
-                wait = 1.0
-            wait = max ( 0.5, wait) + 0.5
-            log.warning ( "Telegram flood control: waiting %.1fs before retry (%s ) ", wait, getattr ( call, "__name__", "api_call" ) )
-            if attempts >= 3 or wait > 90:
-                raise
-            await asyncio.sleep ( wait)
-        except BadRequest:
-            # BadRequest is a NetworkError subclass in python-telegram-bot.
-            # Telegram 400 errors are permanent request errors and must not be retried.
-            raise
-        except (TimedOut, NetworkError) as exc:
-            attempts += 1
-            # Retry only genuine transient transport failures.
-            if attempts >= 4:
-                raise
-            wait = min ( 8.0, 1.5 * (2 ** (attempts - 1 )  ) )
-            log.warning ( "Temporary Telegram network error; retrying in %.1fs (%s ) : %s",
-                        wait, getattr ( call, "__name__", "api_call" ) , exc)
-            await asyncio.sleep ( wait)
-
-
 class VeritasI18nBot ( ExtBot ) :
     async def send_message ( self,chat_id,text,*args,**kwargs ) :
-        skip_i18n=kwargs.pop ( "_skip_i18n", False)
-        if not skip_i18n:
-            lang=chat_lang ( chat_id)
-            text=await i18n_text ( text,lang)
-            if kwargs.get ( "reply_markup" ) :
-                kwargs["reply_markup"]=await i18n_markup ( kwargs["reply_markup"],lang,self)
-        try:
-            return await _tg_retry_call ( super (  ) .send_message,chat_id,text,*args,**kwargs)
-        except TelegramError as exc:
-            # A replied-to message may have been deleted while a workflow was running.
-            # In that case deliver the message normally instead of crashing the flow.
-            if "Message to be replied not found" in str ( exc ) :
-                fallback=dict ( kwargs)
-                fallback.pop ( "reply_to_message_id",None)
-                fallback.pop ( "reply_parameters",None)
-                log.info ( "Missing reply target; sending plain message to chat %s",chat_id)
-                return await _tg_retry_call ( super (  ) .send_message,chat_id,text,*args,**fallback)
-            raise
+        if kwargs.pop ( "_skip_i18n", False ) :
+            return await super (  ) .send_message ( chat_id,text,*args,**kwargs)
+        lang=chat_lang ( chat_id)
+        text=await i18n_text ( text,lang)
+        if kwargs.get ( "reply_markup" ) :
+            kwargs["reply_markup"]=await i18n_markup ( kwargs["reply_markup"],lang,self)
+        return await super (  ) .send_message ( chat_id,text,*args,**kwargs)
 
     async def edit_message_text ( self,text,*args,**kwargs ) :
-        skip_i18n=kwargs.pop ( "_skip_i18n", False)
-        if not skip_i18n:
-            chat_id=kwargs.get ( "chat_id")
-            lang=chat_lang ( chat_id) if chat_id is not None else "uz"
-            text=await i18n_text ( text,lang)
-            if kwargs.get ( "reply_markup" ) :
-                kwargs["reply_markup"]=await i18n_markup ( kwargs["reply_markup"],lang,self)
-        try:
-            return await _tg_retry_call ( super (  ) .edit_message_text,text,*args,**kwargs)
-        except TelegramError as exc:
-            if "Message is not modified" in str ( exc ) :
-                log.info ( "Duplicate message edit ignored")
-                return None
-            raise
+        if kwargs.pop ( "_skip_i18n", False ) :
+            return await super (  ) .edit_message_text ( text,*args,**kwargs)
+        chat_id=kwargs.get ( "chat_id")
+        lang=chat_lang ( chat_id) if chat_id is not None else "uz"
+        text=await i18n_text ( text,lang)
+        if kwargs.get ( "reply_markup" ) :
+            kwargs["reply_markup"]=await i18n_markup ( kwargs["reply_markup"],lang,self)
+        return await super (  ) .edit_message_text ( text,*args,**kwargs)
 
     async def send_photo ( self,chat_id,photo,*args,**kwargs ) :
         if kwargs.pop ( "_skip_i18n", False ) :
-            return await _tg_retry_call ( super (  ) .send_photo,chat_id,photo,*args,**kwargs)
+            return await super (  ) .send_photo ( chat_id,photo,*args,**kwargs)
         lang=chat_lang ( chat_id)
         if kwargs.get ( "caption" ) :kwargs["caption"]=await i18n_text ( kwargs["caption"],lang)
         if kwargs.get ( "reply_markup" ) :kwargs["reply_markup"]=await i18n_markup ( kwargs["reply_markup"],lang,self)
-        return await _tg_retry_call ( super (  ) .send_photo,chat_id,photo,*args,**kwargs)
+        return await super (  ) .send_photo ( chat_id,photo,*args,**kwargs)
 
     async def send_video ( self,chat_id,video,*args,**kwargs ) :
         if kwargs.pop ( "_skip_i18n", False ) :
-            return await _tg_retry_call ( super (  ) .send_video,chat_id,video,*args,**kwargs)
+            return await super (  ) .send_video ( chat_id,video,*args,**kwargs)
         lang=chat_lang ( chat_id)
         if kwargs.get ( "caption" ) :kwargs["caption"]=await i18n_text ( kwargs["caption"],lang)
         if kwargs.get ( "reply_markup" ) :kwargs["reply_markup"]=await i18n_markup ( kwargs["reply_markup"],lang,self)
-        return await _tg_retry_call ( super (  ) .send_video,chat_id,video,*args,**kwargs)
+        return await super (  ) .send_video ( chat_id,video,*args,**kwargs)
 
     async def send_document ( self,chat_id,document,*args,**kwargs ) :
         if kwargs.pop ( "_skip_i18n", False ) :
-            return await _tg_retry_call ( super (  ) .send_document,chat_id,document,*args,**kwargs)
+            return await super (  ) .send_document ( chat_id,document,*args,**kwargs)
         lang=chat_lang ( chat_id)
         if kwargs.get ( "caption" ) :kwargs["caption"]=await i18n_text ( kwargs["caption"],lang)
         if kwargs.get ( "reply_markup" ) :kwargs["reply_markup"]=await i18n_markup ( kwargs["reply_markup"],lang,self)
-        return await _tg_retry_call ( super (  ) .send_document,chat_id,document,*args,**kwargs)
+        return await super (  ) .send_document ( chat_id,document,*args,**kwargs)
 
     async def edit_message_caption ( self,*args,**kwargs ) :
         chat_id=kwargs.get ( "chat_id")
         lang=chat_lang ( chat_id) if chat_id is not None else "uz"
         if kwargs.get ( "caption" ) :kwargs["caption"]=await i18n_text ( kwargs["caption"],lang)
         if kwargs.get ( "reply_markup" ) :kwargs["reply_markup"]=await i18n_markup ( kwargs["reply_markup"],lang,self)
-        return await _tg_retry_call ( super (  ) .edit_message_caption,*args,**kwargs)
-
-    async def edit_message_reply_markup ( self,*args,**kwargs ) :
-        try:
-            return await _tg_retry_call ( super (  ) .edit_message_reply_markup,*args,**kwargs)
-        except TelegramError as exc:
-            if "Message is not modified" in str ( exc ) :
-                log.info ( "Duplicate reply-markup edit ignored")
-                return None
-            raise
-
-    async def send_gift ( self,*args,**kwargs ) :
-        return await _tg_retry_call ( super (  ) .send_gift,*args,**kwargs)
-
-    async def get_available_gifts ( self,*args,**kwargs ) :
-        return await _tg_retry_call ( super (  ) .get_available_gifts,*args,**kwargs)
-
-    async def get_my_star_balance ( self,*args,**kwargs ) :
-        return await _tg_retry_call ( super (  ) .get_my_star_balance,*args,**kwargs)
-
-    async def answer_callback_query ( self,*args,**kwargs ) :
-        # Callback queries expire quickly. Sleeping through Telegram RetryAfter
-        # can turn a harmless rate-limit into "Query is too old".
-        try:
-            return await super (  ) .answer_callback_query ( *args,**kwargs)
-        except RetryAfter as exc:
-            log.warning ( "Callback answer rate-limited; skipped expired answer: %s", exc)
-            return None
-        except TelegramError as exc:
-            text=str ( exc)
-            if "Query is too old" in text or "query id is invalid" in text:
-                log.info ( "Expired callback answer ignored: %s", text)
-                return None
-            raise
-
-    async def delete_message ( self,*args,**kwargs ) :
-        try:
-            return await _tg_retry_call ( super (  ) .delete_message,*args,**kwargs)
-        except BadRequest as exc:
-            text=str ( exc ) .lower ( )
-            if "message to delete not found" in text or "message can't be deleted" in text or "message cannot be deleted" in text:
-                log.info ( "Harmless delete ignored: %s", exc)
-                return False
-            raise
-
+        return await super (  ) .edit_message_caption ( *args,**kwargs)
 
 def group_lang_markup ( chat_id ) :
     return InlineKeyboardMarkup ( [
@@ -1615,6 +1510,7 @@ def main_menu_markup ( uid ) :
       [InlineKeyboardButton ( "🔎 A’zo profili",callback_data="profilefind" ) ,InlineKeyboardButton ( "💠 Qadr TOP",callback_data="qadrtop" ) ],
       [InlineKeyboardButton ( "🤖 Veritas AI",callback_data="ai_private" ) ],
       [InlineKeyboardButton ( "🧩 AI Rebus",callback_data="rebus:start" ) ],
+      [InlineKeyboardButton ( "🎮 Veritas o‘yinlari",callback_data="games:menu" ) ],
       [InlineKeyboardButton ( "📚 Vasatiya kutubxonasi",callback_data="library" ) ,InlineKeyboardButton ( "📜 Sahih Hadislar",callback_data="hadith" ) ],
       [InlineKeyboardButton ( "📨 Egaga xabar qoldirish",callback_data="owner:message" ) ],
       [InlineKeyboardButton ( "🌐 Til / Язык / Language",callback_data="lang:menu" ) ],
@@ -4378,10 +4274,6 @@ async def vse_self_clean ( update,ctx ) :
         return False
     if (msg.text or "" ) .strip (  ) .lower (  ) !="*vse":
         return False
-    # Guruh admini, Veritas admini yoki super egagina tozalay oladi.
-    if not await can_manage ( ctx.bot,chat.id,u.id ) :
-        await msg.reply_text ( "⛔ Bu buyruq faqat adminlar uchun.")
-        return True
     # Buyruq faqat Veritasning xabariga reply qilinganda ishlaydi.
     if not msg.reply_to_message or not msg.reply_to_message.from_user or msg.reply_to_message.from_user.id!=ctx.bot.id:
         return False
@@ -4530,14 +4422,7 @@ async def callback ( update,ctx ) :
         return await v9_callback ( update,ctx)
 
     ensure_user ( u)
-    try:
-        await q.answer ( )
-    except TelegramError as _cb_answer_exc:
-        _cb_answer_text=str ( _cb_answer_exc)
-        if ('Query is too old' not in _cb_answer_text and
-            'query id is invalid' not in _cb_answer_text.lower ( ) and
-            'response timeout expired' not in _cb_answer_text.lower (  )  ) :
-            raise
+    await q.answer ( )
 
     if d=="owner:message":
         if q.message.chat.type != "private":
@@ -5005,50 +4890,32 @@ async def callback ( update,ctx ) :
         r=one ( """SELECT title,book_file_id,book_file_name,book_format,pdf_file_id
                  FROM library_books WHERE id=? AND status='approved'""", ( bid, ) )
         if not r: return await q.answer ( "Kitob topilmadi",show_alert=True)
-        file_ids=list ( dict.fromkeys ( fid for fid in (r["book_file_id"],r["pdf_file_id"]) if fid ) )
-        if not file_ids: return await q.message.reply_text ( "⚠️ Kitob fayli mavjud emas. Admin uni qayta yuklashi kerak.")
-        for fid in file_ids:
-            try:
-                sent=await ctx.bot.send_document(
-                    u.id,fid,
-                    caption=f"📚 {r['title']}\n📁 { ( r['book_format'] or 'PDF' ) .upper (  ) }\nVasatiya kutubxonasi",
-                    _skip_i18n=True
-                )
-            except TelegramError:
-                log.exception ( "Library file send failed: book=%s",bid)
-                continue
-            execute ( "UPDATE library_books SET downloads=downloads+1 WHERE id=?", ( bid, ) )
-            return sent
-        return await q.message.reply_text(
-            "⚠️ Kitobni yubora olmadim. Agar bu tugmani guruhda bosgan bo‘lsangiz, "
-            "avval botning shaxsiy chatida /start ni bosing. Shaxsiy chatda ham "
-            "ishlamasa, admin kitob faylini qayta yuklashi kerak."
-        )
+        fid=r["book_file_id"] or r["pdf_file_id"]
+        if not fid: return await q.answer ( "Kitob fayli mavjud emas",show_alert=True)
+        execute ( "UPDATE library_books SET downloads=downloads+1 WHERE id=?", ( bid, ) )
+        try:
+            return await ctx.bot.send_document(
+                u.id,fid,
+                caption=f"📚 {r['title']}\n📁 { ( r['book_format'] or 'PDF' ) .upper (  ) }\nVasatiya kutubxonasi"
+            )
+        except TelegramError:
+            log.exception ( "Library file send failed: %s",bid)
+            return await q.answer ( "⚠️ Faylni yuborishda xato.",show_alert=True)
 
     if d.startswith ( "libpdf:" ) :
-        bid=int ( d.split ( ":" ) [1] ) ;r=one ( "SELECT title,pdf_file_id FROM library_books WHERE id=? AND status='approved'", ( bid, ) )
-        if not r or not r["pdf_file_id"]:return await q.message.reply_text ( "⚠️ Kitob fayli mavjud emas. Admin uni qayta yuklashi kerak.")
-        try:
-            sent=await ctx.bot.send_document ( u.id,r["pdf_file_id"],caption=f"📚 {r['title']}\nVasatiya kutubxonasi",_skip_i18n=True)
-        except TelegramError:
-            log.exception ( "Library PDF send failed: book=%s",bid)
-            return await q.message.reply_text ( "⚠️ PDF yuborilmadi. Botni shaxsiy chatda /start bilan oching; muammo davom etsa, admin faylni qayta yuklasin.")
+        bid=int ( d.split ( ":" ) [1] ) ; r=one ( "SELECT title,pdf_file_id FROM library_books WHERE id=? AND status='approved'", ( bid, ) )
+        if not r or not r["pdf_file_id"]: return await q.answer ( "Kitob fayli mavjud emas",show_alert=True)
         execute ( "UPDATE library_books SET downloads=downloads+1 WHERE id=?", ( bid, ) )
-        return sent
+        await ctx.bot.send_document ( u.id,r["pdf_file_id"],caption=f"📚 {r['title']}\nVasatiya kutubxonasi")
+        return
 
     if d.startswith ( "libaudio:" ) :
-        bid=int ( d.split ( ":" ) [1] ) ;r=one ( "SELECT title,audio_file_id FROM library_books WHERE id=? AND status='approved'", ( bid, ) )
-        if not r or not r["audio_file_id"]:return await q.message.reply_text ( "⚠️ Audio mavjud emas. Admin uni qayta yuklashi kerak.")
-        try:
-            sent=await ctx.bot.send_audio ( u.id,r["audio_file_id"],caption=f"🎧 {r['title']}\nVasatiya kutubxonasi")
-        except TelegramError:
-            try:
-                sent=await ctx.bot.send_document ( u.id,r["audio_file_id"],caption=f"🎧 {r['title']}",_skip_i18n=True)
-            except TelegramError:
-                log.exception ( "Library audio send failed: book=%s",bid)
-                return await q.message.reply_text ( "⚠️ Audio yuborilmadi. Botni shaxsiy chatda /start bilan oching; muammo davom etsa, admin faylni qayta yuklasin.")
+        bid=int ( d.split ( ":" ) [1] ) ; r=one ( "SELECT title,audio_file_id FROM library_books WHERE id=? AND status='approved'", ( bid, ) )
+        if not r or not r["audio_file_id"]: return await q.answer ( "Audio mavjud emas",show_alert=True)
         execute ( "UPDATE library_books SET downloads=downloads+1 WHERE id=?", ( bid, ) )
-        return sent
+        try: await ctx.bot.send_audio ( u.id,r["audio_file_id"],caption=f"🎧 {r['title']}\nVasatiya kutubxonasi")
+        except Exception: await ctx.bot.send_document ( u.id,r["audio_file_id"],caption=f"🎧 {r['title']}")
+        return
 
     if d.startswith ( "libedit:" ) :
         if not is_library_admin ( u.id ) : return await q.answer ( "Ruxsat yo‘q",show_alert=True )
@@ -5374,7 +5241,7 @@ NATURAL_PERSON_ACTIONS = {
     "admin","unadmin","vadmin","unvadmin","approve","unapprove","id"
 }
 NATURAL_INFO_ACTIONS = {"id","admins","rules","warns","blacklists","locks","approved","filters","notes","aktiv"}
-NATURAL_PROMOTE_ACTIONS = {"admin","unadmin"}
+NATURAL_PROMOTE_ACTIONS = {"admin","unadmin","vadmin","unvadmin"}
 NATURAL_RESTRICT_ACTIONS = {"ban","kick","mute","unmute","unban","warn","unwarn","clearwarns"}
 NATURAL_TOGGLE_MAP = {
     "links_on": ( "links",["on"] ) , "links_off": ( "links",["off"] ) ,
@@ -5409,63 +5276,39 @@ def _natural_duration_seconds ( text ) :
     return 0
 
 def _natural_local_intent ( text ) :
-    """Oddiy gapni buyruq ma'nosiga aylantiradi.
-
-    Muhim farq:
-      - "Veritas admin/ruxsat" -> ichki Veritas huquqi (vadmin)
-      - "Telegram/guruh admin" yoki oddiy "admin qil" -> Telegram admini
-    Bir-biriga o'xshash iboralar avval kontekst bo'yicha ajratiladi.
-    """
+    """Eng ko'p ishlatiladigan iboralar uchun tez, AI-siz parser."""
     t=_natural_norm ( text)
-
-    def has ( *phrases ) :
-        return any ( p in t for p in phrases)
-
-    # 1) Veritas ichki boshqaruv huquqi — Telegram adminidan alohida.
-    veritas_admin_context=bool ( re.search ( r"\bveritas\s+ ( ?:admin|ruxsat|huquq ) ",t ) ) or has ( "veritasga ruxsat","veritas ruxsat")
-    if veritas_admin_context:
-        if has ( "olib tashla","ol","bekor qil","ochir","o'chir","ruxsatsiz","tushir" ) :
-            return {"action":"unvadmin","confidence":1.0,"duration_seconds":0,"reason":"","target_text":""}
-        if has ( "ber","qil","qo'sh","qosh","tayinla","ruxsat ber" ) :
-            return {"action":"vadmin","confidence":1.0,"duration_seconds":0,"reason":"","target_text":""}
-
-    # 2) Telegram/guruh adminligi. "Veritas admin" yuqorida ushlangan.
-    if has ( "telegram admin","guruh admin","gruppa admin","administrator") or ("admin" in t and not veritas_admin_context ) :
-        if has ( "adminlikni ol","adminligini ol","adminlikdan ol","admindan tushir","adminlikdan tushir",
-               "adminni ol","admin huquqini ol","qanotini kes","unadmin","olib tashla" ) :
-            return {"action":"unadmin","confidence":1.0,"duration_seconds":0,"reason":"","target_text":""}
-        if has ( "admin qil","adminlik ber","adminligini ber","admin qilib qo'y","admin qilib qoy",
-               "administrator qil","admin tayinla","qanot ber" ) :
-            return {"action":"admin","confidence":1.0,"duration_seconds":0,"reason":"","target_text":""}
-
-    # 3) Qolgan kundalik iboralar. Qarama-qarshi amallar avval.
+    # Qarama-qarshi amallar avval tekshiriladi.
     pairs=[
-        ("unban", ["unban","bandan chiqar","banini och","blokdan chiqar","blokini och"] ) ,
-        ("unmute", ["unmute","muteni och","mute och","gapirishga ruxsat","yozishga ruxsat","jimlikni ol"] ) ,
-        ("unwarn", ["unwarn","warnni kamaytir","ogohlantirishni kamaytir","bitta warnni ol"] ) ,
-        ("clearwarns", ["warnlarni tozala","warnlarini tozala","ogohlantirishlarini tozala","hamma warnini ol"] ) ,
-        ("unapprove", ["unapprove","approvedan chiqar","ishonchdan chiqar","tasdiqdan chiqar"] ) ,
-        ("approve", ["approve qil","ishonchli qil","tasdiqlangan qil","himoyaga ol"] ) ,
+        ("unadmin", ["adminlikni ol","adminlikdan ol","admindan tushir","qanotini kes","unadmin"] ) ,
+        ("unban", ["unban","bandan chiqar","banini och","blokdan chiqar"] ) ,
+        ("unmute", ["unmute","muteni och","mute och","gapirishga ruxsat","yozishga ruxsat"] ) ,
+        ("unwarn", ["unwarn","warnni kamaytir","ogohlantirishni kamaytir"] ) ,
+        ("clearwarns", ["warnlarni tozala","warnlarini tozala","ogohlantirishlarini tozala"] ) ,
+        ("unvadmin", ["veritas adminligini ol","veritas ruxsatini ol","ruxsatsiz qil"] ) ,
+        ("unapprove", ["unapprove","approvedan chiqar","ishonchdan chiqar"] ) ,
+        ("admin", ["admin qil","admin qilib qo'y","admin qilib qoy","qanot ber","administrator qil"] ) ,
+        ("vadmin", ["veritas admin qil","veritasga ruxsat ber","ruxsat ber"] ) ,
+        ("approve", ["approve qil","ishonchli qil","tasdiqlangan qil"] ) ,
         ("ban", ["ban qil","blokla","blok qil","hide all","guruhdan butunlay chiqar","qayta kirmasin","yo'qot","yoqot"] ) ,
-        ("kick", ["kick qil","chiqarib yubor","guruhdan chiqar","haydab yubor","guruhdan olib tashla"] ) ,
-        ("mute", ["mute qil","jim qil","gapirtirma","yozdirma","dam ber","ovozini o'chir","ovozini ochir"] ) ,
-        ("warn", ["warn ber","ogohlantir","ogohlantirish ber","bir warn ber"] ) ,
-        ("delete", ["xabarni o'chir","xabarni ochir","buni o'chir","buni ochir","delete qil","shu xabarni olib tashla"] ) ,
-        ("pin", ["pin qil","tepaga qotir","mahkamla","tepaga mahkamla"] ) ,
-        ("unpin", ["unpin","pinni ol","pindan ol","pinni yech"] ) ,
-        ("id", ["id sini ayt","id sini ber","id sini chiqar","idni ayt","idni ber","idni chiqar","id raqamini ayt"] ) ,
-        ("admins", ["adminlarni ko'rsat","adminlar kim","adminlar ro'yxati","kim admin"] ) ,
-        ("rules", ["qoidalarni ko'rsat","qoidalar nima","qoidani ko'rsat","guruh qoidasi"] ) ,
-        ("aktiv", ["faollikni ko'rsat","aktivlikni ko'rsat","eng faollar","faol a'zolar","kim faol"] ) ,
-        # groups.links=1 — link HIMOYASI yoqilgan (linklar o‘chiriladi ) .
-        ("links_on", ["linklarni yop","linkni yop","havolalarni taqiql","link tashlashni yop","link himoyasini yoq"] ) ,
-        ("links_off", ["linklarga ruxsat","linkni och","linklarni och","havolalarni och","link tashlashni och","link himoyasini o'chir","link himoyasini ochir"] ) ,
-        ("antiflood_on", ["antifloodni yoq","flood himoyasini yoq","flooddan himoyani yoq"] ) ,
-        ("antiflood_off", ["antifloodni o'chir","antifloodni ochir","flood himoyasini o'chir","flood himoyasini ochir"] ) ,
-        ("welcome_on", ["welcome yoq","kutib olishni yoq","yangi azoni kutib ol"] ) ,
-        ("welcome_off", ["welcome o'chir","welcome ochir","kutib olishni o'chir","kutib olishni ochir"] ) ,
+        ("kick", ["kick qil","chiqarib yubor","guruhdan chiqar","haydab yubor"] ) ,
+        ("mute", ["mute qil","jim qil","gapirtirma","yozdirma","dam ber","ovozini o'chir"] ) ,
+        ("warn", ["warn ber","ogohlantir","ogohlantirish ber"] ) ,
+        ("delete", ["xabarni o'chir","xabarni ochir","buni o'chir","buni ochir","delete qil"] ) ,
+        ("pin", ["pin qil","tepaga qotir","mahkamla"] ) ,
+        ("unpin", ["unpin","pinni ol","pindan ol"] ) ,
+        ("id", ["id sini ayt","id sini ber","id sini chiqar","idni ayt","idni ber","idni chiqar"] ) ,
+        ("admins", ["adminlarni ko'rsat","adminlar kim","adminlar ro'yxati"] ) ,
+        ("rules", ["qoidalarni ko'rsat","qoidalar nima","qoidani ko'rsat"] ) ,
+        ("aktiv", ["faollikni ko'rsat","aktivlikni ko'rsat","eng faollar","faol a'zolar"] ) ,
+        ("links_off", ["linklarni yop","linkni yop","havolalarni taqiql"] ) ,
+        ("links_on", ["linklarga ruxsat","linkni och","havolalarni och"] ) ,
+        ("antiflood_on", ["antifloodni yoq","flood himoyasini yoq"] ) ,
+        ("antiflood_off", ["antifloodni o'chir","flood himoyasini o'chir"] ) ,
+        ("welcome_on", ["welcome yoq","kutib olishni yoq"] ) ,
+        ("welcome_off", ["welcome o'chir","kutib olishni o'chir"] ) ,
         ("goodbye_on", ["goodbye yoq","xayrlashishni yoq"] ) ,
-        ("goodbye_off", ["goodbye o'chir","goodbye ochir","xayrlashishni o'chir","xayrlashishni ochir"] ) ,
+        ("goodbye_off", ["goodbye o'chir","xayrlashishni o'chir"] ) ,
     ]
     for action,phrases in pairs:
         if any ( p in t for p in phrases ) :
@@ -5479,8 +5322,6 @@ def _natural_intent_sync ( user_text ) :
         "Siz Veritas Telegram guruh boshqaruvi uchun FAQAT buyruq niyatini ajratuvchi klassifikatorsiz. "
         "Foydalanuvchi o'zbekcha/ruscha/inglizcha yoki slang bilan yozishi mumkin. "
         "Masalan 'hide all' -> ban; 'qanot ber' -> admin; 'dam ber' -> mute; 'haydab yubor' -> kick. "
-        "MUHIM: 'Veritas admin/ruxsat ber' -> vadmin, 'Veritas adminligini/ruxsatini ol' -> unvadmin. "
-        "Oddiy 'admin qil' yoki 'Telegram/guruh admini qil' -> admin; 'adminligini ol/admindan tushir' -> unadmin. "
         "Faqat quyidagi actionlardan bittasini tanlang: " + ",".join ( sorted ( NATURAL_ALLOWED_ACTIONS ) ) + ". "
         "Moliyaviy to'lov, gift/premium, superadmin, kitob/hadis admini yoki noma'lum xavfli ish so'ralsa action=none. "
         "Agar oddiy suhbat/savol bo'lsa action=none. "
@@ -5521,9 +5362,6 @@ async def _natural_actor_allowed ( ctx,chat_id,actor_id,action ) :
     is_vadmin=bool ( one ( "SELECT 1 FROM vadmins WHERE chat_id=? AND user_id=?", ( chat_id,actor_id )  ) )
     if action in NATURAL_PROMOTE_ACTIONS:
         return bool ( is_admin and getattr ( m,"can_promote_members",False ) )
-    if action in {"vadmin","unvadmin"}:
-        # Ichki Veritas boshqaruv huquqini faqat haqiqiy Telegram admin/owner yoki Super boshqaradi.
-        return bool ( is_admin)
     if action in NATURAL_RESTRICT_ACTIONS:
         return bool ( is_vadmin or (is_admin and getattr ( m,"can_restrict_members",False )  ) )
     if action=="delete":
@@ -5540,47 +5378,38 @@ async def _natural_actor_allowed ( ctx,chat_id,actor_id,action ) :
 
 async def _natural_target ( update,ctx,target_text="" ) :
     msg=update.effective_message; chat=update.effective_chat
+    # 1) Reply — eng ishonchli.
+    rp=msg.reply_to_message if msg else None
+    if rp and rp.from_user and rp.from_user.id!=ctx.bot.id:
+        return rp.from_user.id, rp.from_user.full_name or rp.from_user.first_name or str ( rp.from_user.id)
     raw= ( target_text or "" ) .strip ( )
     full= ( msg.text or msg.caption or "") if msg else ""
-
-    # 1) Aniq @username yozilgan bo‘lsa replydan ham ustun — foydalanuvchi kimni nazarda tutgani ravshan.
+    # 2) @username
     candidates=[]
     if raw.startswith ( "@" ) :candidates=[raw[1:]]
-    else:candidates=re.findall ( r"@ ( [A-Za-z0-9_]{5,32} ) ",full)
+    else:
+        candidates=re.findall ( r"@ ( [A-Za-z0-9_]{5,32} ) ",full)
     botname= ( getattr ( ctx.bot,"username","") or "" ) .lower ( )
     for uname in candidates:
         if uname.lower (  ) ==botname:continue
         r=one ( "SELECT user_id,first_name,username FROM users WHERE lower ( username ) =lower ( ?) ORDER BY user_id DESC LIMIT 1", ( uname, ) )
         if r:
-            try:
-                cm=await ctx.bot.get_chat_member ( chat.id,int ( r["user_id"] ) )
-                if cm.status in (ChatMemberStatus.LEFT,ChatMemberStatus.BANNED ) :continue
+            try:await ctx.bot.get_chat_member ( chat.id,int ( r["user_id"] ) )
             except TelegramError:continue
             return int ( r["user_id"] ) , ( r["first_name"] or ("@"+ ( r["username"] or uname )  ) )
-
-    # 2) Aniq raqamli Telegram ID.
+    # 3) Raqamli ID
     ids=[]
     if raw.isdigit (  ) :ids=[raw]
     else:ids=re.findall ( r" ( ?<!\d )  ( \d{5,15} )  ( ?!\d ) ",full)
     for sid in ids:
         uid=int ( sid)
-        if uid==update.effective_user.id and len ( ids ) ==1 and not raw:continue
-        try:
-            cm=await ctx.bot.get_chat_member ( chat.id,uid)
-            if cm.status in (ChatMemberStatus.LEFT,ChatMemberStatus.BANNED ) :continue
-        except TelegramError:
-            # Ban/unban kabi holatda foydalanuvchi chatda bo‘lmasligi mumkin; bazada tanilgan ID bo‘lsa saqlaymiz.
-            if not one ( "SELECT 1 FROM users WHERE user_id=?", ( uid, )  ) :continue
+        if uid==update.effective_user.id and len ( ids ) ==1 and not raw:
+            # Gapdagi o'z ID si tasodifan target bo'lib qolmasin; explicit target_text bo'lsa ruxsat.
+            continue
         r=one ( "SELECT first_name,username FROM users WHERE user_id=?", ( uid, ) )
         name= ( r["first_name"] if r and r["first_name"] else ("@"+r["username"] if r and r["username"] else str ( uid )  ) )
         return uid,name
-
-    # 3) Reply — eng ishonchli keyingi usul.
-    rp=msg.reply_to_message if msg else None
-    if rp and rp.from_user and rp.from_user.id!=ctx.bot.id:
-        return rp.from_user.id, rp.from_user.full_name or rp.from_user.first_name or str ( rp.from_user.id)
-
-    # 4) AI ajratgan aniq ism — shu guruhda bitta mos odam bo‘lsa.
+    # 4) AI ajratgan aniq ism — faqat guruhda bitta mos odam bo'lsa.
     if raw and not raw.startswith ( "@") and not raw.isdigit (  ) :
         rows=all_ ( "SELECT u.user_id,u.first_name,u.username FROM users u JOIN members m ON m.user_id=u.user_id WHERE m.chat_id=? AND lower ( u.first_name ) =lower ( ?) LIMIT 3", ( chat.id,raw ) )
         if len ( rows ) ==1:
@@ -5703,15 +5532,7 @@ async def _natural_execute ( update,ctx,intent ) :
         else:return False
         audit ( actor.id,chat.id,"natural_"+action,str ( target_id ) )
         extra= ( f" — {dur//60} daqiqa" if dur and dur%60==0 else (f" — {dur} soniya" if dur else "" ) )
-        labels={
-            "ban":"bloklandi","kick":"guruhdan chiqarildi","mute":"yozishi cheklandi","unmute":"mute ochildi",
-            "unban":"ban ochildi","warn":"ogohlantirildi","unwarn":"bitta ogohlantirishi olindi",
-            "clearwarns":"ogohlantirishlari tozalandi","admin":"Telegram admini qilindi",
-            "unadmin":"Telegram adminligi olib tashlandi","vadmin":"Veritas boshqaruv huquqi berildi",
-            "unvadmin":"Veritas boshqaruv huquqi olib tashlandi","approve":"himoyalangan a’zo qilindi",
-            "unapprove":"himoya ro‘yxatidan chiqarildi"
-        }
-        await msg.reply_text ( f"✅ {target_name}: {labels.get ( action, action+' bajarildi' ) }{extra}.")
+        await msg.reply_text ( f"✅ {target_name}: {action} bajarildi{extra}.")
         return True
     except TelegramError as e:
         await msg.reply_text ( f"❌ Telegram bu amalni bajarmadi: {e}")
@@ -6122,7 +5943,6 @@ async def bayram_callback ( update,ctx ) :
     if camp['status']!='draft':return await q.answer ( 'Bu bayram allaqachon yakunlangan yoki boshlangan.',show_alert=True)
     if action=='cancel':
         execute ( "UPDATE bayram_campaigns SET status='cancelled' WHERE id=?", ( cid, ) )
-        ctx.user_data.pop ( 'bayram_state',None)
         await q.answer (  ) ;return await q.edit_message_text ( '❌ Bayram bekor qilindi.')
     if action=='count':
         n=int ( a[3] ) ;
@@ -6140,7 +5960,7 @@ async def bayram_callback ( update,ctx ) :
         if not gifts:
             return await q.answer ( f'Hozir {price} ⭐ narxli Gift mavjud emas.',show_alert=True)
         execute ( 'UPDATE bayram_campaigns SET gift_price=?,gift_id=? WHERE id=?', ( price,str ( gifts[0].id ) ,cid ) )
-        ctx.user_data['bayram_state']={'mode':'bayram_greeting','bayram_id':cid}
+        STATE[u.id]={'mode':'bayram_greeting','bayram_id':cid}
         await q.answer ( )
         await q.edit_message_text ( '💌 TABRIKNOMA\n\nEndi shaxsiy chatda botga tabriknoma matnini yuboring.\nBotga /start bosib qo‘ying, agar avval yozmagan bo‘lsangiz.')
         try:await ctx.bot.send_message ( u.id,f'🎉 BAYRAM #{cid}\n\nTabriknoma matnini shu yerga yozing. Matn sovg‘aga biriktiriladi va guruhda ham e’lon qilinadi.')
@@ -6187,7 +6007,7 @@ async def bayram_callback ( update,ctx ) :
             execute ( "UPDATE bayram_winners SET status='failed',error=? WHERE campaign_id=? AND user_id=?", ( str ( e ) [:250],cid,uid ) )
             # Gift ketmagan bo‘lsa shu odam uchun rezerv qilingan kreditni kabinetga qaytaramiz.
             wallet_change ( creator_id,int ( camp['gift_price'] ) ,'bayram_refund',uid,ref=f'bayram:{cid}',meta={'campaign_id':cid,'reason':'gift_failed'})
-        await asyncio.sleep ( 0.60)
+        await asyncio.sleep ( 0.15)
     execute ( "UPDATE bayram_campaigns SET status='completed' WHERE id=?", ( cid, ) )
     # Faqat HAQIQATDA yuborilgan sovg‘alar g‘olib sifatida e’lon qilinadi.
     lines=[]
@@ -6215,7 +6035,7 @@ async def bayram_callback ( update,ctx ) :
 async def bayram_private_input ( update,ctx ) :
     msg=update.effective_message;u=update.effective_user
     if not msg or not u or msg.chat.type!='private':return
-    st=ctx.user_data.get ( 'bayram_state') or {}
+    st=STATE.get ( u.id) or {}
     if st.get ( 'mode' ) !='bayram_greeting':return
     ctx.user_data['bayram_consumed_message_id']=msg.message_id
     greeting= ( msg.text or '' ) .strip ( )
@@ -6223,7 +6043,7 @@ async def bayram_private_input ( update,ctx ) :
         return await ctx.bot.send_message ( chat_id=msg.chat_id, text='💌 Gift ichidagi tabriknoma 120 belgidan oshmasin. Iltimos, qisqaroq matn yozing.')
     cid=st['bayram_id'];camp=one ( 'SELECT * FROM bayram_campaigns WHERE id=? AND creator_id=? AND status="draft"', ( cid,u.id ) )
     if not camp:
-        ctx.user_data.pop ( 'bayram_state',None ) ;return await ctx.bot.send_message ( chat_id=msg.chat_id, text='Bu Bayram sessiyasi endi faol emas. Guruhdagi Bayram tugmasidan yangisini boshlang.')
+        STATE.pop ( u.id,None ) ;return await ctx.bot.send_message ( chat_id=msg.chat_id, text='Bu bayram sessiyasi tugagan.')
     winners=bayram_candidates ( camp['chat_id'],camp['winner_count'])
     if not winners:
         return await ctx.bot.send_message ( chat_id=msg.chat_id, text='Oxirgi 10 soatda faol a’zolar topilmadi.')
@@ -6231,7 +6051,7 @@ async def bayram_private_input ( update,ctx ) :
         c.execute ( 'DELETE FROM bayram_winners WHERE campaign_id=?', ( cid, ) )
         c.executemany ( 'INSERT INTO bayram_winners ( campaign_id,user_id,msg_count) VALUES ( ?,?,? ) ',[ ( cid,r['user_id'],r['n']) for r in winners])
         c.execute ( 'UPDATE bayram_campaigns SET greeting=? WHERE id=?', ( greeting,cid ) )
-    ctx.user_data.pop ( 'bayram_state',None)
+    STATE.pop ( u.id,None)
     count=len ( winners ) ;total=count*camp['gift_price']
     await ctx.bot.send_message ( chat_id=msg.chat_id, text=f'🎉 BAYRAM TASDIQLASH\n\n👥 G‘oliblar: {count} kishi\n⏱ Oxirgi 10 soat\n🎁 Har biriga: {camp["gift_price"]} ⭐ Gift\n💰 Jami: {total} ⭐\n⭐ Kabinet balansingiz: {wallet ( u.id ) } ⭐\n\n💌 {greeting}\n\n⚠️ TASDIQLASH bosilsa jami summa sizning Veritas kabinet balansingizdan yechiladi. Haqiqiy Giftni bot yuboradi; shaxsiy Telegram Stars hisobingizdan yechilmaydi.',reply_markup=bayram_markup ( cid,'confirm' ) )
 
@@ -6872,14 +6692,14 @@ def v10_help_text ( section,uid,chat_id=0 ) :
     data={
       "ai":"🤖 SUHBAT VA AI\n\nVeritasga oddiy o‘zbekcha gap bilan murojaat qiling. Buyruqlarni yodlash shart emas. Guruhda ‘Veritas ...’ deb yozing, shaxsiy chatda esa to‘g‘ridan-to‘g‘ri savol bering.",
       "memory":"🧠 XOTIRA\n\nVeritas ko‘rgan xabarlarni shaxs va guruh bo‘yicha arxivlaydi. ‘Veritas, bugun nima bo‘ldi?’, ‘kecha nimani gaplashgandik?’, ‘men kimman?’ kabi savollar ishlaydi. Bot ko‘rmagan suhbatni bilmaydi.",
-      "admin":"🛡 GURUH BOSHQARUVI\n\nBuyruq yodlash shart emas. Masalan: ‘Veritas, @userni 2 soat mute qil’, ‘Veritas adminligini ol’, ‘Telegram adminligini ol’, ‘linklarni yop’. Mazgila uchun reply qilib ‘Veritas mazgila qil’, o‘chirish uchun ‘Veritas mazgilani o‘chir’."+ ( "\nSizda boshqaruv funksiyalari ko‘rinadi." if admin else "\nBoshqaruv amallari faqat ruxsatli adminlarga ochiladi." ) ,
+      "admin":"🛡 GURUH BOSHQARUVI\n\nOddiy tilda mute, warn, ban, kick, qoidalar, faollik va boshqa amallar ishlaydi."+ ( "\nSizda boshqaruv funksiyalari ko‘rinadi." if admin else "\nBoshqaruv amallari faqat ruxsatli adminlarga ochiladi." ) ,
       "quiz":"📝 TEST / SAVOL-JAVOB / REBUS\n\nTugma orqali yoki ‘Veritas, menga 5 ta test tayyorla’ deb so‘rang. Reply qilingan xabardan, kutubxona kitobidan, mavzudan, internetdan yoki AI o‘zi tuzgan manbadan foydalanish mumkin. Default — 5 ta.",
       "library":"📚 KITOB VA HADIS\n\nVasatiya kutubxonasi va mahalliy hadis bazasi mavjud. Test uchun kutubxonadagi kitobni manba sifatida tanlash mumkin.",
       "autopost":"📢 SHAXSIY KANAL AVTOPOST\n\nShaxsiy chatda ‘📢 Avtopost’ni bosing. Kanalni ulang, kitob yoki mavzuni tanlang, kunlik vaqtni belgilang. Avtomatik yoki avval tasdiqlash rejimi, rasmli yoki faqat matnli post tanlanadi.",
       "tasks":"⏰ ESLATMA VA KUZATUV\n\nMasalan: ‘Veritas, ertaga soat 8 da kitobni eslat’. Guruhda biror a’zoga reply qilib ‘u yozsa menga ayt’ desa, Veritas kuzatuv yaratadi.",
       "bayram":"🎉 BAYRAM\n\nGuruhdagi har bir a’zo Bayram ochishi mumkin. Xarajat Bayramni ochgan odamning Veritas kabinet balansidan yechiladi; yuborilmagan Giftlar uchun kredit qaytariladi. Haqiqiy Giftni bot yuboradi.",
       "voice":"🎙 VOICE\n\nVoice xabar Veritas tomonidan matnga aylantiriladi va mazmuniga qarab javob beriladi. Veritasga aytilgan oddiy AI so‘rovlari voice orqali ham ishlaydi.",
-      "power":"⚡ UYG‘ON / UXLA\n\nGuruh admini: ‘Veritas uyg‘on’, ‘ishga tush’, ‘Veritas uxla’ yoki ‘dam ol’. Uxla rejimi suhbat/AI javobini to‘xtatadi; moderatsiya, arxiv, kuzatuv va yoqilgan avtomatik rejimlar ishlashda davom etadi. Har guruh holati alohida saqlanadi.",
+      "power":"⚡ UYG‘ON / UXLA\n\nGuruh admini: ‘Veritas uyg‘on’ yoki ‘Veritas uxla’. Har guruh holati alohida saqlanadi. Super Ega barcha guruhlarni birdan uyg‘otishi yoki uxlatishi mumkin.",
     }
     return data.get ( section,"Bo‘lim topilmadi.")
 
@@ -7445,9 +7265,6 @@ _v10_prev_natural_router=natural_veritas_router
 async def natural_veritas_router ( update,ctx ) :
     msg=update.effective_message;chat=update.effective_chat;u=update.effective_user
     if not msg or not chat or not u or u.is_bot:return
-    # Dedicated early handlers (power/presence, etc.) can consume the message.
-    if ctx.chat_data.get ( 'v10_consumed_message_id' ) ==msg.message_id or ctx.user_data.get ( 'v10_consumed_message_id' ) ==msg.message_id:
-        return
     if await v10_handle_open_answer ( update,ctx ) :
         ctx.user_data['v10_consumed_message_id']=msg.message_id;ctx.chat_data['v10_consumed_message_id']=msg.message_id;return
     if await v10_private_or_group_state_input ( update,ctx ) :
@@ -7521,9 +7338,8 @@ async def passive ( update,ctx ) :
     if msg and chat and u and not u.is_bot and chat.type in ('group','supergroup' ) :
         try:await v10_check_message_watches ( ctx,chat.id,u.id,_v10_message_body ( msg ) )
         except Exception:log.exception ( 'V10 watch check failed')
-        # "Uxla" faqat suhbat/AI javobini uxlatadi. Moderatsiya, aktivlik, arxiv,
-        # watch va Mazgila avtomatik rejimlari ishlashda davom etadi.
-    if msg and ( ( ctx.chat_data or {} ) .get ( 'v10_consumed_message_id' ) ==msg.message_id or (ctx.user_data or {} ) .get ( 'v10_consumed_message_id' ) ==msg.message_id ) :return
+        if not v10_group_awake ( chat.id ) :return
+    if msg and (ctx.chat_data.get ( 'v10_consumed_message_id' ) ==msg.message_id or ctx.user_data.get ( 'v10_consumed_message_id' ) ==msg.message_id ) :return
     return await _v10_prev_passive ( update,ctx)
 
 
@@ -7542,12 +7358,7 @@ async def new_members ( update,ctx ) :
 _v10_prev_callback=callback
 async def callback ( update,ctx ) :
     data= ( update.callback_query.data or '') if update.callback_query else ''
-    # excerpt:* has its own earlier CallbackQueryHandler. Do not let it
-    # continue into the legacy callback chain and answer the same query twice.
-    if data.startswith ( 'excerpt:' ) :
-        return
-    if data.startswith ( 'v10:' ) :
-        return await v10_callback ( update,ctx)
+    if data.startswith ( 'v10:' ) :return await v10_callback ( update,ctx)
     return await _v10_prev_callback ( update,ctx)
 
 
@@ -7558,20 +7369,6 @@ async def v10_error_handler ( update,ctx ) :
     # Telegram bir xil matn/tugmani qayta edit qilganda bu zararli xato emas.
     if 'Message is not modified' in err:
         log.info ( 'V10 harmless Telegram edit ignored: %s', err)
-        return
-    if 'Message to delete not found' in err or "message can't be deleted" in err.lower ( ) or 'message cannot be deleted' in err.lower (  ) :
-        log.info ( 'V10 harmless Telegram delete ignored: %s', err)
-        return
-    if isinstance ( err_obj, RetryAfter) or 'Flood control exceeded' in err or 'Retry in ' in err:
-        log.warning ( 'V10 temporary Telegram flood control ignored by error reporter: %s', err)
-        return
-    if isinstance ( err_obj, (TimedOut, NetworkError ) ) or 'httpx.ReadError' in err or 'httpx.ConnectError' in err:
-        # Polling has its own network retry loop. Do not spam Super Owners with transient
-        # connection tracebacks; log once and let python-telegram-bot reconnect.
-        log.warning ( 'V10 temporary Telegram network error; polling will retry: %s', err)
-        return
-    if 'Query is too old' in err or 'query id is invalid' in err:
-        log.info ( 'Expired Telegram callback ignored by error reporter: %s', err)
         return
     try:
         await _v10_prev_error_handler ( update,ctx)
@@ -7588,239 +7385,295 @@ async def v10_error_handler ( update,ctx ) :
 
 
 
-# ================================================================
-# V10.8 — Vasatiya: verified excerpts from uploaded PDF text
-# ================================================================
-def excerpt_picker_markup ( page=0 ) :
-    page=max ( 0,int ( page )  ) ; per=8
-    rows=all_ ( "SELECT id,title,author FROM library_books WHERE status='approved' ORDER BY id DESC LIMIT ? OFFSET ?", ( per+1,page*per ) )
-    has_next=len ( rows ) >per; rows=rows[:per]
-    buttons=[[InlineKeyboardButton ( '📖 '+str ( r['title'] ) [:52],callback_data=f'excerpt:book:{r["id"]}' ) ] for r in rows]
-    nav=[]
-    if page:nav.append ( InlineKeyboardButton ( '⬅️ Oldingi',callback_data=f'excerpt:page:{page-1}' ) )
-    if has_next:nav.append ( InlineKeyboardButton ( 'Keyingi ➡️',callback_data=f'excerpt:page:{page+1}' ) )
-    if nav:buttons.append ( nav)
-    return InlineKeyboardMarkup ( buttons) if buttons else None
+# === QALALAR URUSHI: ISOLATED EMBEDDED MODULE ===
+import types as _war_types
+veritas_qalalar = _war_types.ModuleType ( 'veritas_qalalar_embedded')
+exec ( compile ( '"""Veritas Qal\'alar urushi — first playable alpha. PTB 22+, SQLite."""\nimport random, time, sqlite3, html\nfrom telegram import InlineKeyboardButton as B, InlineKeyboardMarkup as M\nfrom telegram.ext import CommandHandler, CallbackQueryHandler, MessageHandler, filters\n\nDB_PATH=None\n\ndef conn (  ) :\n    c=sqlite3.connect ( DB_PATH,timeout=30 ) ;c.row_factory=sqlite3.Row;return c\n\ndef init ( path ) :\n    global DB_PATH;DB_PATH=path\n    with conn ( ) as c:\n        c.executescript ( \'\'\'\n        CREATE TABLE IF NOT EXISTS war_games ( chat_id INTEGER PRIMARY KEY,status TEXT NOT NULL DEFAULT \'lobby\',started INTEGER DEFAULT 0,updated INTEGER DEFAULT 0 ) ;\n        CREATE TABLE IF NOT EXISTS war_players ( chat_id INTEGER,user_id INTEGER,name TEXT,team INTEGER DEFAULT 0,king INTEGER DEFAULT 0,PRIMARY KEY ( chat_id,user_id )  ) ;\n        CREATE TABLE IF NOT EXISTS war_forts ( id INTEGER PRIMARY KEY AUTOINCREMENT,chat_id INTEGER,team INTEGER,owner INTEGER,kind TEXT,troops INTEGER,updated INTEGER ) ;\n        CREATE INDEX IF NOT EXISTS war_forts_chat ON war_forts ( chat_id ) ;\n        CREATE TABLE IF NOT EXISTS war_votes ( chat_id INTEGER,team INTEGER,voter INTEGER,candidate INTEGER,PRIMARY KEY ( chat_id,voter )  ) ;\n        CREATE TABLE IF NOT EXISTS war_moves ( id INTEGER PRIMARY KEY AUTOINCREMENT,chat_id INTEGER,owner INTEGER,src INTEGER,dst INTEGER,troops INTEGER,arrival INTEGER,status TEXT DEFAULT \'moving\' ) ;\n        \'\'\' ) \n\ndef game ( cid ) :\n    with conn ( ) as c:return c.execute ( \'SELECT * FROM war_games WHERE chat_id=?\', ( cid, )  ) .fetchone (  ) \n\ndef menu (  ) :return M ( [[B ( \'➕ Qo‘shilish\',callback_data=\'war:join\' ) ,B ( \'🚀 Boshlash\',callback_data=\'war:start\' ) ],[B ( \'🗺 Xarita\',callback_data=\'war:map\' ) ,B ( \'📜 Qoidalar\',callback_data=\'war:rules\' ) ]] ) \nRULES= ( \'⚔️ QAL’ALAR URUSHI — ALFA\\n\\nIkki davlat o‘zaro kurashadi. Har bir qal’a boshlig‘i 10 askar, podshoh 25 askar va qasr bilan boshlaydi. \'\n       \'Podshohni jamoa saylaydi. Askar faqat qasrda har soniyada +1 ko‘payadi. \'\n       \'Qo‘shinlar boshqa qal’aga yuboriladi, yo‘l 10–30 soniya. Kuchli tomon qal’ani egallaydi. \'\n       \'Dushmanning barcha qal’alarini olgach, uning qasrini egallagan davlat g‘olib.\\n\\n\'\n       \'Hozirgi alfa: lobby, ikki davlat, saylov, xarita, askar ishlab chiqarish, ko‘chirish va jang. \'\n       \'Olmos, qahramon, AI rasmlar, sovg‘alar va guruhni yopish keyingi bosqichda.\' ) \n\ndef troops ( f ) :\n    return f[\'troops\']+max ( 0,int ( time.time (  )  ) -f[\'updated\']) if f[\'kind\']==\'palace\' else f[\'troops\']\n\ndef fort ( cid,fid ) :\n    with conn ( ) as c:return c.execute ( \'SELECT * FROM war_forts WHERE chat_id=? AND id=?\', ( cid,fid )  ) .fetchone (  ) \n\ndef map_text ( cid ) :\n    with conn ( ) as c:\n        fs=c.execute ( \'SELECT * FROM war_forts WHERE chat_id=? ORDER BY team,kind DESC,id\', ( cid, )  ) .fetchall (  ) \n        names={r[\'user_id\']:r[\'name\'] for r in c.execute ( \'SELECT * FROM war_players WHERE chat_id=?\', ( cid, )  ) }\n    if not fs:return \'Hozircha xarita yo‘q.\'\n    lines=[\'🗺 QAL’ALAR XARITASI\',\'\']\n    for t in (1,2 ) :\n        lines.append ( \'🔵 KO‘K DAVLAT\' if t==1 else \'🔴 QIZIL DAVLAT\' ) \n        for f in fs:\n            if f[\'team\']==t:\n                lines.append ( f"{\'👑 Qasr\' if f[\'kind\']==\'palace\' else \'🏰 Qal’a\'} #{f[\'id\']} · {names.get ( f[\'owner\'],\'Noma’lum\' ) } · {troops ( f ) } askar" ) \n        lines.append ( \'\' ) \n    return \'\\n\'.join ( lines ) [:4000]\n\nasync def command ( update,ctx ) :\n    chat=update.effective_chat\n    if chat.type==\'private\':\n        await update.message.reply_text ( \'⚔️ Qal’alar urushi\\nGuruhda /qalalar deb yozing. O‘yinga qo‘shilish va xarita tugmalari guruhda chiqadi.\\n\\n\'+RULES ) \n        return\n    if not game ( chat.id ) :\n        with conn ( ) as c:c.execute ( \'INSERT OR REPLACE INTO war_games ( chat_id,status,updated) VALUES ( ?,?,? ) \', ( chat.id,\'lobby\',int ( time.time (  )  )  )  ) \n    await update.message.reply_text ( \'⚔️ Qal’alar urushi\',reply_markup=menu (  )  ) \n\nasync def buttons ( update,ctx ) :\n    q=update.callback_query;u=q.from_user;cid=q.message.chat_id;act=q.data.split ( \':\' ) [1]\n    if act==\'rules\':return await q.answer ( RULES[:190],show_alert=True ) \n    if act==\'map\':\n        await q.answer (  ) ;return await q.message.reply_text ( map_text ( cid )  ) \n    g=game ( cid ) \n    if not g:return await q.answer ( \'Avval /qalalar bilan o‘yin oching.\',show_alert=True ) \n    if act==\'join\':\n        if g[\'status\']!=\'lobby\':return await q.answer ( \'O‘yin boshlangan.\',show_alert=True ) \n        with conn ( ) as c:c.execute ( \'INSERT OR IGNORE INTO war_players ( chat_id,user_id,name) VALUES ( ?,?,? ) \', ( cid,u.id,u.full_name[:80] )  ) \n        return await q.answer ( \'Siz o‘yinga qo‘shildingiz!\',show_alert=True ) \n    if act==\'start\':\n        if g[\'status\']!=\'lobby\':return await q.answer ( \'O‘yin allaqachon boshlangan.\',show_alert=True ) \n        cm=await ctx.bot.get_chat_member ( cid,u.id ) \n        if cm.status not in (\'administrator\',\'creator\',\'owner\' ) :return await q.answer ( \'Faqat guruh administratori boshlaydi.\',show_alert=True ) \n        with conn ( ) as c:players=c.execute ( \'SELECT * FROM war_players WHERE chat_id=?\', ( cid, )  ) .fetchall (  ) \n        if len ( players ) <4:return await q.answer ( \'Kamida 4 o‘yinchi kerak.\',show_alert=True ) \n        players=list ( players ) ;random.shuffle ( players ) \n        with conn ( ) as c:\n            c.execute ( "UPDATE war_games SET status=\'election\',started=?,updated=? WHERE chat_id=?", ( int ( time.time (  )  ) ,int ( time.time (  )  ) ,cid )  ) \n            for i,p in enumerate ( players ) :c.execute ( \'UPDATE war_players SET team=? WHERE chat_id=? AND user_id=?\', ( i%2+1,cid,p[\'user_id\'] )  ) \n        await q.answer (  ) \n        for t in (1,2 ) :\n            ps=[p for i,p in enumerate ( players) if i%2+1==t]\n            buttons=[[B ( p[\'name\'][:30],callback_data=f\'war:vote:{t}:{p["user_id"]}\' ) ] for p in ps]\n            await q.message.reply_text (  ( \'🔵 Ko‘k\' if t==1 else \'🔴 Qizil\' ) +\' davlat: podshohni saylang!\',reply_markup=M ( buttons )  ) \n        await q.message.reply_text ( \'👑 Podshoh saylovi boshlandi! Ovoz berilgach, administrator quyidagi tugmani bosadi.\',reply_markup=M ( [[B ( \'⚔️ Urushni boshlash\',callback_data=\'war:launch\' ) ]] )  ) \n        return\n    if act==\'launch\':\n        await q.answer (  ) \n        return await finish_election ( update,ctx ) \n    if act==\'vote\':\n        t=int ( q.data.split ( \':\' ) [2] ) ;candidate=int ( q.data.split ( \':\' ) [3] ) \n        with conn ( ) as c:\n            p=c.execute ( \'SELECT team FROM war_players WHERE chat_id=? AND user_id=?\', ( cid,u.id )  ) .fetchone (  ) \n            if not p or p[\'team\']!=t or g[\'status\']!=\'election\':return await q.answer ( \'Faqat shu davlat a’zolari ovoz beradi.\',show_alert=True ) \n            c.execute ( \'INSERT OR REPLACE INTO war_votes ( chat_id,team,voter,candidate) VALUES ( ?,?,?,? ) \', ( cid,t,u.id,candidate )  ) \n        return await q.answer ( \'Ovoz qabul qilindi!\',show_alert=True ) \n\nasync def finish_election ( update,ctx ) :\n    cid=update.effective_chat.id;g=game ( cid ) \n    target=update.callback_query.message if update.callback_query else update.message\n    if not g or g[\'status\']!=\'election\':return await target.reply_text ( \'Hozir saylov yo‘q.\' ) \n    cm=await ctx.bot.get_chat_member ( cid,update.effective_user.id ) \n    if cm.status not in (\'administrator\',\'creator\',\'owner\' ) :return\n    with conn ( ) as c:\n        ps=c.execute ( \'SELECT * FROM war_players WHERE chat_id=?\', ( cid, )  ) .fetchall (  ) \n        now=int ( time.time (  )  ) \n        for t in (1,2 ) :\n            candidates=[p for p in ps if p[\'team\']==t]\n            counts={p[\'user_id\']:c.execute ( \'SELECT COUNT ( *) FROM war_votes WHERE chat_id=? AND team=? AND candidate=?\', ( cid,t,p[\'user_id\'] )  ) .fetchone (  ) [0] for p in candidates}\n            mx=max ( counts.values (  )  ) ;king=random.choice ( [p for p in candidates if counts[p[\'user_id\']]==mx] ) \n            c.execute ( \'UPDATE war_players SET king=1 WHERE chat_id=? AND user_id=?\', ( cid,king[\'user_id\'] )  ) \n            c.execute ( \'INSERT INTO war_forts ( chat_id,team,owner,kind,troops,updated) VALUES ( ?,?,?,?,?,? ) \', ( cid,t,king[\'user_id\'],\'palace\',25,now )  ) \n            for p in candidates:\n                if p[\'user_id\']!=king[\'user_id\']:\n                    c.execute ( \'INSERT INTO war_forts ( chat_id,team,owner,kind,troops,updated) VALUES ( ?,?,?,?,?,? ) \', ( cid,t,p[\'user_id\'],\'castle\',10,now )  ) \n        c.execute ( "UPDATE war_games SET status=\'playing\',updated=? WHERE chat_id=?", ( now,cid )  ) \n    await target.reply_text ( \'⚔️ URUSH BOSHLANDI!\\nBuyruqlar: /xarita, /yubor QALAM_ID NISHON_ID ASKAR\\nMasalan: /yubor 3 8 7\\nQo‘shinlar 10–30 soniyada yetib boradi.\\n\'+map_text ( cid )  ) \n\nasync def map_command ( update,ctx ) :await update.message.reply_text ( map_text ( update.effective_chat.id )  ) \n\nasync def send_army ( update,ctx ) :\n    cid=update.effective_chat.id;u=update.effective_user\n    if update.effective_chat.type==\'private\':return await update.message.reply_text ( \'Buyruqni hozircha o‘yin o‘tayotgan guruhda yuboring. Shaxsiy boshqaruv keyingi bosqichda qo‘shiladi.\' ) \n    if not game ( cid) or game ( cid ) [\'status\']!=\'playing\':return await update.message.reply_text ( \'Hozir faol urush yo‘q.\' ) \n    try:src,dst,n=map ( int,ctx.args ) \n    except (ValueError,TypeError ) :return await update.message.reply_text ( \'Namuna: /yubor 3 8 7\' ) \n    if n<=0 or src==dst:return await update.message.reply_text ( \'Miqdor yoki manzil noto‘g‘ri.\' ) \n    a=fort ( cid,src ) ;b=fort ( cid,dst ) \n    if not a or not b or a[\'owner\']!=u.id:return await update.message.reply_text ( \'Bu qal’a sizniki emas yoki manzil topilmadi.\' ) \n    if b[\'kind\']==\'palace\' and b[\'team\']!=a[\'team\']:\n        with conn ( ) as c:\n            remaining=c.execute ( "SELECT COUNT ( *) FROM war_forts WHERE chat_id=? AND team=? AND kind=\'castle\'", ( cid,b[\'team\'] )  ) .fetchone (  ) [0]\n        if remaining:\n            return await update.message.reply_text ( f\'👑 Qasrga hujum yopiq: dushmanning yana {remaining} qal’asi bor.\' ) \n    available=troops ( a ) \n    if n>available:return await update.message.reply_text ( f\'Askar yetmaydi. Hozir {available} askar bor.\' ) \n    # Atomic reservation; generation is realized at this point.\n    arrival=int ( time.time (  )  ) +random.choice (  ( 10,20,30 )  ) \n    with conn ( ) as c:\n        c.execute ( \'UPDATE war_forts SET troops=?,updated=? WHERE id=?\', ( available-n,int ( time.time (  )  ) ,src )  ) \n        c.execute ( \'INSERT INTO war_moves ( chat_id,owner,src,dst,troops,arrival) VALUES ( ?,?,?,?,?,? ) \', ( cid,u.id,src,dst,n,arrival )  ) \n    await update.message.reply_text ( f\'🐎 #{src} → #{dst}: {n} askar yo‘lga chiqdi. Yetib borish: {arrival-int ( time.time (  )  ) } soniya.\' ) \n\nasync def tick ( ctx ) :\n    with conn ( ) as c:moves=c.execute ( "SELECT * FROM war_moves WHERE status=\'moving\' AND arrival<=? ORDER BY arrival,id LIMIT 100", ( int ( time.time (  )  ) , )  ) .fetchall (  ) \n    for m in moves:\n        outcome=None\n        with conn ( ) as c:\n            claimed=c.execute ( "UPDATE war_moves SET status=\'done\' WHERE id=? AND status=\'moving\'", ( m[\'id\'], )  ) \n            if claimed.rowcount!=1:continue\n            dst=c.execute ( \'SELECT * FROM war_forts WHERE id=?\', ( m[\'dst\'], )  ) .fetchone (  ) \n            src=c.execute ( \'SELECT * FROM war_forts WHERE id=?\', ( m[\'src\'], )  ) .fetchone (  ) \n            if not dst or not src:continue\n            defender=troops ( dst ) ;n=m[\'troops\']\n            if dst[\'team\']==src[\'team\']:\n                c.execute ( \'UPDATE war_forts SET troops=?,updated=? WHERE id=?\', ( defender+n,int ( time.time (  )  ) ,dst[\'id\'] )  ) \n                outcome=f\'🛡 #{dst["id"]} qal’aga {n} askar yordamga yetdi.\'\n            elif n>defender:\n                survivors=n+defender//2\n                c.execute ( \'UPDATE war_forts SET team=?,owner=?,troops=?,updated=? WHERE id=?\', ( src[\'team\'],m[\'owner\'],survivors,int ( time.time (  )  ) ,dst[\'id\'] )  ) \n                outcome=f\'⚔️ #{dst["id"]} EGALLANDI! Hujumchilar: {n}, himoyachilar: {defender}. Yangi qo‘shin: {survivors}.\'\n            else:\n                c.execute ( \'UPDATE war_forts SET troops=?,updated=? WHERE id=?\', ( max ( 0,defender-n//2 ) ,int ( time.time (  )  ) ,dst[\'id\'] )  ) \n                outcome=f\'🛡 #{dst["id"]} mudofaani saqlab qoldi! Hujum: {n}, mudofaa: {defender}.\'\n            # Palace victory requires no enemy castles remain.\n            if dst[\'kind\']==\'palace\' and dst[\'team\']!=src[\'team\'] and n>defender:\n                remaining=c.execute ( "SELECT COUNT ( *) FROM war_forts WHERE chat_id=? AND team!=? AND kind=\'castle\'", ( m[\'chat_id\'],src[\'team\'] )  ) .fetchone (  ) [0]\n                if remaining==0:\n                    c.execute ( "UPDATE war_games SET status=\'finished\' WHERE chat_id=?", ( m[\'chat_id\'], )  ) \n                    outcome+=\'\\n🏆 DAVLAT G‘ALABA QOZONDI!\'\n        if outcome:\n            try:await ctx.bot.send_message ( m[\'chat_id\'],outcome+\'\\n\\n\'+map_text ( m[\'chat_id\'] )  ) \n            except Exception:pass\n\ndef war_register ( app,db_path ) :\n    init ( db_path ) \n    app.add_handler ( CommandHandler ( \'qalalar\',command ) ,group=-20 ) \n    app.add_handler ( CommandHandler ( \'xarita\',map_command ) ,group=-20 ) \n    app.add_handler ( CommandHandler ( \'yubor\',send_army ) ,group=-20 ) \n    app.add_handler ( CallbackQueryHandler ( buttons,pattern=r\'^war:\' ) ,group=-20 ) \n    if app.job_queue:app.job_queue.run_repeating ( tick,2,first=2 ) \n', '<veritas_qalalar_embedded>', 'exec' ) , veritas_qalalar.__dict__)
 
-def excerpt_choose ( text ) :
-    # Only exact spans from extracted PDF; no invented or AI paraphrased quotes.
-    import random as _random
-    paras=re.split ( r'\n\s*\n| ( ?<=[.!?] ) \s*\n',text)
-    good=[]
-    for raw in paras:
-        t=re.sub ( r'\s+',' ',raw ) .strip ( )
-        if 110<=len ( t ) <=520 and len ( t.split (  )  ) >=17 and not re.search ( r' ( ?i ) ^ ( mundarija|contents|www\.|http ) ',t ) :
-            good.append ( t)
-    if not good:
-        sentences=re.split ( r' ( ?<=[.!?] ) \s+',re.sub ( r'\s+',' ',text ) )
-        good=[t.strip ( ) for t in sentences if 110<=len ( t.strip (  )  ) <=480 and len ( t.split (  )  ) >=17]
-    return _random.choice ( good) if good else None
-
-async def excerpt_menu ( update,ctx ) :
-    if not update.effective_message:return
-    markup=excerpt_picker_markup ( )
-    if not markup:
-        return await update.effective_message.reply_text ( '📚 Hozircha tasdiqlangan kitoblar yo‘q.')
-    await update.effective_message.reply_text ( '📚 VASATIYA KUTUBXONASI\n━━━━━━━━━━━━━━━━━━\n📖 Parcha olish uchun kitobni tanlang:',reply_markup=markup)
-
-async def excerpt_callback ( update,ctx ) :
+async def veritas_games_callback ( update, ctx ) :
     q=update.callback_query
     if not q:return
-    parts= ( q.data or '' ) .split ( ':')
-    if len ( parts ) !=3:return
-    action,value=parts[1],parts[2]
-    if action=='page':
-        await q.answer ( )
-        return await q.edit_message_text ( '📚 VASATIYA KUTUBXONASI\n━━━━━━━━━━━━━━━━━━\n📖 Kitobni tanlang:',reply_markup=excerpt_picker_markup ( int ( value )  ) )
-    if action not in ('book','again' ) :return
-    bid=int ( value)
-    book=one ( "SELECT id,title,author FROM library_books WHERE id=? AND status='approved'", ( bid, ) )
-    if not book:return await q.answer ( 'Kitob topilmadi.',show_alert=True)
-    await q.answer ( '📖 PDF matni tekshirilmoqda...')
-    text=await v10_get_book_text ( ctx,bid,q.from_user.id)
-    if not text:
-        return await q.message.reply_text ( '⚠️ Bu kitobdan matn olinmadi. PDF skanerlangan, juda katta yoki faylga kirish imkoni bo‘lmasligi mumkin. Asl matn bo‘lmasa, parcha to‘qib chiqarilmaydi.')
-    chosen=excerpt_choose ( text)
-    if not chosen:
-        return await q.message.reply_text ( '⚠️ PDF matni olindi, lekin ishonchli, yaxlit parcha ajratib bo‘lmadi.')
-    from html import escape as _esc
-    body= ( '📖 <b>VASATIYA KUTUBXONASI</b>\n'
-          '━━━━━━━━━━━━━━━━━━\n'
-          f'📚 <b>{_esc ( str ( book["title"] )  ) }</b>\n'
-          f'✍️ {_esc ( str ( book["author"] or "Muallif ko‘rsatilmagan" )  ) }\n\n'
-          f'❝ {_esc ( chosen ) } ❞\n\n'
-          '📜 Manba: kutubxonadagi PDF. Sahifa raqami tasdiqlanmagan.')
-    kb=InlineKeyboardMarkup ( [[InlineKeyboardButton ( '🔄 Yana parcha',callback_data=f'excerpt:again:{bid}' ) ],
-                             [InlineKeyboardButton ( '📚 Boshqa kitob',callback_data='excerpt:page:0' ) ]])
-    await q.message.reply_text ( body,parse_mode='HTML',reply_markup=kb)
+    await q.answer ( )
+    await q.message.reply_text ( '🎮 VERITAS O‘YINLARI\n\n⚔️ Qal’alar urushi — ikki davlat o‘rtasidagi strategik jang.\n\nO‘yin guruhda /qalalar buyrug‘i bilan boshlanadi.', reply_markup=InlineKeyboardMarkup ( [[InlineKeyboardButton ( '⚔️ Qal’alar urushi · Qoidalar',callback_data='games:rules' ) ],[InlineKeyboardButton ( '⬅️ Bosh menyu',callback_data='root:choose' ) ]] ) ) if q.data=='games:menu' else await q.message.reply_text ( veritas_qalalar.RULES,reply_markup=InlineKeyboardMarkup ( [[InlineKeyboardButton ( '⬅️ O‘yinlar',callback_data='games:menu' ) ]] ) )
 
-async def excerpt_text_trigger ( update,ctx ) :
-    msg=update.effective_message
-    if not msg or not msg.text:return
-    if re.search ( r' ( ?i )  ( ?:veritas[,! ]* ) ? ( ?:kitobdan\s+parcha\s+top|parcha\s+topib\s+ber ) ',msg.text ) :
-        # Keyingi AI/passive handlerlar shu xabarni ikkinchi marta qayta ishlamasin.
-        ctx.user_data['v10_consumed_message_id']=msg.message_id
-        ctx.chat_data['v10_consumed_message_id']=msg.message_id
-        await excerpt_menu ( update,ctx)
+# === QALALAR UX UPGRADE: buttons, private controls, map pictures, chat lock ===
+import io as _war_io
+from telegram import ChatPermissions as _WarPermissions
+from telegram.ext import CallbackQueryHandler as _WarCallbackHandler
+from telegram import InlineKeyboardButton as _WB, InlineKeyboardMarkup as _WM
+from PIL import Image as _WarImage, ImageDraw as _WarDraw, ImageFont as _WarFont
 
-def excerpt_register ( app ) :
-    app.add_handler ( CommandHandler ( 'parcha',excerpt_menu ) ,group=-26)
-    app.add_handler ( CallbackQueryHandler ( excerpt_callback,pattern=r'^excerpt: ( ?:page|book|again ) :\d+$' ) ,group=-26)
-    app.add_handler ( MessageHandler ( filters.TEXT & ~filters.COMMAND,excerpt_text_trigger ) ,group=-26)
+def _war_game_buttons ( cid ) :
+    return _WM ( [[_WB ( '🗺 Rasmli xarita',callback_data=f'wx:map:{cid}' ) ,_WB ( '🏰 Qal’alarim',callback_data=f'wx:mine:{cid}' ) ],[_WB ( '⚔️ Qo‘shin yuborish',callback_data=f'wx:source:{cid}' ) ,_WB ( '📜 Qoidalar',callback_data=f'wx:rules:{cid}' ) ]])
 
+def _war_picture ( cid ) :
+    with veritas_qalalar.conn ( ) as c:
+        forts=c.execute ( 'SELECT * FROM war_forts WHERE chat_id=? ORDER BY id', ( cid, )  ) .fetchall ( )
+        players={p['user_id']:p['name'] for p in c.execute ( 'SELECT * FROM war_players WHERE chat_id=?', ( cid, )  ) }
+    im=_WarImage.new ( 'RGB', ( 1050,max ( 360,150+len ( forts ) *56 )  ) , ( 238,224,190 ) )
+    d=_WarDraw.Draw ( im)
+    d.rectangle (  ( 10,10,1040,75 ) ,fill= ( 65,50,40 ) )
+    d.text (  ( 32,28 ) ,'QALALAR URUSHI  |  JANG XARITASI',fill='white')
+    for i,f in enumerate ( forts ) :
+        y=95+i*56; col= ( 40,104,176) if f['team']==1 else (179,56,55)
+        d.rounded_rectangle (  ( 24,y,1025,y+46 ) ,radius=8,fill=col)
+        kind='QASR' if f['kind']=='palace' else 'QALA'
+        label=f"{kind} #{f['id']}  |  {players.get ( f['owner'],'Nomalum' ) [:26]}  |  {veritas_qalalar.troops ( f ) } askar"
+        d.text (  ( 42,y+14 ) ,label,fill='white')
+    out=_war_io.BytesIO (  ) ;im.save ( out,format='PNG' ) ;out.seek ( 0 ) ;out.name='xarita.png';return out
 
-# ================================================================
-# V10.11.1 — EARLY PRIVATE NAVIGATION
-# Keeps persistent reply-keyboard navigation responsive even during another workflow.
-# ================================================================
-async def v10_fast_private_navigation ( update,ctx ) :
-    msg=update.effective_message; u=update.effective_user; chat=update.effective_chat
-    if not msg or not u or not chat or chat.type!='private' or not msg.text:
-        return
-    txt= ( msg.text or '' ) .strip ( )
-    if txt not in {"🛡 Veritas","🎓 O‘quv • Talaba"}:
-        return
-    STATE.pop ( u.id,None)
-    ctx.user_data.pop ( 'bayram_state',None)
-    mid=msg.message_id
-    ctx.user_data['nav_consumed_message_id']=mid
-    ctx.user_data['v9_consumed_message_id']=mid
-    ctx.user_data['v10_consumed_message_id']=mid
-    ctx.user_data['workflow_message_id']=mid
-    if txt=="🛡 Veritas":
-        return await msg.reply_text ( "🛡 VERITAS\n\nAsosiy bo‘lim:",reply_markup=main_menu_markup ( u.id ) )
-    await msg.reply_text ( "🎓 O‘QUV • TALABA\n\nTa’lim turini tanlang:",reply_markup=v9_entry_markup (  ) )
-    return await msg.reply_text ( "Asosiy panel:",reply_markup=veritas_global_keyboard (  ) )
-
-
-# ================================================================
-# V10.10.1 — EARLY POWER / PRESENCE ROUTER
-# Handles wake/sleep before generic natural-language/state handlers.
-# ================================================================
-async def v10_power_presence_router ( update,ctx ) :
-    """Uyg'on/uxla va presence buyruqlarini eng oldin ushlaydi.
-
-    Uxla holati AI/suhbatni to'xtatadi, lekin xavfsizlik/moderatsiya/Mazgila kabi
-    avtomatik xizmatlarni o'chirmaydi.
-    """
-    msg=update.effective_message; chat=update.effective_chat; u=update.effective_user
-    if not msg or not chat or not u or u.is_bot or chat.type not in ('group','supergroup') or not msg.text:
-        return
-    raw= ( msg.text or '' ) .strip ( )
-    if not raw or raw.startswith ( '*') or raw.startswith ( '/' ) :
-        return
-    low=_v10_norm ( raw)
-    reply_to_bot=bool ( msg.reply_to_message and msg.reply_to_message.from_user and msg.reply_to_message.from_user.id==ctx.bot.id)
-    addressed= ( 'veritas' in low) or reply_to_bot
-    if not addressed:
-        return
-
-    wake=any ( x in low for x in (
-        'uygon','uyg on',"uyg'on",'wake up','ishga tush','ishga qayt','yana ishla','faollash','tur veritas'
-    ))
-    sleep=any ( x in low for x in (
-        'uxla','uxlash','sleep','dam ol','jim tur','vaqtincha toxta','vaqtincha to\'xta','suhbatni toxta','suhbatni to\'xta'
-    ))
-
-    if wake:
-        if 'barcha' in low and is_super ( u.id ) :
-            rows=all_ ( 'SELECT chat_id FROM groups')
-            for r in rows:v10_set_group_awake ( r['chat_id'],True,u.id)
-            await msg.reply_text ( f'⚡ {len ( rows ) } ta guruh uchun Veritas uyg‘otildi.')
-        elif await can_manage ( ctx.bot,chat.id,u.id ) :
-            v10_set_group_awake ( chat.id,True,u.id)
-            await msg.reply_text ( '⚡ Veritas uyg‘ondi. Men shu yerdaman.')
-        else:
-            await msg.reply_text ( '⛔ Veritasni uyg‘otish uchun guruh administratori bo‘lish kerak.')
-        ctx.chat_data['v10_consumed_message_id']=msg.message_id
-        return
-
-    if sleep:
-        if 'barcha' in low and is_super ( u.id ) :
-            rows=all_ ( 'SELECT chat_id FROM groups')
-            for r in rows:v10_set_group_awake ( r['chat_id'],False,u.id)
-            await msg.reply_text ( f'💤 {len ( rows ) } ta guruh uchun Veritas suhbat rejimi uxlatildi.')
-        elif await can_manage ( ctx.bot,chat.id,u.id ) :
-            v10_set_group_awake ( chat.id,False,u.id)
-            await msg.reply_text ( '💤 Veritasning suhbat/AI rejimi uxlatildi. Moderatsiya va avtomatik xizmatlar ishlashda davom etadi. Uyg‘otish: “Veritas uyg‘on”.')
-        else:
-            await msg.reply_text ( '⛔ Veritasni uxlatish uchun guruh administratori bo‘lish kerak.')
-        ctx.chat_data['v10_consumed_message_id']=msg.message_id
-        return
-
-    presence=any ( x in low for x in (
-        'shuyerdami','shu yerdami','shu yerdamisan','shu yerdami san','shu yerdasanmi',
-        'bormisan','eshityapsanmi','eshityapsan','online misan','online mısan'
-    ))
-    if presence:
-        if v10_group_awake ( chat.id ) :
-            await msg.reply_text ( '🪶 Ha, shu yerdaman.')
-        else:
-            await msg.reply_text ( '💤 Men shu yerdaman, lekin suhbat/AI rejimi uxlatilgan. Moderatsiya va avtomatik xizmatlar ishlayapti. Admin “Veritas uyg‘on” desa suhbat ham qaytadi.')
-        ctx.chat_data['v10_consumed_message_id']=msg.message_id
-        return
-
-
-def _v10_extract_mention ( text ) :
-    m=re.search ( r'@ ( [A-Za-z0-9_]{5,32} ) ',text or '')
-    return ('@'+m.group ( 1 ) ) if m else ''
-
-
-async def v10_natural_mazgila_router ( update,ctx,low ) :
-    """Mazgila rejimini oddiy gap bilan boshqarish."""
-    msg=update.effective_message
-    if 'mazgila' not in low and 'mazgila' not in (msg.text or '' ) .lower (  ) :
-        return False
-    # Ro'yxat
-    if any ( x in low for x in ('royxat','ro yxat',"ro'yxat",'kimni mazgila','kimlar mazgila','mazgila list' )  ) :
-        await mazgila_command ( update,ctx,['list'])
+async def _war_lock ( ctx,cid ) :
+    try:
+        chat=await ctx.bot.get_chat ( cid)
+        perms=chat.permissions
+        if perms:
+            # Preserve prior permissions in memory during this process.
+            ctx.application.bot_data.setdefault ( 'war_old_permissions',{} ) [cid]=perms
+        await ctx.bot.set_chat_permissions ( cid,_WarPermissions ( can_send_messages=False ) )
         return True
-    mention=_v10_extract_mention ( msg.text or '')
-    off=any ( x in low for x in ('ochir','o chir',"o'chir",'toxta','to xta',"to'xta",'bekor qil','stop','olib tashla' ) )
-    args=[]
-    if off:args.append ( 'off')
-    if mention:args.append ( mention)
-    await mazgila_command ( update,ctx,args)
-    return True
+    except Exception as exc:
+        await ctx.bot.send_message ( cid,'⚠️ Guruhni yopib bo‘lmadi. Veritasga «Restrict members» administrator huquqini bering.')
+        return False
+
+async def _war_unlock ( ctx,cid ) :
+    try:
+        old=ctx.application.bot_data.get ( 'war_old_permissions',{} ) .pop ( cid,None)
+        if old:await ctx.bot.set_chat_permissions ( cid,old)
+        else:await ctx.bot.set_chat_permissions ( cid,_WarPermissions ( can_send_messages=True ) )
+    except Exception:pass
+
+async def _war_ux ( update,ctx ) :
+    q=update.callback_query;data=q.data.split ( ':' ) ;act=data[1];cid=int ( data[2] ) ;uid=q.from_user.id
+    if act=='rules':
+        await q.answer (  ) ;return await q.message.reply_text ( veritas_qalalar.RULES,reply_markup=_war_game_buttons ( cid ) )
+    if act=='map':
+        await q.answer (  ) ;return await q.message.reply_photo ( _war_picture ( cid ) ,caption='🗺 Jonli xarita',reply_markup=_war_game_buttons ( cid ) )
+    with veritas_qalalar.conn ( ) as c:
+        p=c.execute ( 'SELECT * FROM war_players WHERE chat_id=? AND user_id=?', ( cid,uid )  ) .fetchone ( )
+    if act=='mine':
+        if not p:return await q.answer ( 'Siz bu urushda ishtirok etmaysiz.',show_alert=True)
+        with veritas_qalalar.conn ( ) as c:fs=c.execute ( 'SELECT * FROM war_forts WHERE chat_id=? AND owner=?', ( cid,uid )  ) .fetchall ( )
+        await q.answer ( )
+        return await q.message.reply_text ( '🏰 Sizning qal’alaringiz:\n'+'\n'.join ( f"#{f['id']} — {veritas_qalalar.troops ( f ) } askar" for f in fs ) ,reply_markup=_war_game_buttons ( cid ) )
+    if not p:return await q.answer ( 'Avval o‘yinga qo‘shiling.',show_alert=True)
+    if act=='source':
+        with veritas_qalalar.conn ( ) as c:fs=c.execute ( 'SELECT * FROM war_forts WHERE chat_id=? AND owner=?', ( cid,uid )  ) .fetchall ( )
+        if not fs:return await q.answer ( 'Sizda qal’a yo‘q.',show_alert=True)
+        await q.answer (  ) ;return await q.message.reply_text ( '🏰 Qaysi qal’adan askar yuborasiz?',reply_markup=_WM ( [[_WB ( f"#{f['id']} · {veritas_qalalar.troops ( f ) } askar",callback_data=f"wx:dest:{cid}:{f['id']}" ) ] for f in fs] ) )
+    if act=='dest':
+        src=int ( data[3] ) ;f=veritas_qalalar.fort ( cid,src)
+        if not f or f['owner']!=uid:return await q.answer ( 'Bu qal’a sizniki emas.',show_alert=True)
+        with veritas_qalalar.conn ( ) as c:fs=c.execute ( 'SELECT * FROM war_forts WHERE chat_id=? AND id!=? ORDER BY id', ( cid,src )  ) .fetchall ( )
+        await q.answer (  ) ;return await q.message.reply_text ( '🎯 Nishonni tanlang:',reply_markup=_WM ( [[_WB ( f"#{f['id']} {'🔵' if f['team']==1 else '🔴'}",callback_data=f"wx:amount:{cid}:{src}:{f['id']}" ) ] for f in fs] ) )
+    if act=='amount':
+        src,dst=map ( int,data[3:5] ) ;f=veritas_qalalar.fort ( cid,src)
+        if not f or f['owner']!=uid:return await q.answer ( 'Bu qal’a sizniki emas.',show_alert=True)
+        available=veritas_qalalar.troops ( f)
+        opts=sorted ( set ( n for n in [1,max ( 1,available//4 ) ,max ( 1,available//2 ) ,available] if n<=available ) )
+        await q.answer (  ) ;return await q.message.reply_text ( f'⚔️ #{src} → #{dst}. Necha askar?',reply_markup=_WM ( [[_WB ( f'{n} askar',callback_data=f'wx:send:{cid}:{src}:{dst}:{n}' ) ] for n in opts] ) )
+    if act=='send':
+        src,dst,n=map ( int,data[3:6] ) ;a=veritas_qalalar.fort ( cid,src ) ;b=veritas_qalalar.fort ( cid,dst)
+        if not a or not b or a['owner']!=uid or n<1 or src==dst:return await q.answer ( 'Buyruq yaroqsiz.',show_alert=True)
+        if b['kind']=='palace' and a['team']!=b['team']:
+            with veritas_qalalar.conn ( ) as c:remaining=c.execute ( "SELECT COUNT ( *) FROM war_forts WHERE chat_id=? AND team=? AND kind='castle'", ( cid,b['team'] )  ) .fetchone (  ) [0]
+            if remaining:return await q.answer ( 'Avval dushman qal’alarini egallang.',show_alert=True)
+        import time as _wt, random as _wr
+        now=int ( _wt.time (  )  ) ;available=veritas_qalalar.troops ( a)
+        if n>available:return await q.answer ( 'Askar yetarli emas.',show_alert=True)
+        with veritas_qalalar.conn ( ) as c:
+            c.execute ( 'BEGIN IMMEDIATE')
+            a=c.execute ( 'SELECT * FROM war_forts WHERE id=? AND chat_id=?', ( src,cid )  ) .fetchone ( )
+            available=veritas_qalalar.troops ( a)
+            if a['owner']!=uid or available<n:return await q.answer ( 'Askar yetarli emas.',show_alert=True)
+            c.execute ( 'UPDATE war_forts SET troops=?,updated=? WHERE id=?', ( available-n,now,src ) )
+            c.execute ( 'INSERT INTO war_moves ( chat_id,owner,src,dst,troops,arrival) VALUES ( ?,?,?,?,?,? ) ', ( cid,uid,src,dst,n,now+_wr.choice (  ( 10,20,30 )  )  ) )
+        await q.answer ( 'Buyruq bajarildi!')
+        await q.message.reply_text ( f'🐎 {n} askar yo‘lga chiqdi.',reply_markup=_war_game_buttons ( cid ) )
+
+_war_old_finish=veritas_qalalar.finish_election
+async def _war_finish_with_lock ( update,ctx ) :
+    before=veritas_qalalar.game ( update.effective_chat.id)
+    await _war_old_finish ( update,ctx)
+    after=veritas_qalalar.game ( update.effective_chat.id)
+    if before and before['status']=='election' and after and after['status']=='playing':
+        await _war_lock ( ctx,update.effective_chat.id)
+        await ctx.bot.send_photo ( update.effective_chat.id,_war_picture ( update.effective_chat.id ) ,caption='⚔️ Urush boshlandi! Buyruqlar uchun pastdagi tugmani bosing.',reply_markup=_war_game_buttons ( update.effective_chat.id ) )
+veritas_qalalar.finish_election=_war_finish_with_lock
+
+_war_old_tick=veritas_qalalar.tick
+async def _war_tick_with_unlock ( ctx ) :
+    with veritas_qalalar.conn ( ) as c:active=[r['chat_id'] for r in c.execute ( "SELECT chat_id FROM war_games WHERE status='playing'" ) ]
+    await _war_old_tick ( ctx)
+    for cid in active:
+        g=veritas_qalalar.game ( cid)
+        if g and g['status']=='finished':
+            await _war_unlock ( ctx,cid)
+            try:await ctx.bot.send_photo ( cid,_war_picture ( cid ) ,caption='🏆 Urush yakunlandi! Guruh qayta ochildi.')
+            except Exception:pass
+veritas_qalalar.tick=_war_tick_with_unlock
+
+_war_old_register=veritas_qalalar.war_register
+def _war_register_upgrade ( app,db_path ) :
+    _war_old_register ( app,db_path)
+    app.add_handler ( _WarCallbackHandler ( _war_ux,pattern=r'^wx:' ) ,group=-21)
+veritas_qalalar.war_register=_war_register_upgrade
 
 
-async def v10_early_management_router ( update,ctx ) :
-    """Tabiiy boshqaruv buyruqlarini AI/sleep routeridan oldin bajaradi.
+# === V10.5: HISTORICAL WAR DISPATCHES / PRIVATE INTELLIGENCE ===
+import html as _war_html
 
-    Shu sabab "Veritas adminligini ol", "Veritas @userni 2 soat mute qil"
-    kabi gaplar bot uxlayotganda ham admin amali sifatida ishlaydi.
-    """
-    msg=update.effective_message;chat=update.effective_chat;u=update.effective_user
-    if not msg or not chat or not u or u.is_bot or chat.type not in ('group','supergroup') or not msg.text:return
-    raw= ( msg.text or '' ) .strip ( )
-    if not raw or raw.startswith ( '*') or raw.startswith ( '/' ) :return
-    low=_natural_norm ( raw)
-    botname= ( getattr ( ctx.bot,'username','') or '' ) .lower ( )
-    reply_to_bot=bool ( msg.reply_to_message and msg.reply_to_message.from_user and msg.reply_to_message.from_user.id==ctx.bot.id)
-    addressed= ( 'veritas' in low) or (botname and ('@'+botname) in low) or reply_to_bot
-    if not addressed:return
-    if ctx.chat_data.get ( 'v10_consumed_message_id' ) ==msg.message_id:return
+async def _war_safe_private ( bot, uid, text, reply_markup=None ) :
+    try:
+        await bot.send_message ( uid, text, parse_mode='HTML', reply_markup=reply_markup)
+        return True
+    except Exception:
+        return False  # Telegram requires the member to start the bot privately.
 
-    if await v10_natural_mazgila_router ( update,ctx,low ) :
-        ctx.chat_data['v10_consumed_message_id']=msg.message_id
-        return
+async def _war_send_announcement ( bot, cid, text ) :
+    try:
+        await bot.send_message ( cid, text, parse_mode='HTML', disable_web_page_preview=True)
+    except Exception:
+        pass
 
-    intent=_natural_local_intent ( raw)
-    # Local parser topolmasa, AI faqat boshqaruv niyatini ajratsin.
-    if intent is None and OPENAI_API_KEY:
-        try:intent=await asyncio.to_thread ( _natural_intent_sync,raw)
-        except Exception:
-            log.exception ( 'early natural management classify failed')
-            intent=None
-    if not intent:return
-    action=str ( intent.get ( 'action') or 'none')
-    if action=='none':return
-    # Faqat real boshqaruv/info amallari shu erta routerda. Oddiy suhbat keyingi routerga qoladi.
-    handled=await _natural_execute ( update,ctx,intent)
-    if handled:
-        ctx.chat_data['v10_consumed_message_id']=msg.message_id
-        ctx.chat_data['natural_consumed_message_id']=msg.message_id
+_war_previous_tick = veritas_qalalar.tick
+async def _war_illustrated_tick ( ctx ) :
+    # Capture due movements before the original atomic battle resolver handles them.
+    import time as _wt
+    with veritas_qalalar.conn ( ) as c:
+        pending=[dict ( r) for r in c.execute ( "SELECT * FROM war_moves WHERE status='moving' AND arrival<=? ORDER BY arrival,id LIMIT 100", ( int ( _wt.time (  )  ) , )  ) ]
+        previous={m['id']:dict ( c.execute ( 'SELECT * FROM war_forts WHERE id=?', ( m['dst'], )  ) .fetchone ( ) or {}) for m in pending}
+    await _war_previous_tick ( ctx)
+    for m in pending:
+        with veritas_qalalar.conn ( ) as c:
+            move=c.execute ( 'SELECT status FROM war_moves WHERE id=?', ( m['id'], )  ) .fetchone ( )
+            after=c.execute ( 'SELECT * FROM war_forts WHERE id=?', ( m['dst'], )  ) .fetchone ( )
+            before=previous[m['id']]
+            if not move or move['status']!='done' or not after:continue
+            after=dict ( after)
+            sender=c.execute ( 'SELECT name FROM war_players WHERE chat_id=? AND user_id=?', ( m['chat_id'],m['owner'] )  ) .fetchone ( )
+            defender_id=before.get ( 'owner')
+        sender_name=_war_html.escape ( sender['name'] if sender else 'Sarkarda')
+        captured=bool ( before and before.get ( 'team' ) !=after['team'])
+        same_team=bool ( before and before.get ( 'team' ) ==after['team'])
+        if same_team:
+            headline='🐎 <b>MADAD LASHKARI YETIB KELDI</b>'
+            body=f'🛡 #{m["dst"]} qal’aga ittifoqchi qo‘shinlar yetib keldi.'
+        elif captured:
+            headline='🏆 <b>QAL’A ZABT ETILDI!</b>'
+            body=f'🏰 #{m["dst"]} qal’a yangi davlat tasarrufiga o‘tdi.\n👤 G‘olib sarkarda: {sender_name}'
+        else:
+            headline='🛡 <b>QAL’A MUDOFAASI</b>'
+            body=f'🏰 #{m["dst"]} qal’a hujumga bardosh berdi.'
+        announcement= ( '⚔️ ═══ 🏰 ═══ ⚔️\n'
+                      f'{headline}\n\n{body}\n\n'
+                      '📜 <i>Veritas harbiy yilnomasi</i>')
+        await _war_send_announcement ( ctx.bot,m['chat_id'],announcement)
+        await _war_safe_private ( ctx.bot,m['owner'],
+            f'🔐 <b>MAXFIY HARBIY HISOBOT</b>\n\n'
+            f'🐎 Siz yuborgan {m["troops"]} askar #{m["dst"]} manzilga yetdi.\n'
+            f'{"🏆 Qal’a egallandi!" if captured else "🛡 Harbiy yurish yakunlandi."}\n'
+            '📜 Qal’alaringizni boshqarish uchun guruhdagi tugmalardan foydalaning.')
+        if defender_id and defender_id!=m['owner'] and not same_team:
+            await _war_safe_private ( ctx.bot,defender_id,
+                f'🔐 <b>MAXFIY OGОHLANTIRISH</b>\n\n'
+                f'⚔️ Siz boshqargan #{m["dst"]} qal’aga hujum bo‘ldi.\n'
+                + ('❌ Qal’a qo‘ldan ketdi.' if captured else '🛡 Mudofaa saqlanib qoldi.' ) )
+veritas_qalalar.tick=_war_illustrated_tick
 
+
+
+# === V10.7: AUTONOMOUS WAR LOBBY, SAFE STOP, PRIVATE CONTROL ===
+import re as _war_re
+import time as _war_time
+from telegram.ext import MessageHandler as _WarMessageHandler, filters as _war_filters
+
+def _war_lobby_markup (  ) :
+    return _WM ( [[_WB ( '➕ O‘yinga qo‘shilish',callback_data='war:join' ) ,_WB ( '🚀 Boshlash',callback_data='war:start' ) ],[_WB ( '📜 Qoidalar',callback_data='war:rules' ) ]])
+
+def _war_private_markup ( cid ) :
+    return _WM ( [[_WB ( '🏰 Qal’alarim',callback_data=f'wx:mine:{cid}' ) ,_WB ( '⚔️ Qo‘shin yuborish',callback_data=f'wx:source:{cid}' ) ],[_WB ( '🗺 Xarita',callback_data=f'wx:map:{cid}' ) ,_WB ( '📜 Qoidalar',callback_data=f'wx:rules:{cid}' ) ]])
+
+async def _war_is_admin ( ctx,cid,uid ) :
+    if uid in SUPER_OWNERS:return True
+    try:
+        cm=await ctx.bot.get_chat_member ( cid,uid)
+        return cm.status in ('administrator','creator','owner')
+    except Exception:return False
+
+async def _war_stop ( ctx,cid,uid ) :
+    if not await _war_is_admin ( ctx,cid,uid ) :return '⛔ Faqat guruh administratori yoki Super Ega to‘xtata oladi.'
+    g=veritas_qalalar.game ( cid)
+    if not g or g['status'] not in ('lobby','election','playing' ) :
+        return 'ℹ️ Hozir faol urush yo‘q.'
+    with veritas_qalalar.conn ( ) as c:
+        c.execute ( 'BEGIN IMMEDIATE')
+        c.execute ( "UPDATE war_games SET status='stopped',updated=? WHERE chat_id=?", ( int ( _war_time.time (  )  ) ,cid ) )
+        c.execute ( "UPDATE war_moves SET status='cancelled' WHERE chat_id=? AND status='moving'", ( cid, ) )
+    await _war_unlock ( ctx,cid)
+    await ctx.bot.send_message ( cid,'🛑 ═══ ⚔️ ═══ 🛑\n\n<b>URUSH TO‘XTATILDI</b>\n\n👑 Administrator farmoni bilan jang yakunlandi.\n🔓 Guruh suhbatlari qayta ochildi.',parse_mode='HTML')
+    return '✅ Urush to‘xtatildi.'
+
+async def _war_text_control ( update,ctx ) :
+    msg=update.effective_message
+    if not msg or not msg.text or update.effective_chat.type not in ('group','supergroup' ) :return
+    t=msg.text.lower (  ) .strip ( )
+    if not _war_re.search ( r' ( ?:veritas|веритас|botga|ботга ) ',t ) :return
+    if not _war_re.search ( r' ( ?:o.yinni|o.yin|urushni|jangni ) .{0,22} ( ?:to.xtat|tugat|bekor ) ',t ) :return
+    result=await _war_stop ( ctx,update.effective_chat.id,update.effective_user.id)
+    await msg.reply_text ( result)
+    ctx.chat_data['v10_consumed_message_id']=msg.message_id
+
+async def _war_lobby_refresh ( ctx ) :
+    now=int ( _war_time.time (  ) )
+    with veritas_qalalar.conn ( ) as c:
+        games=[dict ( g) for g in c.execute ( "SELECT * FROM war_games WHERE status='lobby'" ) ]
+    for g in games:
+        cid=g['chat_id'];key=f'war_lobby_last_{cid}'
+        if now-ctx.application.bot_data.get ( key,0 ) <90:continue
+        with veritas_qalalar.conn ( ) as c:
+            n=c.execute ( 'SELECT COUNT ( *) FROM war_players WHERE chat_id=?', ( cid, )  ) .fetchone (  ) [0]
+        try:
+            await ctx.bot.send_message ( cid,f'⚔️ <b>QAL’ALAR URUSHI</b>\n\n🏰 Lashkar yig‘ilmoqda!\n👥 Ishtirokchilar: <b>{n}</b>\n\n👇 O‘yinga qo‘shilish uchun tugmani bosing.',parse_mode='HTML',reply_markup=_war_lobby_markup (  ) )
+            ctx.application.bot_data[key]=now
+        except Exception:pass
+
+async def _war_private_welcome ( ctx,cid ) :
+    with veritas_qalalar.conn ( ) as c:
+        ps=[dict ( p) for p in c.execute ( 'SELECT user_id,team,king FROM war_players WHERE chat_id=?', ( cid, )  ) ]
+    for p in ps:
+        role='👑 Podshoh' if p['king'] else '🏰 Qal’a boshlig‘i'
+        await _war_safe_private ( ctx.bot,p['user_id'],f'🔐 <b>MAXFIY HARBIY MAKTUB</b>\n\n⚔️ Urush boshlandi!\n🏳️ Davlatingiz: {"🔵 Ko‘k" if p["team"]==1 else "🔴 Qizil"}\n🎖 Vazifangiz: {role}\n\nQuyidagi tugmalardan foydalaning. Harbiy rejalaringiz raqibga ko‘rinmaydi.',reply_markup=_war_private_markup ( cid ) )
+
+_war_prev_finish_private=veritas_qalalar.finish_election
+async def _war_finish_private ( update,ctx ) :
+    cid=update.effective_chat.id
+    before=veritas_qalalar.game ( cid)
+    await _war_prev_finish_private ( update,ctx)
+    after=veritas_qalalar.game ( cid)
+    if before and before['status']=='election' and after and after['status']=='playing':
+        await _war_private_welcome ( ctx,cid)
+veritas_qalalar.finish_election=_war_finish_private
+
+_war_prev_ux_private=_war_ux
+async def _war_ux_private ( update,ctx ) :
+    q=update.callback_query
+    if q.message and q.message.chat.type=='private':
+        parts=q.data.split ( ':')
+        if len ( parts ) <3:return await q.answer ( 'Noto‘g‘ri tugma.',show_alert=True)
+        cid=int ( parts[2] ) ;uid=q.from_user.id
+        with veritas_qalalar.conn ( ) as c:
+            p=c.execute ( 'SELECT * FROM war_players WHERE chat_id=? AND user_id=?', ( cid,uid )  ) .fetchone ( )
+        if not p:return await q.answer ( 'Siz bu o‘yinda qatnashmaysiz.',show_alert=True)
+        # Existing private flow already uses q.message.reply_* and database game cid.
+    return await _war_prev_ux_private ( update,ctx)
+_war_ux=_war_ux_private
+
+_war_prev_register_last=veritas_qalalar.war_register
+def _war_register_final ( app,db_path ) :
+    _war_prev_register_last ( app,db_path)
+    app.add_handler ( _WarMessageHandler ( _war_filters.ChatType.GROUPS & _war_filters.TEXT & ~_war_filters.COMMAND,_war_text_control ) ,group=-22)
+    if app.job_queue:app.job_queue.run_repeating ( _war_lobby_refresh,90,first=10)
+veritas_qalalar.war_register=_war_register_final
 
 def main (  ) :
     if not TOKEN: raise RuntimeError ( "BOT_TOKEN kiritilmagan.")
@@ -7834,10 +7687,8 @@ def main (  ) :
     i18n_init_db ( )
     v10_init_db ( )
     app=Application.builder (  ) .bot ( VeritasV10Bot ( token=TOKEN )  ) .build ( )
-    # Power/presence must run before every generic text/state handler.
-    app.add_handler ( MessageHandler ( filters.ChatType.GROUPS & filters.TEXT & ~filters.COMMAND, v10_power_presence_router ) , group=-340)
-    app.add_handler ( MessageHandler ( filters.ChatType.GROUPS & filters.TEXT & ~filters.COMMAND, v10_early_management_router ) , group=-330)
-    excerpt_register ( app)
+    veritas_qalalar.war_register ( app, DB_PATH)
+    app.add_handler ( CallbackQueryHandler ( veritas_games_callback,pattern=r"^games:" ) ,group=-20)
     app.add_handler ( CommandHandler ( "start",v9_start_selector ) )
     app.add_handler ( CommandHandler ( "help",cmd_help ) )
     app.add_handler ( CommandHandler ( "id",cmd_id ) )
@@ -7852,7 +7703,6 @@ def main (  ) :
     # Botning o'zi guruhga qo'shilgan/chiqarilgan zahoti groups jadvalini yangilaymiz.
     # Bu global broadcast uchun eng muhim ro'yxat.
     app.add_handler ( ChatMemberHandler ( bot_membership_update, ChatMemberHandler.MY_CHAT_MEMBER ) , group=-350)
-    app.add_handler ( MessageHandler ( filters.ChatType.PRIVATE & filters.TEXT & ~filters.COMMAND, v10_fast_private_navigation ) , group=-330)
     app.add_handler ( MessageHandler ( filters.StatusUpdate.NEW_CHAT_MEMBERS,new_members ) )
     app.add_handler ( MessageHandler ( filters.StatusUpdate.LEFT_CHAT_MEMBER,left_member ) )
     app.add_handler ( MessageHandler ( filters.TEXT & filters.Regex ( r"^\*" ) ,star_text_router ) ,group=0)
@@ -7876,7 +7726,7 @@ def main (  ) :
         app.job_queue.run_repeating ( v10_task_job,30,first=12)
         app.job_queue.run_repeating ( v10_autopost_job,60,first=20)
     app.add_error_handler ( v10_error_handler)
-    log.info ( "VERITAS v10.11.1 recovery-fix starting")
+    log.info ( "VERITAS v10 starting")
     app.run_polling ( allowed_updates=Update.ALL_TYPES)
 
 if __name__=="__main__":
