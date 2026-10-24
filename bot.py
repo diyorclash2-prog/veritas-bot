@@ -6253,9 +6253,192 @@ async def ai_news_send_group_direct ( update,ctx ) :
     execute ( "UPDATE ai_news_posts SET status='draft',sent_fail=1 WHERE id=?", ( nid, ) )
     return await ctx.bot.send_message ( q.message.chat_id,"⚠️ Yuborilmadi. Botning guruhda xabar yuborish huquqini tekshiring.",reply_markup=ai_news_group_ready_markup ( nid ) ,_skip_i18n=True)
 
+# =========================================================
+# VASATIYA: isolated group book ingestion
+# =========================================================
+LIBRARY_AUTO_CHAT_ID = -1004452360726
+LIBRARY_GROUP_FORMATS = {'pdf', 'epub', 'docx', 'txt', 'fb2', 'mobi', 'djvu'}
+
+def library_group_init_db (  ) :
+    with db ( ) as c:
+        c.executescript ( '''
+        CREATE TABLE IF NOT EXISTS library_group_imports(
+          chat_id INTEGER NOT NULL,message_id INTEGER NOT NULL,book_id INTEGER NOT NULL,
+          action TEXT NOT NULL,created_at INTEGER NOT NULL,
+          PRIMARY KEY ( chat_id,message_id )  ) ;
+        CREATE TABLE IF NOT EXISTS library_group_pending(
+          id INTEGER PRIMARY KEY AUTOINCREMENT,chat_id INTEGER NOT NULL,
+          message_id INTEGER NOT NULL,actor_id INTEGER NOT NULL,
+          document_json TEXT NOT NULL,candidates_json TEXT NOT NULL,
+          status TEXT NOT NULL DEFAULT 'pending',created_at INTEGER NOT NULL,
+          UNIQUE ( chat_id,message_id )  ) ;
+        CREATE TABLE IF NOT EXISTS library_group_file_history(
+          id INTEGER PRIMARY KEY AUTOINCREMENT,book_id INTEGER NOT NULL,
+          old_file_json TEXT NOT NULL,actor_id INTEGER NOT NULL,created_at INTEGER NOT NULL ) ;
+        ''')
+
+def library_group_allowed ( uid ) :
+    # Deliberately excludes ordinary Telegram admins and global Super Admins.
+    return uid in SUPER_OWNERS or bool ( one(
+        'SELECT 1 FROM library_admins WHERE user_id=?', (uid, )  ) )
+
+def library_group_document ( doc ) :
+    if not doc:
+        return None
+    filename = str ( doc.file_name or '' ) .strip ( )
+    fmt = Path ( filename ) .suffix.lower (  ) .lstrip ( '.')
+    if not fmt and (doc.mime_type or '' ) .lower ( ) == 'application/pdf':
+        fmt = 'pdf'
+    if fmt not in LIBRARY_GROUP_FORMATS:
+        return None
+    title = Path ( filename ) .stem.replace ( '_', ' ' ) .strip ( ) if filename else 'Nomsiz kitob'
+    title = re.sub ( r'\s+', ' ', title ) [:250] or 'Nomsiz kitob'
+    return dict ( file_id=doc.file_id, unique=doc.file_unique_id or '',
+                filename=filename, fmt=fmt, size=int ( doc.file_size or 0 ) , title=title)
+
+def library_group_title_key ( text ) :
+    import unicodedata
+    text = unicodedata.normalize ( 'NFKC', str ( text or '' )  ) .casefold ( )
+    text = re.sub ( r'\. ( pdf|epub|docx|txt|fb2|mobi|djvu ) $', '', text)
+    return ''.join ( ch for ch in text if ch.isalnum (  ) )
+
+def library_group_store ( data, actor_id, chat_id, message_id, selected=None, force_new=False ) :
+    # All matching, duplicate protection, history and writes share one transaction.
+    with db ( ) as c:
+        c.execute ( 'BEGIN IMMEDIATE')
+        previous = c.execute ( 'SELECT book_id,action FROM library_group_imports WHERE chat_id=? AND message_id=?',
+                             (chat_id,message_id )  ) .fetchone ( )
+        if previous:
+            return ('duplicate',previous['book_id'])
+        unique = data['unique']
+        matches = c.execute ( '''SELECT * FROM library_books WHERE
+            (?<>'' AND (book_unique_id=? OR pdf_unique_id=? ) ) OR book_file_id=? OR pdf_file_id=?''',
+            (unique,unique,unique,data['file_id'],data['file_id'] )  ) .fetchall ( )
+        if any ( r['status'] != 'approved' for r in matches ) :
+            return ('inactive',0)
+        if len ( matches) > 1:
+            return ('conflict',0)
+        target = matches[0] if matches else None
+        if not target and selected is not None:
+            target = c.execute ( "SELECT * FROM library_books WHERE id=? AND status='approved'", ( selected, )  ) .fetchone ( )
+            if not target:
+                return ('inactive',0)
+        if not target and not force_new:
+            key = library_group_title_key ( data['title'])
+            candidates = [dict ( id=r['id'],title=r['title']) for r in c.execute(
+                "SELECT id,title,book_file_name FROM library_books WHERE status='approved'")
+                if key and key in {library_group_title_key ( r['title'] ) ,library_group_title_key ( r['book_file_name'] ) }]
+            if candidates:
+                c.execute ( '''INSERT OR IGNORE INTO library_group_pending
+                    (chat_id,message_id,actor_id,document_json,candidates_json,created_at)
+                    VALUES ( ?,?,?,?,?,? ) ''', ( chat_id,message_id,actor_id,json.dumps ( data ) ,json.dumps ( candidates ) ,now (  )  ) )
+                pending=c.execute ( 'SELECT id FROM library_group_pending WHERE chat_id=? AND message_id=?',
+                                  (chat_id,message_id )  ) .fetchone ( )
+                return ('pending', ( pending['id'],candidates ) )
+        pdf_id = data['file_id'] if data['fmt']=='pdf' else ''
+        pdf_unique = unique if data['fmt']=='pdf' else ''
+        fields= ( data['file_id'],unique,data['filename'],data['fmt'],data['size'],pdf_id,pdf_unique)
+        if target:
+            bid=target['id']
+            c.execute ( '''INSERT INTO library_group_file_history ( book_id,old_file_json,actor_id,created_at)
+                VALUES ( ?,?,?,? ) ''', ( bid,json.dumps ( {k:target[k] for k in (
+                'book_file_id','book_unique_id','book_file_name','book_format','book_file_size','pdf_file_id','pdf_unique_id' ) } ) ,actor_id,now (  )  ) )
+            c.execute ( '''UPDATE library_books SET book_file_id=?,book_unique_id=?,book_file_name=?,
+                book_format=?,book_file_size=?,pdf_file_id=?,pdf_unique_id=? WHERE id=?''',fields+ ( bid, ) )
+            action='updated'
+        else:
+            bid=c.execute ( '''INSERT INTO library_books ( title,added_by,status,created_at,
+                book_file_id,book_unique_id,book_file_name,book_format,book_file_size,pdf_file_id,pdf_unique_id)
+                VALUES ( ?,?,'approved',?,?,?,?,?,?,?,? ) ''',
+                (data['title'],actor_id,now (  )  ) +fields ) .lastrowid
+            action='added'
+        c.execute ( 'INSERT INTO library_group_imports VALUES ( ?,?,?,?,? ) ',
+                  (chat_id,message_id,bid,action,now (  )  ) )
+        c.execute ( "UPDATE library_group_pending SET status='done' WHERE chat_id=? AND message_id=?",
+                  (chat_id,message_id ) )
+        c.execute ( 'INSERT INTO audit ( actor_id,chat_id,action,detail,created_at) VALUES ( ?,?,?,?,? ) ',
+                  (actor_id,chat_id,'library_group_'+action,str ( bid ) ,now (  )  ) )
+        return (action,bid)
+
+async def library_group_report ( msg, result ) :
+    action, value=result
+    if action=='pending':
+        pid,candidates=value
+        rows=[[InlineKeyboardButton ( '🔄 '+r['title'][:45],callback_data=f'libingest:{pid}:{r["id"]}' ) ] for r in candidates[:20]]
+        rows.append ( [InlineKeyboardButton ( '➕ Alohida yangi kitob',callback_data=f'libingest:{pid}:new' ) ])
+        await msg.reply_text ( '📚 Nomi mos kitob topildi. Super Ega yoki kitob admini tanlasin: mavjud faylni yangilash yoki alohida kitob qo‘shish.',reply_markup=InlineKeyboardMarkup ( rows ) )
+    elif action in {'added','updated','duplicate'}:
+        label={'added':'✅ Yangi kitob kutubxonaga qo‘shildi.','updated':'🔄 Kitob fayli yangilandi.','duplicate':'ℹ️ Bu xabar avval saqlangan.'}[action]
+        await msg.reply_text ( label+f'\n📖 Kitob ID: {value}')
+    else:
+        await msg.reply_text ( '⚠️ Fayl boshqa yoki faol bo‘lmagan yozuvga bog‘langan. Kutubxona admini tekshirsin; hech narsa almashtirilmadi.')
+
+async def library_group_ingest ( update, ctx ) :
+    msg=update.message
+    chat=update.effective_chat
+    if not msg or not chat or chat.type not in ('group','supergroup' ) :
+        return
+    command=bool ( re.fullmatch ( r'\s*\*?veritas\s+yukla[.!]?\s*',msg.text or '',re.I ) )
+    automatic=chat.id==LIBRARY_AUTO_CHAT_ID and bool ( msg.document)
+    if not command and not automatic:
+        return
+    actor=update.effective_user
+    if command and (not actor or getattr ( msg,'sender_chat',None) or not library_group_allowed ( actor.id )  ) :
+        await msg.reply_text ( '⛔ «Veritas yukla» faqat Super Ega va kitob admini uchun.')
+        return
+    source=msg.reply_to_message if command else msg
+    data=library_group_document ( getattr ( source,'document',None ) )
+    if not data:
+        if command:
+            await msg.reply_text ( '↩️ PDF/EPUB/DOCX/TXT/FB2/MOBI/DJVU fayliga reply qilib «Veritas yukla» yozing.')
+        return
+    uploader=getattr ( source,'from_user',None)
+    if uploader and not getattr ( uploader,'is_bot',False) and not getattr ( source,'sender_chat',None ) :
+        ensure_user ( uploader)
+    added_by= ( uploader.id if uploader and not getattr ( uploader,'is_bot',False) and not getattr ( source,'sender_chat',None)
+              else actor.id if actor and not getattr ( msg,'sender_chat',None) else 0)
+    try:
+        result=library_group_store ( data,added_by,chat.id,source.message_id)
+    except Exception:
+        log.exception ( 'Group library import failed chat=%s message=%s',chat.id,source.message_id)
+        await msg.reply_text ( '⚠️ Kitob saqlanmadi. Faylni qayta yuboring yoki admin logni tekshirsin.')
+        return
+    try:
+        await library_group_report ( msg,result)
+    except TelegramError:
+        log.warning ( 'Library import saved but acknowledgement failed chat=%s',chat.id)
+
+async def library_group_confirm ( update,ctx ) :
+    q=update.callback_query
+    m=re.fullmatch ( r'libingest: ( \d+ ) : ( new|\d+ ) ',q.data or '') if q else None
+    if not m:
+        return
+    if getattr ( q.message,'sender_chat',None) and not q.from_user:
+        return
+    if not library_group_allowed ( q.from_user.id ) :
+        return await q.answer ( 'Faqat Super Ega va kitob admini.',show_alert=True)
+    pending=one ( "SELECT * FROM library_group_pending WHERE id=? AND status='pending'", ( int ( m[1] ) , ) )
+    if not pending or not q.message or pending['chat_id']!=q.message.chat.id:
+        return await q.answer ( 'Bu so‘rov yakunlangan yoki topilmadi.',show_alert=True)
+    choice=m[2]
+    candidates=json.loads ( pending['candidates_json'])
+    if choice!='new' and int ( choice) not in {r['id'] for r in candidates}:
+        return await q.answer ( 'Kitob mos emas.',show_alert=True)
+    await q.answer ( )
+    try:
+        result=library_group_store ( json.loads ( pending['document_json'] ) ,q.from_user.id,
+            pending['chat_id'],pending['message_id'],selected=int ( choice) if choice!='new' else None,force_new=choice=='new')
+        await library_group_report ( q.message,result)
+        await q.edit_message_reply_markup ( reply_markup=None)
+    except Exception:
+        log.exception ( 'Library import confirmation failed')
+        await q.message.reply_text ( '⚠️ Tasdiqlash bajarilmadi. Admin logni tekshirsin.')
+
+
 def main (  ) :
     if not TOKEN: raise RuntimeError ( "BOT_TOKEN kiritilmagan.")
     init_db ( )
+    library_group_init_db ( )
     rose_full_init_db ( )
     v9_init_db ( )
     bayram_init_db ( )
@@ -6264,6 +6447,8 @@ def main (  ) :
     poster_init_db ( )
     i18n_init_db ( )
     app=Application.builder (  ) .bot ( VeritasI18nBot ( token=TOKEN )  ) .build ( )
+    app.add_handler ( CallbackQueryHandler ( library_group_confirm, pattern=r"^libingest:" ) , group=-21)
+    app.add_handler ( MessageHandler ( filters.ChatType.GROUPS & (filters.Document.ALL | filters.TEXT ) , library_group_ingest ) , group=-20)
     app.add_handler ( CommandHandler ( "start",v9_start_selector ) )
     app.add_handler ( CommandHandler ( "help",cmd_help ) )
     app.add_handler ( CommandHandler ( "id",cmd_id ) )
