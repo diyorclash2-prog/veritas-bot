@@ -6670,7 +6670,7 @@ async def v11_prepare ( ctx,game_id,topic,count ) :
                 (str ( exc ) [:200],game_id ) )
         log.exception ( 'V11 preparation failed game=%s',game_id)
 
-async def v11_start ( msg,ctx,actor,topic='',count=10 ) :
+async def v11_start ( msg,ctx,actor,topic='',count=30 ) :
     if not ctx.job_queue:
         return await msg.reply_text ( '⚠️ Zakovat uchun python-telegram-bot[job-queue] kutubxonasi kerak.')
     if v11_live ( msg.chat.id ) :
@@ -6910,7 +6910,7 @@ async def v11_tick ( ctx ) :
             game=one ( 'SELECT * FROM v11_games WHERE id=?', ( gid, ) )
             try:
                 if game['status']=='preparing':
-                    if now (  ) -game['created_at']>180:
+                    if now (  ) -game['created_at']>360:
                         execute ( "UPDATE v11_games SET status='failed' WHERE id=?", ( gid, ) )
                     continue
                 if game['phase'] in ('publishing','closing' ) :
@@ -6988,7 +6988,7 @@ async def v11_commands ( update,ctx ) :
     if msg.sender_chat:
         await msg.reply_text ( 'Bu buyruqni shaxsiy profilingiz nomidan yuboring.' ) ;raise _V11HandlerStop
     if cmd=='*aiyordam':
-        await msg.reply_text ( '🤖 VERITAS AI + ZAKOVAT\n\n*zakovat — 10 savolli o‘yin\n*zakovat 5 tarix — mavzuli o‘yin\n'
+        await msg.reply_text ( '🤖 VERITAS AI + ZAKOVAT\n\n*zakovat — 30 savolli o‘yin\n*zakovat 5 tarix — mavzuli o‘yin\n'
             '*znatija — reyting\n*zstop — yakunlash\n*zdavom — uzilgan o‘yinni davom ettirish\n'
             '*zball — joriy savol javobiga reply qilib admin tasdig‘i\n*zsertifikat — oxirgi g‘olib sertifikati\n'
             '*aixotira on/off/clear — shu chat xotirasi\n*aisuhbat on/off — tabiiy suhbat\n'
@@ -7023,9 +7023,9 @@ async def v11_commands ( update,ctx ) :
         execute ( f'UPDATE v11_chat_settings SET {col}=? WHERE chat_id=?', ( int ( value=='on' ) ,chat.id ) )
         await msg.reply_text ( '✅ Sozlama saqlandi.' ) ;raise _V11HandlerStop
     if cmd=='*zakovat':
-        count=int ( parts[1]) if len ( parts ) >1 and parts[1].isdigit ( ) else 10
-        if not 1<=count<=20:
-            await msg.reply_text ( 'Savollar soni 1–20 bo‘lsin. Masalan: *zakovat 5' ) ;raise _V11HandlerStop
+        count=int ( parts[1]) if len ( parts ) >1 and parts[1].isdigit ( ) else 30
+        if not 1<=count<=30:
+            await msg.reply_text ( 'Savollar soni 1–30 bo‘lsin. Masalan: *zakovat 5' ) ;raise _V11HandlerStop
         topic=' '.join ( parts[2:] if len ( parts ) >1 and parts[1].isdigit ( ) else parts[1:])
         await v11_start ( msg,ctx,user,topic,count ) ;raise _V11HandlerStop
     game=v11_live ( chat.id)
@@ -7234,8 +7234,8 @@ ban=bloklash; kick=guruhdan chiqarish; mute=yozishni yopish; unmute=yozishni och
 Zakovat o‘ynaylik/o‘tkaz/yakovat/tadbirni boshlash kabi gaplarni ma’nosiga qarab zakovat_start deb taning. Tugatishni aniq so‘rasa zakovat_stop; ball/natija so‘rasa zakovat_results.
 "Uni o‘chirivor" odamni ban/kick qilishmi yoki xabarni o‘chirishmi noaniq bo‘lsa clarify tanlang, taxmin qilmang.
 Nishonni FAQAT candidates kalitlaridan tanlang (reply, @username, id:... ) . Boshqa ID/ism uydirmang. Bir nechta nishon, noaniq maqsad yoki qaysi amal ekani noma’lum bo‘lsa clarify tanlang va qisqa savol yozing.
-Format: {"action":"...","target":"reply yoki candidates kaliti yoki bo‘sh", "minutes":0,"count":10,"topic":"","reason":"","question":""}.
-minutes=0 muddatsiz, musbat bo‘lsa aniq so‘ralgan minut; foydalanuvchi vaqt aytmasa 0. count=1..20; aytilmasa 10. topic faqat so‘ralgan mavzu. reason faqat yozuvchi bergan sabab. question faqat aniqlashtirish uchun.
+Format: {"action":"...","target":"reply yoki candidates kaliti yoki bo‘sh", "minutes":0,"count":30,"topic":"","reason":"","question":""}.
+minutes=0 muddatsiz, musbat bo‘lsa aniq so‘ralgan minut; foydalanuvchi vaqt aytmasa 0. count=1..30; aytilmasa 30. topic faqat so‘ralgan mavzu. reason faqat yozuvchi bergan sabab. question faqat aniqlashtirish uchun.
 Hech qanday kod yoki tool chaqirmang. Faqat reja yozing.'''
     payload=json.dumps ( {'model':OPENAI_MODEL,'instructions':instructions,
         'input':json.dumps ( {'text':text[:2000],'candidates':candidates,'is_manager':is_manager,'reply_to_bot':is_bot_reply},ensure_ascii=False ) ,
@@ -7248,11 +7248,11 @@ Hech qanday kod yoki tool chaqirmang. Faqat reja yozing.'''
     plan=json.loads ( raw)
     if not isinstance ( plan,dict) or plan.get ( 'action') not in V12_ACTIONS:raise ValueError ( 'Unrecognized plan')
     if not isinstance ( plan.get ( 'target','' ) ,str ) :raise ValueError ( 'Invalid target')
-    for key,default in [ ( 'minutes',0 ) , ( 'count',10 ) ]:
+    for key,default in [ ( 'minutes',0 ) , ( 'count',30 ) ]:
         value=plan.get ( key,default)
         if not isinstance ( value,int) or isinstance ( value,bool ) :raise ValueError ( 'Invalid number')
         plan[key]=value
-    if not 0<=plan['minutes']<=525600 or not 1<=plan['count']<=20:raise ValueError ( 'Out-of-range number')
+    if not 0<=plan['minutes']<=525600 or not 1<=plan['count']<=30:raise ValueError ( 'Out-of-range number')
     for key in ('reason','topic','question' ) :
         value=plan.get ( key,'')
         if not isinstance ( value,str ) :raise ValueError ( 'Invalid text')
@@ -7279,7 +7279,7 @@ async def v12_dispatch ( update,ctx,plan,candidates ) :
             await msg.reply_text ( 'O‘z xabarlaringizni tozalash uchun Veritas xabariga reply qilib ayting.' ) ;return True
         await vse_self_clean ( v12_view ( update,'*vse' ) ,ctx ) ;return True
     if action.startswith ( 'zakovat_' ) :
-        text={'zakovat_start':f"*zakovat {plan.get ( 'count',10 ) } {plan.get ( 'topic','' ) }",
+        text={'zakovat_start':f"*zakovat {plan.get ( 'count',30 ) } {plan.get ( 'topic','' ) }",
               'zakovat_stop':'*zstop','zakovat_results':'*znatija'}[action]
         try:await v11_commands ( v12_view ( update,text ) ,ctx)
         except _V11HandlerStop:pass
@@ -7512,13 +7512,13 @@ def v13_nearby ( candidate,history ) :
 
 def v11_questions ( topic,count,chat_id=None ) :
     if not OPENAI_API_KEY:raise RuntimeError ( 'V13_NO_KEY')
-    if type ( count) is not int or not 1<=count<=20:raise ValueError ( 'Invalid question count')
+    if type ( count) is not int or not 1<=count<=30:raise ValueError ( 'Invalid question count')
     if chat_id is None:raise ValueError ( 'Group is required for nonrepeating questions')
     history=v13_history ( chat_id)
     # These elementary questions are excluded even if the group never played them.
     excluded=history+[dict ( question=x['q'],answer=json.dumps ( x['answers'] ) ,concept='') for x in V11_QUESTION_BANK]
     concepts=[h['concept'] or h['question'][:150] for h in history]
-    chosen=[];deadline=time.monotonic (  ) +140
+    chosen=[];deadline=time.monotonic (  ) +240
     themes=['tarixiy sabab va oqibat','til va ma’no','ilm-fan va kundalik hodisa','deduktiv mantiq',
             'geografiya va madaniyat','adabiyot va ramzlar','kuzatish va yashirin bog‘lanish','bir nechta ishora']
     random.shuffle ( themes)
