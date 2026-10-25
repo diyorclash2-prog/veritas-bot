@@ -6910,7 +6910,7 @@ async def v11_tick ( ctx ) :
             game=one ( 'SELECT * FROM v11_games WHERE id=?', ( gid, ) )
             try:
                 if game['status']=='preparing':
-                    if now (  ) -game['created_at']>360:
+                    if now (  ) -game['created_at']>540:
                         execute ( "UPDATE v11_games SET status='failed' WHERE id=?", ( gid, ) )
                     continue
                 if game['phase'] in ('publishing','closing' ) :
@@ -7619,6 +7619,216 @@ async def v11_prepare ( ctx,game_id,topic,count ) :
         except TelegramError:pass
 # =========================================================
 # END Zakovat v13
+# =========================================================
+
+# =========================================================
+# Zakovat v14: small batches, bounded concurrency, progress and API diagnostics
+# =========================================================
+import threading as _v14_threading
+from concurrent.futures import ThreadPoolExecutor as _V14Pool, wait as _v14_wait, FIRST_COMPLETED as _V14_FIRST
+V14_API_SLOTS = _v14_threading.BoundedSemaphore ( 2)
+V14_PROGRESS = _V11ContextVar ( 'zakovat_progress',default=None)
+
+class V14QuestionError ( RuntimeError ) :
+    pass
+
+def v13_api_json ( instructions,data,budget,timeout ) :
+    payload=json.dumps ( {'model':OPENAI_MODEL,'instructions':instructions,
+        'input':json.dumps ( data,ensure_ascii=False ) ,'max_output_tokens':budget},ensure_ascii=False ) .encode ( )
+    req=urllib.request.Request ( 'https://api.openai.com/v1/responses',data=payload,
+        headers={'Authorization':f'Bearer {OPENAI_API_KEY}','Content-Type':'application/json'},method='POST')
+    if not V14_API_SLOTS.acquire ( timeout=timeout ) :raise V14QuestionError ( 'API_BUSY')
+    try:
+        try:
+            with urllib.request.urlopen ( req,timeout=timeout) as response:result=json.loads ( response.read (  ) .decode (  ) )
+        except urllib.error.HTTPError as exc:
+            try:
+                body=json.loads ( exc.read (  ) .decode (  )  ) ;code=str (  ( body.get ( 'error') or {} ) .get ( 'code','' ) )
+            except Exception:code=''
+            if code=='insufficient_quota':raise V14QuestionError ( 'API_QUOTA') from None
+            if exc.code in (401,403 ) :raise V14QuestionError ( 'API_KEY') from None
+            if exc.code in (400,404 ) :raise V14QuestionError ( 'API_MODEL_OR_REQUEST') from None
+            raise V14QuestionError ( 'API_RATE_LIMIT' if exc.code==429 else 'API_HTTP_'+str ( exc.code ) ) from None
+        except (TimeoutError,urllib.error.URLError ) :raise V14QuestionError ( 'API_CONNECTION') from None
+    finally:
+        V14_API_SLOTS.release ( )
+    raw=_extract_response_text ( result ) .strip ( )
+    if result.get ( 'status' ) =='incomplete':raise V14QuestionError ( 'API_OUTPUT_LIMIT')
+    if not raw:raise V14QuestionError ( 'API_EMPTY_OUTPUT')
+    if raw.startswith ( '```' ) :raw=re.sub ( r'^``` ( ?:json ) ?\s*|\s*```$','',raw,flags=re.I)
+    try:return json.loads ( raw)
+    except ValueError:
+        # Accept a valid JSON envelope following a short incidental preamble.
+        decoder=json.JSONDecoder ( )
+        for match in re.finditer ( r'[\[{]',raw ) :
+            try:
+                parsed,_=decoder.raw_decode ( raw[match.start (  ) :])
+                return parsed
+            except ValueError:continue
+        raise V14QuestionError ( 'API_INVALID_JSON') from None
+
+def v13_validate ( item ) :
+    if not isinstance ( item,dict ) :return None
+    q=item.get ( 'q',item.get ( 'question' )  ) ;answers=item.get ( 'answers' ) ;why=item.get ( 'why',item.get ( 'explanation' ) )
+    if not isinstance ( q,str) or not 60<=len ( q.strip (  )  ) <=850:return None
+    if not isinstance ( why,str) or not 25<=len ( why.strip (  )  ) <=750:return None
+    if isinstance ( answers,str ) :answers=[answers]
+    if not isinstance ( answers,list) or not 1<=len ( answers ) <=12:return None
+    if any ( not isinstance ( x,str) or not x.strip ( ) or len ( x ) >120 for x in answers ) :return None
+    concept=item.get ( 'concept')
+    if not isinstance ( concept,str) or not concept.strip (  ) :concept=why[:160]
+    difficulty=item.get ( 'difficulty',3)
+    if str ( difficulty) not in ('3','4' ) :return None
+    return {'q':q.strip (  ) ,'answers':list ( dict.fromkeys ( x.strip ( ) for x in answers )  ) ,
+            'why':why.strip (  ) ,'concept':concept.strip (  ) [:160],'difficulty':int ( difficulty ) }
+
+def v14_batch ( topic,amount,history,chosen,direction,attempt ) :
+    instructions='''O‘zbekcha Zakovat savollarini yozing. Daraja 3–4/5: 60 soniyada 2–3 ishorani bog‘lash orqali topish mumkin bo‘lsin.
+Oddiy arifmetika, bitta faktni yodlash, paxta-temir, 28 kunli oy va mashhur sodda topishmoqlar bo‘lmasin. Murakkablik kamyob nomni bilishga bog‘liq bo‘lmasin.
+Javob qisqa va yagona bo‘lsin. Uydirma tarixiy fakt, iqtibos va sanalarni ishlatmang. why to‘g‘ri mantiqiy yechimni tushuntirsin.
+Oldingi savol, uning qayta yozilishi yoki xuddi shu fakt/mexanizmning raqam/ism almashtirilgan nusxasini takrorlamang.
+Faqat JSON: {"questions":[{"q":"60–850 belgili savol","answers":["qisqa javob","boshqa yozilishi"],"why":"25–750 belgili mantiqiy izoh","concept":"savolning yechim mexanizmi","difficulty":3}]}.
+So‘ralgan sondan kam bo‘lmasin. Har biri bir-biridan farq qilsin.'''
+    items=v13_api_json ( instructions,{'topic':topic or 'Aralash mantiqiy Zakovat',
+        'count':amount,'direction':direction,'attempt':attempt,'nonce':random.getrandbits ( 64 ) ,
+        'excluded_concepts':[ ( h.get ( 'concept') or h.get ( 'question','' ) [:120]) for h in history[:120]]
+                            +[x['concept'] for x in chosen]},6500,45)
+    if isinstance ( items,dict ) :items=items.get ( 'questions',items.get ( 'items',[] ) )
+    candidates=[];bad=duplicates=0
+    for raw in items if isinstance ( items,list) else []:
+        item=v13_validate ( raw)
+        if not item:bad+=1;continue
+        if any ( v13_similar ( item,h) for h in history+chosen+candidates ) :duplicates+=1;continue
+        candidates.append ( item)
+    log.info ( 'ZAKOVAT_BATCH attempt=%s valid=%s invalid=%s repeated=%s',attempt,len ( candidates ) ,bad,duplicates)
+    if not candidates:return []
+    review=v13_api_json(
+        'Siz Zakovat muharririsiz. Har savol javobi va izohini tekshiring. Aniq xato, bahsli javob, '
+        'juda sodda arifmetika yoki oldingi savolning qayta yozilgan nusxasini rad eting. '
+        'Yangi va to‘g‘ri 3–4/5 darajali savolni qabul qiling. Umumiy mavzusi o‘xshashligi o‘zi takror degani emas: '
+        'aynan bir xil savol/fakt/yechim qayta ishlatilgan bo‘lsa rad eting. '
+        'Faqat JSON {"accepted":[0,1],"rejected":[{"index":2,"reason":"qisqa sabab"}]}. '
+        'Indekslar 0 dan boshlanadi, faqat berilgan indekslardan foydalaning.',
+        {'candidates':[{'index':i,**x,'closest_previous':v13_nearby ( x,history+[
+            {'question':a['q'],'concept':a['concept'],'answer':json.dumps ( a['answers'] ) } for a in chosen] ) }
+             for i,x in enumerate ( candidates ) ]},6000,45)
+    accepted=review.get ( 'accepted',[]) if isinstance ( review,dict) else []
+    valid=[]
+    for i in accepted if isinstance ( accepted,list) else []:
+        if type ( i) is int and 0<=i<len ( candidates) and i not in valid:valid.append ( i)
+    log.info ( 'ZAKOVAT_REVIEW attempt=%s accepted=%s rejected=%s',attempt,len ( valid ) ,len ( candidates ) -len ( valid ) )
+    if isinstance ( review,dict) and review.get ( 'rejected' ) :
+        log.info ( 'ZAKOVAT_REVIEW_REASONS attempt=%s details=%s',attempt,str ( review['rejected'] ) [:800])
+    return [candidates[i] for i in valid]
+
+def v11_questions ( topic,count,chat_id=None ) :
+    if not OPENAI_API_KEY:raise V14QuestionError ( 'API_KEY')
+    if type ( count) is not int or not 1<=count<=30:raise ValueError ( 'Invalid question count')
+    if chat_id is None:raise ValueError ( 'Group required')
+    history=v13_history ( chat_id)
+    excluded=history+[{'question':x['q'],'concept':'','answer':json.dumps ( x['answers'] ) } for x in V11_QUESTION_BANK]
+    chosen=[];attempt=0;last_error='NOT_ENOUGH_NEW';deadline=time.monotonic (  ) +420
+    themes=['deduktiv mantiq','ilmiy hodisaga sabab topish','tarixiy sabab va oqibat','til va ma’no',
+            'kundalik kuzatuv','geografiya va madaniyat','adabiyot va ramzlar','bir nechta ishoradan xulosa']
+    random.shuffle ( themes)
+    progress=V14_PROGRESS.get ( )
+    pool=_V14Pool ( max_workers=2,thread_name_prefix='veritas-zakovat')
+    pending=set ( )
+    try:
+        while len ( chosen ) <count and time.monotonic (  ) <deadline:
+            while len ( pending ) <min ( 2, ( count-len ( chosen ) +7 ) //8) and attempt<12 and len ( chosen ) <count:
+                attempt+=1
+                # At most eight items per response, preventing the previous giant response.
+                amount=min ( 8,max ( 3,count-len ( chosen ) +1 ) )
+                future=pool.submit ( v14_batch,topic,amount,excluded,list ( chosen ) ,themes[ ( attempt-1 ) %len ( themes ) ],attempt)
+                pending.add ( future)
+            if not pending:break
+            done,_=_v14_wait ( pending,timeout=min ( 5,max ( 0,deadline-time.monotonic (  )  )  ) ,return_when=_V14_FIRST)
+            for future in done:
+                pending.discard ( future)
+                try:items=future.result ( )
+                except V14QuestionError as exc:
+                    last_error=str ( exc)
+                    log.warning ( 'ZAKOVAT_API chat=%s code=%s',chat_id,last_error)
+                    if last_error in {'API_KEY','API_QUOTA','API_MODEL_OR_REQUEST'}:raise
+                    if last_error=='API_RATE_LIMIT':time.sleep ( 2)
+                    continue
+                except Exception as exc:
+                    last_error='API_CONNECTION'
+                    log.warning ( 'ZAKOVAT_BATCH_ERROR chat=%s type=%s',chat_id,type ( exc ) .__name__)
+                    continue
+                for item in items:
+                    # Concurrent batches are reconciled against the complete ledger here.
+                    if any ( v13_similar ( item,h) for h in excluded+chosen ) :continue
+                    chosen.append ( item)
+                    if len ( chosen ) ==count:break
+                if progress:progress ( len ( chosen ) ,count)
+                log.info ( 'ZAKOVAT_PROGRESS chat=%s ready=%s total=%s',chat_id,len ( chosen ) ,count)
+                if len ( chosen ) ==count:break
+        if len ( chosen ) !=count:
+            raise V14QuestionError ( f'{last_error}:{len ( chosen ) }/{count}')
+        return chosen,'ai'
+    finally:
+        for future in pending:future.cancel ( )
+        pool.shutdown ( wait=False,cancel_futures=True)
+
+def v14_error_message ( exc ) :
+    code=str ( exc ) .split ( ':',1 ) [0]
+    messages={
+        'API_KEY':'⚠️ OpenAI kaliti yo‘q yoki qabul qilinmadi. Railway’dagi OPENAI_API_KEY ni tekshiring.',
+        'API_QUOTA':'⚠️ OpenAI API balansi yoki kvotasi yetarli emas. API hisobini tekshiring.',
+        'API_MODEL_OR_REQUEST':'⚠️ OpenAI model yoki so‘rovni qabul qilmadi. OPENAI_MODEL va Railway logini tekshiring.',
+        'API_RATE_LIMIT':'⚠️ OpenAI so‘rov limiti sabab savollar tugamadi. Birozdan keyin qayta so‘rang.',
+        'API_CONNECTION':'⚠️ OpenAI bilan aloqa uzildi yoki javob kechikdi. Keyinroq qayta urinib ko‘ring.',
+        'API_OUTPUT_LIMIT':'⚠️ AI javobi hajm chegarasida uzildi. Savollar to‘liq tayyorlanmadi.',
+        'API_EMPTY_OUTPUT':'⚠️ OpenAI bo‘sh javob qaytardi. Railway logini tekshiring.',
+        'API_INVALID_JSON':'⚠️ AI savollarni kerakli formatda qaytarmadi. Qayta urinib ko‘ring.'}
+    return messages.get ( code,'⚠️ Yetarli yangi va tekshiruvdan o‘tgan savol tayyorlanmadi. Eski savollar qo‘yilmadi. Birozdan keyin qayta so‘rang.')
+
+async def v11_prepare ( ctx,game_id,topic,count ) :
+    game=one ( 'SELECT * FROM v11_games WHERE id=?', ( game_id, ) )
+    if not game:return
+    progress_msg=None;tracker={'active':True,'last':-1};loop=asyncio.get_running_loop ( )
+    async def update_progress ( n,total ) :
+        if not tracker['active'] or n<=tracker['last'] or not progress_msg:return
+        tracker['last']=n
+        try:
+            await ctx.bot.edit_message_text ( chat_id=game['chat_id'],message_id=progress_msg.message_id,
+                text=f'🧠 Zakovat: {n}/{total} ta yangi savol tayyor.\nSavollar kichik bo‘laklarda tuzilmoqda va tekshirilmoqda. Biroz kuting.',_skip_i18n=True)
+        except TelegramError:pass
+    def progress ( n,total ) :
+        if tracker['active']:loop.call_soon_threadsafe ( lambda:ctx.application.create_task ( update_progress ( n,total )  ) )
+    token=V14_PROGRESS.set ( progress)
+    try:
+        progress_msg=await v11_send ( ctx,game,f'🧠 Zakovat: 0/{count} ta savol.\nAI kichik to‘plamlarda yangi savollar tayyorlaydi; bu bir necha daqiqa olishi mumkin.')
+        questions,_=await asyncio.to_thread ( v11_questions,topic,count,game['chat_id'])
+        tracker['active']=False
+        if not v13_reserve ( game_id,questions ) :return
+        game=one ( 'SELECT * FROM v11_games WHERE id=?', ( game_id, ) )
+        await v11_send ( ctx,game,
+            f"🧠 VERITAS ZAKOVAT #{game_id}\n\n📖 {game['title']}\n📝 {len ( questions ) } yangi savol\n"
+            '🔥 O‘rtacha-qiyin. ⏱ Har savolga 60 soniya.\n'
+            '✅ Har to‘g‘ri javobga 10 ball. Har savolga bitta javob.\n'
+            'Savolga reply qilib javob yozing.\n'
+            '🏆 Teng ball: javoblarga sarflangan jami vaqt, so‘ng Telegram ID.\n'
+            '🎓 Birinchi o‘ringa sertifikat.\n\n'
+            '🙋 Qatnashaman tugmasini bosing. 45 soniyadan so‘ng boshlanadi.\n'
+            'Bahsli javobni admin joriy savol vaqtida *zball bilan tasdiqlaydi.',reply_markup=v11_join_markup ( game_id ) )
+        if progress_msg:
+            try:await ctx.bot.edit_message_text ( chat_id=game['chat_id'],message_id=progress_msg.message_id,
+                text=f'✅ {count}/{count} ta yangi savol tayyor. Qatnashish paneli pastda.',_skip_i18n=True)
+            except TelegramError:pass
+    except Exception as exc:
+        tracker['active']=False
+        execute ( "UPDATE v11_games SET status='failed',delivery_error=? WHERE id=? AND status IN ('preparing','lobby' ) ",
+                (str ( exc ) [:200],game_id ) )
+        log.warning ( 'ZAKOVAT_PREPARE_FAILED game=%s code=%s',game_id,str ( exc ) [:100])
+        try:await v11_send ( ctx,game,v14_error_message ( exc ) )
+        except TelegramError:pass
+    finally:
+        tracker['active']=False;V14_PROGRESS.reset ( token)
+# =========================================================
+# END Zakovat v14
 # =========================================================
 
 def main (  ) :
