@@ -7067,19 +7067,65 @@ async def v11_commands ( update,ctx ) :
                     await msg.reply_text ( '✅ Javob tasdiqlandi: +10 ball.' if result=='correct' else 'ℹ️ Bu javob avval hisoblangan yoki vaqt tugagan.')
     raise _V11HandlerStop
 
+# Zakovat high-load answer queue.  Ko‘p qatnashchi bir vaqtda javob berganda
+# Telegram update oqimini SQLite yozuvlari va tasdiq xabarlari bilan ushlab turmaydi.
+V11_ANSWER_QUEUES = {}
+V11_ANSWER_WORKERS = {}
+
+async def v11_answer_worker ( game_id ) :
+    queue=V11_ANSWER_QUEUES.get ( game_id)
+    if queue is None:return
+    try:
+        while True:
+            try:
+                item=await asyncio.wait_for ( queue.get (  ) ,timeout=90)
+            except asyncio.TimeoutError:
+                break
+            try:
+                # SQLite is synchronous. Run it outside the Telegram event loop; one worker
+                # per game preserves answer order and avoids a write-lock storm.
+                await asyncio.to_thread ( v11_record_answer,*item)
+            except Exception:
+                log.exception ( 'ZAKOVAT_ANSWER_WORKER_FAILED game=%s',game_id)
+            finally:
+                queue.task_done ( )
+    finally:
+        V11_ANSWER_QUEUES.pop ( game_id,None)
+        V11_ANSWER_WORKERS.pop ( game_id,None)
+
+def v11_queue_answer ( ctx,game_id,user_id,name,text,message_id,received_at ) :
+    queue=V11_ANSWER_QUEUES.get ( game_id)
+    if queue is None:
+        queue=asyncio.Queue ( maxsize=2000)
+        V11_ANSWER_QUEUES[game_id]=queue
+    try:
+        queue.put_nowait (  ( game_id,user_id,name,text,message_id,False,received_at ) )
+    except asyncio.QueueFull:
+        return False
+    worker=V11_ANSWER_WORKERS.get ( game_id)
+    if worker is None or worker.done (  ) :
+        V11_ANSWER_WORKERS[game_id]=ctx.application.create_task ( v11_answer_worker ( game_id ) )
+    return True
+
 async def v11_game_answers ( update,ctx ) :
     if not v11_game_question_reply ( update ) :return
     msg=update.message;user=update.effective_user
     if not user or user.is_bot or not msg.text or msg.text.startswith (  ( '*','/' )  ) :return
     if not v11_is_answer ( update ) :
+        # Closed/old-question replies are rare, so only these receive a bot message.
         await msg.reply_text ( '⏰ Bu savolning javob vaqti tugagan. Joriy savolga reply qiling.')
         return
     game=v11_live ( msg.chat.id)
-    async with v11_lock ( game['id'] ) :
-        result=v11_record_answer ( game['id'],user.id,user.full_name,msg.text,msg.message_id)
-    # Do not disclose correctness until the deadline, preventing copying.
-    await msg.reply_text ( '📩 Javob qabul qilindi.' if result in ('correct','wrong') else
-                         'ℹ️ Bu savolga javobingiz avval qabul qilingan.' if result=='duplicate' else '⏰ Javob vaqti tugagan.')
+    if not game:return
+    # Capture arrival time before queueing. Even if the worker processes it milliseconds
+    # later, scoring uses the actual receive time rather than processing time.
+    received_at=now ( )
+    accepted=v11_queue_answer ( ctx,game['id'],user.id,user.full_name,msg.text,msg.message_id,received_at)
+    if not accepted:
+        await msg.reply_text ( '⚠️ Bir vaqtda juda ko‘p javob keldi. Javobingizni yana bir marta yuboring.')
+    # Intentionally no “Javob qabul qilindi” message for every answer. Sending dozens of
+    # acknowledgement messages at once triggers Telegram flood limits and was the main
+    # source of visible Zakovat lag. Correctness remains hidden until the round closes.
 
 async def v11_book_answer ( update,ctx,parts ) :
     msg=update.message;user=update.effective_user;chat=update.effective_chat
