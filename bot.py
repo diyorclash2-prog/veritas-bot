@@ -5967,6 +5967,7 @@ async def star_text_router ( update,ctx ) :
     msg=update.effective_message
     raw= ( msg.text or '' ) .strip ( ) if msg else ''; low=raw.lower ( )
     if low in ('*til','*lang','*language' ) : return await group_lang_command ( update,ctx)
+    if low=='*avtokitob' or low.startswith ( '*avtokitob ' ) : return await autobook_command ( update,ctx)
     if low=='*bayram': return await bayram_command ( update,ctx)
     if low=='*mazgila' or low.startswith ( '*mazgila ' ) : return await mazgila_command ( update,ctx,raw.split (  ) [1:])
     if low=='*poster' or low.startswith ( '*poster ' ) : return await group_poster_command ( update,ctx,raw.split (  ) [1:])
@@ -7067,65 +7068,19 @@ async def v11_commands ( update,ctx ) :
                     await msg.reply_text ( '✅ Javob tasdiqlandi: +10 ball.' if result=='correct' else 'ℹ️ Bu javob avval hisoblangan yoki vaqt tugagan.')
     raise _V11HandlerStop
 
-# Zakovat high-load answer queue.  Ko‘p qatnashchi bir vaqtda javob berganda
-# Telegram update oqimini SQLite yozuvlari va tasdiq xabarlari bilan ushlab turmaydi.
-V11_ANSWER_QUEUES = {}
-V11_ANSWER_WORKERS = {}
-
-async def v11_answer_worker ( game_id ) :
-    queue=V11_ANSWER_QUEUES.get ( game_id)
-    if queue is None:return
-    try:
-        while True:
-            try:
-                item=await asyncio.wait_for ( queue.get (  ) ,timeout=90)
-            except asyncio.TimeoutError:
-                break
-            try:
-                # SQLite is synchronous. Run it outside the Telegram event loop; one worker
-                # per game preserves answer order and avoids a write-lock storm.
-                await asyncio.to_thread ( v11_record_answer,*item)
-            except Exception:
-                log.exception ( 'ZAKOVAT_ANSWER_WORKER_FAILED game=%s',game_id)
-            finally:
-                queue.task_done ( )
-    finally:
-        V11_ANSWER_QUEUES.pop ( game_id,None)
-        V11_ANSWER_WORKERS.pop ( game_id,None)
-
-def v11_queue_answer ( ctx,game_id,user_id,name,text,message_id,received_at ) :
-    queue=V11_ANSWER_QUEUES.get ( game_id)
-    if queue is None:
-        queue=asyncio.Queue ( maxsize=2000)
-        V11_ANSWER_QUEUES[game_id]=queue
-    try:
-        queue.put_nowait (  ( game_id,user_id,name,text,message_id,False,received_at ) )
-    except asyncio.QueueFull:
-        return False
-    worker=V11_ANSWER_WORKERS.get ( game_id)
-    if worker is None or worker.done (  ) :
-        V11_ANSWER_WORKERS[game_id]=ctx.application.create_task ( v11_answer_worker ( game_id ) )
-    return True
-
 async def v11_game_answers ( update,ctx ) :
     if not v11_game_question_reply ( update ) :return
     msg=update.message;user=update.effective_user
     if not user or user.is_bot or not msg.text or msg.text.startswith (  ( '*','/' )  ) :return
     if not v11_is_answer ( update ) :
-        # Closed/old-question replies are rare, so only these receive a bot message.
         await msg.reply_text ( '⏰ Bu savolning javob vaqti tugagan. Joriy savolga reply qiling.')
         return
     game=v11_live ( msg.chat.id)
-    if not game:return
-    # Capture arrival time before queueing. Even if the worker processes it milliseconds
-    # later, scoring uses the actual receive time rather than processing time.
-    received_at=now ( )
-    accepted=v11_queue_answer ( ctx,game['id'],user.id,user.full_name,msg.text,msg.message_id,received_at)
-    if not accepted:
-        await msg.reply_text ( '⚠️ Bir vaqtda juda ko‘p javob keldi. Javobingizni yana bir marta yuboring.')
-    # Intentionally no “Javob qabul qilindi” message for every answer. Sending dozens of
-    # acknowledgement messages at once triggers Telegram flood limits and was the main
-    # source of visible Zakovat lag. Correctness remains hidden until the round closes.
+    async with v11_lock ( game['id'] ) :
+        result=v11_record_answer ( game['id'],user.id,user.full_name,msg.text,msg.message_id)
+    # Do not disclose correctness until the deadline, preventing copying.
+    await msg.reply_text ( '📩 Javob qabul qilindi.' if result in ('correct','wrong') else
+                         'ℹ️ Bu savolga javobingiz avval qabul qilingan.' if result=='duplicate' else '⏰ Javob vaqti tugagan.')
 
 async def v11_book_answer ( update,ctx,parts ) :
     msg=update.message;user=update.effective_user;chat=update.effective_chat
@@ -7879,156 +7834,183 @@ async def v11_prepare ( ctx,game_id,topic,count ) :
 
 
 # =========================================================
-# V15 — WAKE WORD + SAFE AUTO LIBRARY
+# VASATIYA AUTO LIBRARY — verified public-domain importer
+# Source: Gutendex / Project Gutenberg catalogue metadata.
 # =========================================================
-AUTO_LIBRARY_ENABLED = os.getenv ( "AUTO_LIBRARY_ENABLED", "1" ) .strip (  ) .lower ( ) not in {"0","false","off","no"}
-AUTO_LIBRARY_PER_LANGUAGE = max ( 1, min ( 5, int ( os.getenv ( "AUTO_LIBRARY_PER_LANGUAGE", "2") or 2 )  ) )
-AUTO_LIBRARY_LANGS = ("uz", "ru", "en")
-AUTO_LIBRARY_MAX_BYTES = 18 * 1024 * 1024
-AUTO_LIBRARY_USER_AGENT = "Veritas-Vasatiya-Library/1.0 (public-domain importer ) "
-AUTO_LIBRARY_RUN_LOCK = asyncio.Lock ( )
+AUTOBOOK_API = os.getenv ( "AUTOBOOK_API", "https://gutendex.com/books" ) .strip ( )
+AUTOBOOK_ENABLED = os.getenv ( "AUTOBOOK_ENABLED", "1" ) .strip (  ) .lower ( ) not in {"0","false","off","no"}
+AUTOBOOK_INTERVAL = max ( 1800, int ( os.getenv ( "AUTOBOOK_INTERVAL", "21600") or 21600 ) )
+AUTOBOOK_PER_RUN = max ( 1, min ( 10, int ( os.getenv ( "AUTOBOOK_PER_RUN", "3") or 3 )  ) )
+AUTOBOOK_LANGS = tuple ( x for x in (v.strip (  ) .lower ( ) for v in os.getenv ( "AUTOBOOK_LANGS", "uz,ru,en" ) .split ( ',' ) ) if x in {"uz","ru","en"}) or ("uz","ru","en")
+AUTOBOOK_LOCK = asyncio.Lock ( )
 
-def auto_library_init_db (  ) :
+def autobook_init_db (  ) :
     with db ( ) as c:
-        c.executescript ( """
-        CREATE TABLE IF NOT EXISTS auto_library_sources(
-          source TEXT NOT NULL, source_id TEXT NOT NULL, title TEXT DEFAULT '', author TEXT DEFAULT '',
-          lang TEXT DEFAULT '', source_url TEXT DEFAULT '', rights TEXT DEFAULT '', status TEXT DEFAULT 'added',
-          book_id INTEGER DEFAULT 0, created_at INTEGER NOT NULL, PRIMARY KEY ( source,source_id )  ) ;
-        CREATE TABLE IF NOT EXISTS auto_library_runs(
-          id INTEGER PRIMARY KEY AUTOINCREMENT, started_at INTEGER NOT NULL, finished_at INTEGER DEFAULT 0,
-          added INTEGER DEFAULT 0, skipped INTEGER DEFAULT 0, errors INTEGER DEFAULT 0, detail TEXT DEFAULT '' ) ;
-        """)
+        c.executescript ( '''
+        CREATE TABLE IF NOT EXISTS library_auto_imports(
+          source TEXT NOT NULL, source_book_id TEXT NOT NULL, book_id INTEGER DEFAULT 0,
+          title TEXT DEFAULT '', lang TEXT DEFAULT '', source_url TEXT DEFAULT '',
+          status TEXT NOT NULL DEFAULT 'seen', detail TEXT DEFAULT '', created_at INTEGER NOT NULL,
+          PRIMARY KEY ( source,source_book_id )  ) ;
+        CREATE INDEX IF NOT EXISTS idx_library_auto_import_status ON library_auto_imports ( status,created_at ) ;
+        ''')
 
-def _wake_normalize ( text ) :
-    return (text or '' ) .casefold (  ) .replace ( '’',"'" ) .replace ( '‘',"'" ) .replace ( '`',"'" ) .strip ( )
+def _autobook_json ( url, timeout=25 ) :
+    req=urllib.request.Request ( url,headers={'User-Agent':'VeritasBot/9.4 public-domain-library'})
+    with urllib.request.urlopen ( req,timeout=timeout) as r:
+        return json.loads ( r.read (  ) .decode ( 'utf-8','replace' ) )
 
-async def veritas_wake_handler ( update,ctx ) :
-    msg=update.effective_message; chat=update.effective_chat; user=update.effective_user
-    if not msg or not chat or not user or user.is_bot or chat.type not in ('group','supergroup') or not msg.text:return
-    t=_wake_normalize ( msg.text)
-    wake=re.fullmatch ( r"\s*veritas[,.! ]+ ( ?:uyg['’]?on|uygon ) [.!? ]*\s*",t,re.I)
-    ping=re.fullmatch ( r"\s*veritas[,.! ]+ ( ?:shu\s*yerda\s*misan|shuyerdamisan|shu\s*yerdamisan ) [.!? ]*\s*",t,re.I)
-    if not (wake or ping ) :return
-    V12_CONSUMED[ ( chat.id,msg.message_id ) ]=now ( )
-    await msg.reply_text ( "🪶 Labbay, shu yerdaman. Veritas uyg‘oq.")
-    raise _V11HandlerStop
+def _autobook_bytes ( url, timeout=60, max_bytes=45*1024*1024 ) :
+    req=urllib.request.Request ( url,headers={'User-Agent':'VeritasBot/9.4 public-domain-library'})
+    with urllib.request.urlopen ( req,timeout=timeout) as r:
+        data=r.read ( max_bytes+1)
+    if len ( data ) >max_bytes: raise RuntimeError ( 'Fayl 45 MB dan katta')
+    return data
 
-def _auto_json ( url,timeout=30 ) :
-    req=urllib.request.Request ( url,headers={'User-Agent':AUTO_LIBRARY_USER_AGENT,'Accept':'application/json'})
-    with urllib.request.urlopen ( req,timeout=timeout) as r:return json.loads ( r.read (  ) .decode ( 'utf-8' ) )
+def _autobook_pick_format ( formats ) :
+    if not isinstance ( formats,dict ) : return ('','','')
+    prefs=(
+      ('epub','application/epub+zip' ) ,
+      ('txt','text/plain; charset=utf-8' ) , ( 'txt','text/plain; charset=us-ascii' ) , ( 'txt','text/plain' ) ,
+    )
+    for ext,mime in prefs:
+        url=formats.get ( mime)
+        if isinstance ( url,str) and url.startswith (  ( 'http://','https://' )  ) :
+            return ext,mime,url
+    for mime,url in formats.items (  ) :
+        if not isinstance ( url,str) or not url.startswith (  ( 'http://','https://' )  ) : continue
+        base=mime.split ( ';',1 ) [0].strip (  ) .lower ( )
+        if base=='application/epub+zip': return 'epub',mime,url
+        if base=='text/plain': return 'txt',mime,url
+    return ('','','')
 
-def _pg_mirror_candidates ( book_id ) :
-    sid=str ( int ( book_id )  ) ; dirs='/'.join ( sid[:-1] ) ;base=f'https://www.mirrorservice.org/sites/ftp.ibiblio.org/pub/docs/books/gutenberg/{dirs}/{sid}'
-    return [f'{base}/{sid}-0.txt',f'{base}/{sid}.txt']
+def _autobook_author ( item ) :
+    names=[]
+    for a in item.get ( 'authors') or []:
+        n=str ( a.get ( 'name') or '' ) .strip ( )
+        if n:names.append ( n)
+    return ', '.join ( names ) [:250]
 
-def _download_public_domain_text ( book_id ) :
-    last=None
-    for url in _pg_mirror_candidates ( book_id ) :
-        try:
-            req=urllib.request.Request ( url,headers={'User-Agent':AUTO_LIBRARY_USER_AGENT})
-            with urllib.request.urlopen ( req,timeout=45) as r:
-                size=int ( r.headers.get ( 'Content-Length') or 0)
-                if size and size>AUTO_LIBRARY_MAX_BYTES:raise ValueError ( 'BOOK_TOO_LARGE')
-                raw=r.read ( AUTO_LIBRARY_MAX_BYTES+1)
-            if len ( raw ) >AUTO_LIBRARY_MAX_BYTES:raise ValueError ( 'BOOK_TOO_LARGE')
-            head=raw[:18000].decode ( 'utf-8-sig',errors='replace' ) .casefold ( )
-            if ('copyright holder' in head and 'permission' in head) or 'this particular work is one of the few individual works restricted by copyright' in head:raise ValueError ( 'COPYRIGHT_RESTRICTED')
-            if 'project gutenberg' not in head:raise ValueError ( 'NOT_VERIFIED_PG_TEXT')
-            return raw,url
-        except Exception as e:last=e
-    raise last or RuntimeError ( 'DOWNLOAD_FAILED')
+def _autobook_desc ( item ) :
+    subjects=[str ( x ) .strip ( ) for x in (item.get ( 'subjects') or []) if str ( x ) .strip (  ) ][:5]
+    shelves=[str ( x ) .strip ( ) for x in (item.get ( 'bookshelves') or []) if str ( x ) .strip (  ) ][:3]
+    bits=['Project Gutenberg public-domain katalogidan avtomatik qo‘shildi.']
+    if subjects: bits.append ( 'Mavzular: '+', '.join ( subjects ) )
+    if shelves: bits.append ( 'Bo‘limlar: '+', '.join ( shelves ) )
+    return '\n'.join ( bits ) [:3000]
 
-def _auto_catalog ( lang,limit=30 ) :
+def _autobook_catalog ( lang, page=1 ) :
     from urllib.parse import urlencode
-    data=_auto_json ( 'https://gutendex.com/books?'+urlencode ( {'languages':lang,'copyright':'false','sort':'descending'} ) )
-    out=[]
-    for b in data.get ( 'results',[] ) :
-        if b.get ( 'copyright') is not False or lang not in (b.get ( 'languages') or [] ) :continue
-        author=', '.join ( str ( a.get ( 'name','' )  ) .strip ( ) for a in (b.get ( 'authors') or []) if a.get ( 'name' )  ) [:250]
-        out.append ( {'id':str ( b.get ( 'id' )  ) ,'title':str ( b.get ( 'title') or '' ) .strip (  ) [:250],'author':author,'lang':lang,'summary': (  ( b.get ( 'summaries') or [''] ) [0] or '' ) [:1200]})
-        if len ( out ) >=limit:break
-    return out
+    q=urlencode ( {'copyright':'false','languages':lang,'sort':'popular','page':page})
+    return _autobook_json ( AUTOBOOK_API+'?'+q)
 
-async def _auto_add_one ( ctx,item ) :
-    sid=item['id']
-    if one ( "SELECT 1 FROM auto_library_sources WHERE source='gutenberg' AND source_id=?", ( sid, )  ) :return 'skip'
-    raw,_=await asyncio.to_thread ( _download_public_domain_text,sid)
-    title=item['title'] or f'Gutenberg #{sid}';author=item['author']
-    if one ( "SELECT 1 FROM library_books WHERE lower ( title ) =lower ( ?) AND lower ( author ) =lower ( ?) AND status<>'deleted'", ( title,author )  ) :
-        execute ( "INSERT OR IGNORE INTO auto_library_sources ( source,source_id,title,author,lang,source_url,rights,status,created_at) VALUES ( 'gutenberg',?,?,?,?,?,'Public domain in USA; Gutendex copyright=false','duplicate',? ) ", ( sid,title,author,item['lang'],f'https://www.gutenberg.org/ebooks/{sid}',now (  )  )  ) ;return 'skip'
-    if not TG_STORAGE_CHAT_ID:raise RuntimeError ( 'TG_STORAGE_CHAT_ID_REQUIRED')
-    import tempfile
-    safe=re.sub ( r'[^A-Za-z0-9._-]+','_',title ) [:70] or ('book_'+sid ) ;path=None
+def _autobook_candidate (  ) :
+    # Har safar tillar bo‘yicha navbat bilan yuradi; topilmagan til boshqalarini to‘xtatmaydi.
+    for lang in AUTOBOOK_LANGS:
+        for page in range ( 1,5 ) :
+            data=_autobook_catalog ( lang,page)
+            for item in data.get ( 'results') or []:
+                sid=str ( item.get ( 'id') or '' ) .strip ( )
+                if not sid or item.get ( 'copyright') is not False: continue
+                if one ( "SELECT 1 FROM library_auto_imports WHERE source='gutenberg' AND source_book_id=?", ( sid, )  ) : continue
+                ext,mime,url=_autobook_pick_format ( item.get ( 'formats') or {})
+                if not url:
+                    execute ( "INSERT OR IGNORE INTO library_auto_imports ( source,source_book_id,title,lang,status,detail,created_at) VALUES ( 'gutenberg',?,?,?,'skipped','EPUB/TXT yoq',? ) ", ( sid,str ( item.get ( 'title') or '' ) [:250],lang,now (  )  ) )
+                    continue
+                return item,lang,ext,mime,url
+    return None
+
+async def autobook_import_one ( ctx ) :
+    candidate=await asyncio.to_thread ( _autobook_candidate)
+    if not candidate:return ('empty',None)
+    item,lang,ext,mime,url=candidate; sid=str ( item['id'] ) ; title=str ( item.get ( 'title') or 'Nomsiz kitob' ) .strip (  ) [:250]
+    # Reserve ID before network/upload so concurrent jobs cannot duplicate it.
     try:
-        with tempfile.NamedTemporaryFile ( prefix='veritas_book_',suffix='.txt',delete=False) as f:f.write ( raw ) ;path=f.name
-        with open ( path,'rb') as fh:
-            sent=await ctx.bot.send_document ( TG_STORAGE_CHAT_ID,document=fh,filename=f'{safe}_{sid}.txt',caption=f"📚 Vasatiya Auto Library\n{title}\n{author}\n🌐 {item['lang']}\nSource: Project Gutenberg #{sid}")
+        execute ( "INSERT INTO library_auto_imports ( source,source_book_id,title,lang,source_url,status,created_at) VALUES ( 'gutenberg',?,?,?,?, 'downloading',? ) ", ( sid,title,lang,url,now (  )  ) )
+    except sqlite3.IntegrityError:
+        return ('duplicate',None)
+    try:
+        raw=await asyncio.to_thread ( _autobook_bytes,url)
+        safe=re.sub ( r'[^0-9A-Za-zА-Яа-яЁё _.-]+','',title ) [:90].strip ( ) or ('book_'+sid)
+        filename=f'{safe}.{ext}'
+        import io as _autobook_io
+        buf=_autobook_io.BytesIO ( raw ) ;buf.name=filename
+        storage_chat=TG_STORAGE_CHAT_ID or LIBRARY_AUTO_CHAT_ID
+        sent=await ctx.bot.send_document ( chat_id=storage_chat,document=buf,filename=filename,
+            caption=f'📚 AUTOBOOK • Gutenberg #{sid}\n{title}'[:1000])
         doc=sent.document
-        if not doc:raise RuntimeError ( 'TELEGRAM_STORAGE_FAILED')
-        desc= ( item.get ( 'summary') or '')
-        if desc:desc+='\n\n'
-        desc+=f'Manba: Project Gutenberg #{sid}. Huquq holati: AQShda public domain. Gutendex: copyright=false.'
+        if not doc: raise RuntimeError ( 'Telegram document qaytarmadi')
+        # Strong duplicate check by normalized title + author as well as Telegram unique id.
+        author=_autobook_author ( item)
+        dup=one ( "SELECT id FROM library_books WHERE status='approved' AND (book_unique_id=? OR pdf_unique_id=? ) ", ( doc.file_unique_id or '',doc.file_unique_id or '' ) ) if doc.file_unique_id else None
+        if not dup:
+            dup=one ( "SELECT id FROM library_books WHERE status='approved' AND lower ( trim ( title )  ) =lower ( trim ( ? ) ) AND lower ( trim ( author )  ) =lower ( trim ( ? )  ) ", ( title,author ) )
+        if dup:
+            bid=int ( dup['id'])
+            execute ( "UPDATE library_auto_imports SET book_id=?,status='duplicate',detail='Kutubxonada mavjud' WHERE source='gutenberg' AND source_book_id=?", ( bid,sid ) )
+            return ('duplicate',bid)
+        pdf_id=doc.file_id if ext=='pdf' else ''; uniq=doc.file_unique_id or ''
         with db ( ) as c:
-            bid=c.execute ( """INSERT INTO library_books ( title,author,lang,description,cover_file_id,pdf_file_id,pdf_unique_id,audio_file_id,audio_unique_id,added_by,status,created_at,book_file_id,book_unique_id,book_file_name,book_format,book_file_size) VALUES ( ?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,? ) """, ( title,author,item['lang'],desc,'',doc.file_id,doc.file_unique_id or '','','',0,'approved',now (  ) ,doc.file_id,doc.file_unique_id or '',doc.file_name or f'{safe}_{sid}.txt','txt',int ( doc.file_size or len ( raw )  )  )  ) .lastrowid
-            c.execute ( "INSERT INTO auto_library_sources ( source,source_id,title,author,lang,source_url,rights,status,book_id,created_at) VALUES ( 'gutenberg',?,?,?,?,?,'Public domain in USA; Gutendex copyright=false','added',?,? ) ", ( sid,title,author,item['lang'],f'https://www.gutenberg.org/ebooks/{sid}',bid,now (  )  ) )
-        return 'added'
-    finally:
-        if path:
-            try:Path ( path ) .unlink ( missing_ok=True)
-            except Exception:pass
+            bid=c.execute ( '''INSERT INTO library_books ( title,author,lang,description,added_by,status,created_at,
+                book_file_id,book_unique_id,book_file_name,book_format,book_file_size,pdf_file_id,pdf_unique_id)
+                VALUES ( ?,?,?,?,0,'approved',?,?,?,?,?,?,?,? ) ''',
+                (title,author,lang,_autobook_desc ( item ) ,now (  ) ,doc.file_id,uniq,filename,ext,int ( doc.file_size or len ( raw )  ) ,pdf_id,uniq if pdf_id else '' )  ) .lastrowid
+            cats= ( item.get ( 'bookshelves') or item.get ( 'subjects') or [] ) [:5]
+            for cat in cats:
+                cat=str ( cat ) .strip (  ) [:100]
+                if not cat:continue
+                c.execute ( "INSERT OR IGNORE INTO library_categories ( name) VALUES ( ? ) ", ( cat, ) )
+                cr=c.execute ( "SELECT id FROM library_categories WHERE name=? COLLATE NOCASE", ( cat, )  ) .fetchone ( )
+                if cr:c.execute ( "INSERT OR IGNORE INTO library_book_categories ( book_id,category_id) VALUES ( ?,? ) ", ( bid,cr['id'] ) )
+            c.execute ( "UPDATE library_auto_imports SET book_id=?,status='added',detail='' WHERE source='gutenberg' AND source_book_id=?", ( bid,sid ) )
+            c.execute ( "INSERT INTO audit ( actor_id,chat_id,action,detail,created_at) VALUES ( 0,0,'library_auto_add',?,? ) ", ( str ( bid ) ,now (  )  ) )
+        return ('added',bid)
+    except Exception as exc:
+        execute ( "UPDATE library_auto_imports SET status='failed',detail=? WHERE source='gutenberg' AND source_book_id=?", ( str ( exc ) [:500],sid ) )
+        log.warning ( 'AUTOBOOK failed Gutenberg id=%s: %s',sid,exc)
+        return ('failed',str ( exc ) [:160])
 
-async def auto_library_run ( ctx,notify_chat=None ) :
-    if AUTO_LIBRARY_RUN_LOCK.locked (  ) :return {'added':0,'skipped':0,'errors':0,'busy':True}
-    async with AUTO_LIBRARY_RUN_LOCK:
-        with db ( ) as c:run_id=c.execute ( "INSERT INTO auto_library_runs ( started_at) VALUES ( ? ) ", ( now (  ) , )  ) .lastrowid
-        stats={'added':0,'skipped':0,'errors':0,'busy':False};details=[]
-        for lang in AUTO_LIBRARY_LANGS:
-            try:items=await asyncio.to_thread ( _auto_catalog,lang,30)
-            except Exception as e:stats['errors']+=1;details.append ( f'{lang}:catalog:{type ( e ) .__name__}' ) ;continue
-            lang_added=0
-            for item in items:
-                if lang_added>=AUTO_LIBRARY_PER_LANGUAGE:break
-                try:
-                    result=await _auto_add_one ( ctx,item)
-                    if result=='added':stats['added']+=1;lang_added+=1
-                    else:stats['skipped']+=1
-                except Exception as e:stats['errors']+=1;details.append ( f"{lang}:{item.get ( 'id' ) }:{type ( e ) .__name__}")
-        execute ( "UPDATE auto_library_runs SET finished_at=?,added=?,skipped=?,errors=?,detail=? WHERE id=?", ( now (  ) ,stats['added'],stats['skipped'],stats['errors'],';'.join ( details ) [:1500],run_id ) )
-        if notify_chat:
-            try:await ctx.bot.send_message ( notify_chat,f"📚 Avto-kutubxona yakunlandi.\n✅ Qo‘shildi: {stats['added']}\n⏭ Dublikat/o‘tkazildi: {stats['skipped']}\n⚠️ Xato: {stats['errors']}")
-            except TelegramError:pass
-        return stats
+async def autobook_run ( ctx, limit=None ) :
+    if not AUTOBOOK_ENABLED:return {'added':0,'duplicate':0,'failed':0,'empty':1}
+    if AUTOBOOK_LOCK.locked (  ) :return {'busy':1}
+    stats={'added':0,'duplicate':0,'failed':0,'empty':0}
+    async with AUTOBOOK_LOCK:
+        for _ in range ( limit or AUTOBOOK_PER_RUN ) :
+            status,_value=await autobook_import_one ( ctx)
+            stats[status]=stats.get ( status,0 ) +1
+            if status=='empty':break
+    return stats
 
-async def auto_library_job ( ctx ) :
-    if AUTO_LIBRARY_ENABLED:await auto_library_run ( ctx)
+async def autobook_job ( ctx ) :
+    try:
+        stats=await autobook_run ( ctx)
+        if stats.get ( 'added' ) :log.info ( 'AUTOBOOK added=%s duplicate=%s failed=%s',stats.get ( 'added',0 ) ,stats.get ( 'duplicate',0 ) ,stats.get ( 'failed',0 ) )
+    except Exception:log.exception ( 'AUTOBOOK job failed')
 
-async def auto_library_command ( update,ctx ) :
+async def autobook_command ( update,ctx ) :
     msg=update.effective_message;u=update.effective_user
-    if not msg or not u or u.id not in SUPER_OWNERS:return False
-    raw= ( msg.text or '' ) .strip (  ) .casefold ( )
-    if not (raw=='*avtokitob' or raw.startswith ( '*avtokitob ' )  ) :return False
-    arg=raw.split ( maxsplit=1 ) [1] if ' ' in raw else 'status'
-    if arg in {'run','hozir','start'}:
-        await msg.reply_text ( "📚 Ruxsatli kitoblarni tekshirish boshlandi. Faqat public-domain deb belgilangan kitoblar olinadi.")
-        ctx.application.create_task ( auto_library_run ( ctx,msg.chat.id ) ,update=update ) ;return True
-    last=one ( "SELECT * FROM auto_library_runs ORDER BY id DESC LIMIT 1" ) ;total=one ( "SELECT COUNT ( *) n FROM auto_library_sources WHERE status='added'" ) ['n']
-    lasttxt= ( f"Oxirgi: +{last['added']} / xato {last['errors']}" if last else 'Hali ishga tushmagan')
-    await msg.reply_text ( f"📚 AVTO-KUTUBXONA\nHolat: {'ON' if AUTO_LIBRARY_ENABLED else 'OFF'}\nTillar: 🇺🇿 uz • 🇷🇺 ru • 🇬🇧 en\nJami avtomatik kitob: {total}\n{lasttxt}\n\n*avtokitob run — hozir tekshirish")
+    if not msg or not u:return True
+    if not is_super ( u.id ) :
+        await msg.reply_text ( '⛔ *avtokitob faqat Super Ega / Super Admin uchun.')
+        return True
+    raw= ( msg.text or '' ) .strip (  ) ; parts=raw.split (  ) ; sub= ( parts[1].lower ( ) if len ( parts ) >1 else 'status')
+    if sub in {'run','start','hozir'}:
+        wait=await msg.reply_text ( '📚 Avto-kutubxona ruxsatli kitoblarni qidirmoqda...')
+        stats=await autobook_run ( ctx)
+        if stats.get ( 'busy' ) :return await wait.edit_text ( '⏳ Avto-kutubxona hozirning o‘zida ishlayapti.') or True
+        await wait.edit_text ( f"✅ Avto-kutubxona yakunlandi.\n➕ Qo‘shildi: {stats.get ( 'added',0 ) }\n♻️ Dublikat: {stats.get ( 'duplicate',0 ) }\n⚠️ Xato: {stats.get ( 'failed',0 ) }\n🔎 Topilmadi: {stats.get ( 'empty',0 ) }")
+        return True
+    if sub=='status':
+        r=one ( "SELECT SUM ( status='added') a,SUM ( status='duplicate') d,SUM ( status='failed') f,MAX ( created_at) last FROM library_auto_imports")
+        await msg.reply_text ( f"📚 AVTO-KUTUBXONA\nHolat: {'🟢 yoqilgan' if AUTOBOOK_ENABLED else '🔴 o‘chirilgan'}\nTillar: {', '.join ( AUTOBOOK_LANGS ) }\nHar ishga tushishda: {AUTOBOOK_PER_RUN} ta\nInterval: {AUTOBOOK_INTERVAL//3600:g} soat\n➕ Jami qo‘shilgan: {int (  ( r['a'] if r else 0) or 0 ) }\n♻️ Dublikat: {int (  ( r['d'] if r else 0) or 0 ) }\n⚠️ Xato: {int (  ( r['f'] if r else 0) or 0 ) }")
+        return True
+    await msg.reply_text ( '📚 Buyruqlar:\n*avtokitob run — hozir qidirish\n*avtokitob status — holat')
     return True
-
-_auto_library_old_star_router=star_text_router
-async def star_text_router ( update,ctx ) :
-    if await auto_library_command ( update,ctx ) :return
-    return await _auto_library_old_star_router ( update,ctx)
-# =========================================================
-# END V15
-# =========================================================
-
 def main (  ) :
     if not TOKEN: raise RuntimeError ( "BOT_TOKEN kiritilmagan.")
     init_db ( )
     library_group_init_db ( )
+    autobook_init_db ( )
     v11_init_db ( )
     v12_init_db ( )
     v13_init_db ( )
@@ -8039,10 +8021,8 @@ def main (  ) :
     ai_news_init_db ( )
     poster_init_db ( )
     i18n_init_db ( )
-    auto_library_init_db ( )
     app=Application.builder (  ) .bot ( VeritasI18nBot ( token=TOKEN )  ) .build ( )
     app.add_handler ( CallbackQueryHandler ( v12_help, pattern=r'^v12:help$' ) , group=-18)
-    app.add_handler ( MessageHandler ( filters.ChatType.GROUPS & filters.TEXT, veritas_wake_handler ) , group=-19)
     app.add_handler ( MessageHandler ( filters.ChatType.GROUPS & filters.TEXT, v12_natural_commands ) , group=-17)
     app.add_handler ( MessageHandler ( filters.TEXT & ~filters.StatusUpdate.ALL, v11_commands ) , group=-16)
     app.add_handler ( CallbackQueryHandler ( v11_callback, pattern=r"^z11:" ) , group=-16)
@@ -8081,9 +8061,10 @@ def main (  ) :
     app.add_handler ( MessageHandler ( filters.ChatType.PRIVATE & filters.TEXT & ~filters.COMMAND & ~filters.Regex ( r"^\*" ) ,private_ai_reply ) ,group=4)
     if app.job_queue:
         app.job_queue.run_repeating ( v11_tick, 3, first=5)
-        app.job_queue.run_repeating ( auto_library_job, 86400, first=120)
         app.job_queue.run_repeating ( giveaway_job,60,first=10)
         app.job_queue.run_repeating ( rose_cleanup_job,30,first=15)
+        if AUTOBOOK_ENABLED:
+            app.job_queue.run_repeating ( autobook_job,AUTOBOOK_INTERVAL,first=90)
     app.add_error_handler ( error_handler)
     log.info ( "VERITAS v9.4 UNIFIED NEWS ROUTER starting")
     app.run_polling ( allowed_updates=Update.ALL_TYPES)
