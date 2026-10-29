@@ -243,6 +243,10 @@ def init_db (  ) :
             if col not in cols:
                 c.execute ( f"ALTER TABLE library_books ADD COLUMN {col} {decl}")
         c.execute ( "CREATE INDEX IF NOT EXISTS idx_library_book_unique ON library_books ( book_unique_id ) ")
+        # Guruhning bot uchun amaldagi holati. Eski DBlar xavfsiz migratsiya qilinadi.
+        gcols={r[1] for r in c.execute ( "PRAGMA table_info ( groups ) " ) .fetchall (  ) }
+        if "bot_active" not in gcols:
+            c.execute ( "ALTER TABLE groups ADD COLUMN bot_active INTEGER DEFAULT 1")
         # Existing PDF records automatically become universal file records too.
         c.execute ( """UPDATE library_books
                      SET book_file_id=pdf_file_id,
@@ -262,6 +266,10 @@ def ensure_group ( chat ) :
         c.execute ( """INSERT INTO groups ( chat_id,title,created_at,demo_until) VALUES ( ?,?,?,?)
         ON CONFLICT ( chat_id) DO UPDATE SET title=excluded.title""",
         (chat.id,chat.title or "",now (  ) ,now (  ) +DEMO_DAYS*86400 ) )
+        try:
+            c.execute ( "UPDATE groups SET bot_active=1 WHERE chat_id=?", ( chat.id, ) )
+        except sqlite3.OperationalError:
+            pass
 def audit ( actor,chat,action,detail="" ) :
     execute ( "INSERT INTO audit ( actor_id,chat_id,action,detail,created_at) VALUES ( ?,?,?,?,? ) ",
             (actor,chat,action,detail,now (  )  ) )
@@ -4049,20 +4057,71 @@ async def quiz_replace_message ( q, ctx, text, reply_markup=None ) :
     except TelegramError:
         return await ctx.bot.send_message ( q.message.chat.id, text, reply_markup=reply_markup)
 
+QUIZ_GROUP_ACCESS_CACHE = {}
+
+def _quiz_group_mark ( chat_id, active ) :
+    try:
+        execute ( "UPDATE groups SET bot_active=? WHERE chat_id=?", ( 1 if active else 0,int ( chat_id )  ) )
+    except sqlite3.Error:
+        pass
+    QUIZ_GROUP_ACCESS_CACHE[int ( chat_id ) ]= ( now (  ) ,bool ( active ) )
+
+async def _quiz_group_accessible ( ctx, chat_id, force=False ) :
+    """Bot hali guruhda borligini tekshiradi; stale chat_id larni yashiradi."""
+    cid=int ( chat_id)
+    cached=QUIZ_GROUP_ACCESS_CACHE.get ( cid)
+    if not force and cached and now (  ) -int ( cached[0] ) <300:
+        return bool ( cached[1])
+    try:
+        m=await asyncio.wait_for ( ctx.bot.get_chat_member ( cid,ctx.bot.id ) ,timeout=8)
+        ok=m.status not in (ChatMemberStatus.LEFT,ChatMemberStatus.BANNED)
+        _quiz_group_mark ( cid,ok)
+        return ok
+    except (BadRequest,Forbidden) as exc:
+        text=str ( exc ) .casefold ( )
+        if 'chat not found' in text or 'bot was kicked' in text or 'forbidden' in text or 'not found' in text:
+            _quiz_group_mark ( cid,False)
+            return False
+        log.warning ( 'QUIZ_GROUP_CHECK rejected chat=%s: %s',cid,exc)
+        return False
+    except (asyncio.TimeoutError,TelegramError) as exc:
+        # Vaqtinchalik Telegram xatosida faol guruhni bazadan o‘chirib yubormaymiz.
+        log.warning ( 'QUIZ_GROUP_CHECK temporary chat=%s: %s',cid,exc)
+        return bool ( cached[1]) if cached else True
+
 async def _quiz_allowed_groups ( ctx,uid ) :
-    # Barcha mos guruhlarni qaytaramiz. Oldin bu yerda [:40] cheklovi bor edi,
-    # keyin menyuda yana [:20] kesilardi — shu sabab ayrim guruhlar ko‘rinmasdi.
-    rows=all_ ( "SELECT chat_id,title FROM groups ORDER BY title COLLATE NOCASE,chat_id" )
+    # Faqat Veritas hozir kira oladigan guruhlarni ko‘rsatamiz.
+    # Oldingi DBda qolgan/o‘chirilgan chatlar "Chat not found" keltirib chiqarardi.
+    try:
+        rows=all_ ( "SELECT chat_id,title FROM groups WHERE COALESCE ( bot_active,1 ) =1 ORDER BY title COLLATE NOCASE,chat_id")
+    except sqlite3.OperationalError:
+        rows=all_ ( "SELECT chat_id,title FROM groups ORDER BY title COLLATE NOCASE,chat_id")
+
+    sem=asyncio.Semaphore ( 6)
+    async def probe ( r ) :
+        cid=int ( r['chat_id'])
+        async with sem:
+            if not await _quiz_group_accessible ( ctx,cid ) :
+                return None
+            if not is_super ( uid ) :
+                try:
+                    if not await is_tg_admin ( ctx.bot,cid,uid ) :
+                        return None
+                except TelegramError:
+                    return None
+            title= ( r['title'] or '' ) .strip ( )
+            if not title:
+                try:
+                    ch=await ctx.bot.get_chat ( cid ) ;title= ( ch.title or str ( cid )  ) .strip ( )
+                    if title:execute ( "UPDATE groups SET title=? WHERE chat_id=?", ( title,cid ) )
+                except TelegramError:
+                    title=str ( cid)
+            return (cid,title or str ( cid ) )
+
+    checked=await asyncio.gather ( * ( probe ( r) for r in rows ) ,return_exceptions=True)
     out=[]
-    for r in rows:
-        cid=int ( r["chat_id"] )
-        if is_super ( uid ):
-            out.append ( (cid,r["title"] or str ( cid )) )
-            continue
-        try:
-            if await is_tg_admin ( ctx.bot,cid,uid ): out.append ( (cid,r["title"] or str ( cid )) )
-        except Exception:
-            pass
+    for x in checked:
+        if isinstance ( x,tuple ) :out.append ( x)
     return out
 
 async def _download_large_telegram_file ( ctx, file_id, path ) :
@@ -4111,6 +4170,12 @@ async def _make_and_send_book_quiz ( q,ctx,bid,chat_id,count ) :
         return await q.edit_message_text ( "❌ Kitob PDF’i topilmadi.",reply_markup=back_markup ( "library" ) )
     if count not in (5,10,20 ) :
         return await q.answer ( "Test soni noto‘g‘ri.",show_alert=True)
+    if not await _quiz_group_accessible ( ctx,chat_id,force=True ) :
+        return await q.edit_message_text(
+            "⚠️ Bu guruhga Veritas hozir kira olmayapti (Chat not found yoki bot guruhdan chiqarilgan ) .\n\n"
+            "Guruh ro‘yxati yangilandi. Qaytib boshqa guruhni tanlang.",
+            reply_markup=InlineKeyboardMarkup ( [[InlineKeyboardButton ( "⬅️ Guruhlar",callback_data=f"libquiz:{bid}:0" ) ]])
+        )
     if not is_super ( u.id ) and not await is_tg_admin ( ctx.bot,chat_id,u.id ) :
         return await q.answer ( "Bu guruhda admin emassiz.",show_alert=True)
     if not OPENAI_API_KEY:
@@ -4188,6 +4253,9 @@ async def _make_and_send_book_quiz ( q,ctx,bid,chat_id,count ) :
             msg="⚠️ Katta PDF moduli uchun Telethon kutubxonasi kerak."
         elif "TG_API_ID" in s or "TG_SESSION" in s:
             msg="⚠️ Katta PDF uchun Telegram MTProto sozlamalari to‘liq emas."
+        elif "chat not found" in s.casefold (  ) :
+            _quiz_group_mark ( chat_id,False)
+            msg="⚠️ Tanlangan guruh Telegramda topilmadi yoki Veritas u guruhda yo‘q. Guruhlar ro‘yxati yangilandi."
         else:
             msg="⚠️ Kitobdan test tuzishda xatolik bo‘ldi. Aniq sabab Railway logiga yozildi."
         return await q.edit_message_text ( msg,reply_markup=back_markup ( "library" ) )
@@ -4518,10 +4586,11 @@ async def bot_membership_update ( update,ctx ) :
         log.info ( "GROUP_REGISTERED chat=%s title=%s status=%s",chat.id,chat.title,status)
         return
     if status in (ChatMemberStatus.LEFT, ChatMemberStatus.BANNED ) :
-        # Guruh yozuvini o‘chirmaymiz: u bilan birga welcome/rules/locks va boshqa
-        # mavjud sozlamalar ham yo‘qolib ketishi mumkin. Bot qayta qo‘shilsa,
-        # ensure_group ( ) shu yozuvni xavfsiz yangilaydi. Broadcast esa yubora
-        # olmagan guruhni fail sifatida hisobotga qo‘shadi.
+        # Sozlamalarni o‘chirmaymiz, faqat faol emas deb belgilaymiz.
+        # Shu bilan test/guruh menyularida eski chat ID chiqmaydi.
+        try: execute ( "UPDATE groups SET bot_active=0 WHERE chat_id=?", ( chat.id, ) )
+        except sqlite3.Error: pass
+        QUIZ_GROUP_ACCESS_CACHE[chat.id]= ( now (  ) ,False)
         log.info ( "GROUP_INACTIVE chat=%s title=%s status=%s",chat.id,chat.title,status)
         return
 
@@ -5014,6 +5083,11 @@ async def callback ( update,ctx ) :
             bid=int ( sbid ) ; chat_id=int ( schat ) ; page=max ( 0,int ( parts[3] ) ) if len ( parts ) ==4 else 0
         except ValueError:
             return await q.answer ( "Noto‘g‘ri so‘rov.",show_alert=True)
+        if not await _quiz_group_accessible ( ctx,chat_id,force=True ) :
+            return await quiz_replace_message(
+                q,ctx,"⚠️ Bu guruh endi faol emas yoki Veritas guruhdan chiqarilgan. Ro‘yxatdan yashirildi.",
+                reply_markup=InlineKeyboardMarkup ( [[InlineKeyboardButton ( "⬅️ Guruhlar",callback_data=f"libquiz:{bid}:{page}" ) ]])
+            )
         if not is_super ( u.id ) and not await is_tg_admin ( ctx.bot,chat_id,u.id ):
             return await q.answer ( "Bu guruhda admin emassiz.",show_alert=True )
         gr=one ( "SELECT title FROM groups WHERE chat_id=?", ( chat_id,) ); book=one ( "SELECT title FROM library_books WHERE id=?", ( bid,) )
