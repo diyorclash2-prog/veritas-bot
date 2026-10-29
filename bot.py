@@ -243,10 +243,6 @@ def init_db (  ) :
             if col not in cols:
                 c.execute ( f"ALTER TABLE library_books ADD COLUMN {col} {decl}")
         c.execute ( "CREATE INDEX IF NOT EXISTS idx_library_book_unique ON library_books ( book_unique_id ) ")
-        # Guruhning bot uchun amaldagi holati. Eski DBlar xavfsiz migratsiya qilinadi.
-        gcols={r[1] for r in c.execute ( "PRAGMA table_info ( groups ) " ) .fetchall (  ) }
-        if "bot_active" not in gcols:
-            c.execute ( "ALTER TABLE groups ADD COLUMN bot_active INTEGER DEFAULT 1")
         # Existing PDF records automatically become universal file records too.
         c.execute ( """UPDATE library_books
                      SET book_file_id=pdf_file_id,
@@ -266,10 +262,6 @@ def ensure_group ( chat ) :
         c.execute ( """INSERT INTO groups ( chat_id,title,created_at,demo_until) VALUES ( ?,?,?,?)
         ON CONFLICT ( chat_id) DO UPDATE SET title=excluded.title""",
         (chat.id,chat.title or "",now (  ) ,now (  ) +DEMO_DAYS*86400 ) )
-        try:
-            c.execute ( "UPDATE groups SET bot_active=1 WHERE chat_id=?", ( chat.id, ) )
-        except sqlite3.OperationalError:
-            pass
 def audit ( actor,chat,action,detail="" ) :
     execute ( "INSERT INTO audit ( actor_id,chat_id,action,detail,created_at) VALUES ( ?,?,?,?,? ) ",
             (actor,chat,action,detail,now (  )  ) )
@@ -4057,71 +4049,20 @@ async def quiz_replace_message ( q, ctx, text, reply_markup=None ) :
     except TelegramError:
         return await ctx.bot.send_message ( q.message.chat.id, text, reply_markup=reply_markup)
 
-QUIZ_GROUP_ACCESS_CACHE = {}
-
-def _quiz_group_mark ( chat_id, active ) :
-    try:
-        execute ( "UPDATE groups SET bot_active=? WHERE chat_id=?", ( 1 if active else 0,int ( chat_id )  ) )
-    except sqlite3.Error:
-        pass
-    QUIZ_GROUP_ACCESS_CACHE[int ( chat_id ) ]= ( now (  ) ,bool ( active ) )
-
-async def _quiz_group_accessible ( ctx, chat_id, force=False ) :
-    """Bot hali guruhda borligini tekshiradi; stale chat_id larni yashiradi."""
-    cid=int ( chat_id)
-    cached=QUIZ_GROUP_ACCESS_CACHE.get ( cid)
-    if not force and cached and now (  ) -int ( cached[0] ) <300:
-        return bool ( cached[1])
-    try:
-        m=await asyncio.wait_for ( ctx.bot.get_chat_member ( cid,ctx.bot.id ) ,timeout=8)
-        ok=m.status not in (ChatMemberStatus.LEFT,ChatMemberStatus.BANNED)
-        _quiz_group_mark ( cid,ok)
-        return ok
-    except (BadRequest,Forbidden) as exc:
-        text=str ( exc ) .casefold ( )
-        if 'chat not found' in text or 'bot was kicked' in text or 'forbidden' in text or 'not found' in text:
-            _quiz_group_mark ( cid,False)
-            return False
-        log.warning ( 'QUIZ_GROUP_CHECK rejected chat=%s: %s',cid,exc)
-        return False
-    except (asyncio.TimeoutError,TelegramError) as exc:
-        # Vaqtinchalik Telegram xatosida faol guruhni bazadan o‘chirib yubormaymiz.
-        log.warning ( 'QUIZ_GROUP_CHECK temporary chat=%s: %s',cid,exc)
-        return bool ( cached[1]) if cached else True
-
 async def _quiz_allowed_groups ( ctx,uid ) :
-    # Faqat Veritas hozir kira oladigan guruhlarni ko‘rsatamiz.
-    # Oldingi DBda qolgan/o‘chirilgan chatlar "Chat not found" keltirib chiqarardi.
-    try:
-        rows=all_ ( "SELECT chat_id,title FROM groups WHERE COALESCE ( bot_active,1 ) =1 ORDER BY title COLLATE NOCASE,chat_id")
-    except sqlite3.OperationalError:
-        rows=all_ ( "SELECT chat_id,title FROM groups ORDER BY title COLLATE NOCASE,chat_id")
-
-    sem=asyncio.Semaphore ( 6)
-    async def probe ( r ) :
-        cid=int ( r['chat_id'])
-        async with sem:
-            if not await _quiz_group_accessible ( ctx,cid ) :
-                return None
-            if not is_super ( uid ) :
-                try:
-                    if not await is_tg_admin ( ctx.bot,cid,uid ) :
-                        return None
-                except TelegramError:
-                    return None
-            title= ( r['title'] or '' ) .strip ( )
-            if not title:
-                try:
-                    ch=await ctx.bot.get_chat ( cid ) ;title= ( ch.title or str ( cid )  ) .strip ( )
-                    if title:execute ( "UPDATE groups SET title=? WHERE chat_id=?", ( title,cid ) )
-                except TelegramError:
-                    title=str ( cid)
-            return (cid,title or str ( cid ) )
-
-    checked=await asyncio.gather ( * ( probe ( r) for r in rows ) ,return_exceptions=True)
+    # Barcha mos guruhlarni qaytaramiz. Oldin bu yerda [:40] cheklovi bor edi,
+    # keyin menyuda yana [:20] kesilardi — shu sabab ayrim guruhlar ko‘rinmasdi.
+    rows=all_ ( "SELECT chat_id,title FROM groups ORDER BY title COLLATE NOCASE,chat_id" )
     out=[]
-    for x in checked:
-        if isinstance ( x,tuple ) :out.append ( x)
+    for r in rows:
+        cid=int ( r["chat_id"] )
+        if is_super ( uid ):
+            out.append ( (cid,r["title"] or str ( cid )) )
+            continue
+        try:
+            if await is_tg_admin ( ctx.bot,cid,uid ): out.append ( (cid,r["title"] or str ( cid )) )
+        except Exception:
+            pass
     return out
 
 async def _download_large_telegram_file ( ctx, file_id, path ) :
@@ -4170,12 +4111,6 @@ async def _make_and_send_book_quiz ( q,ctx,bid,chat_id,count ) :
         return await q.edit_message_text ( "❌ Kitob PDF’i topilmadi.",reply_markup=back_markup ( "library" ) )
     if count not in (5,10,20 ) :
         return await q.answer ( "Test soni noto‘g‘ri.",show_alert=True)
-    if not await _quiz_group_accessible ( ctx,chat_id,force=True ) :
-        return await q.edit_message_text(
-            "⚠️ Bu guruhga Veritas hozir kira olmayapti (Chat not found yoki bot guruhdan chiqarilgan ) .\n\n"
-            "Guruh ro‘yxati yangilandi. Qaytib boshqa guruhni tanlang.",
-            reply_markup=InlineKeyboardMarkup ( [[InlineKeyboardButton ( "⬅️ Guruhlar",callback_data=f"libquiz:{bid}:0" ) ]])
-        )
     if not is_super ( u.id ) and not await is_tg_admin ( ctx.bot,chat_id,u.id ) :
         return await q.answer ( "Bu guruhda admin emassiz.",show_alert=True)
     if not OPENAI_API_KEY:
@@ -4253,9 +4188,6 @@ async def _make_and_send_book_quiz ( q,ctx,bid,chat_id,count ) :
             msg="⚠️ Katta PDF moduli uchun Telethon kutubxonasi kerak."
         elif "TG_API_ID" in s or "TG_SESSION" in s:
             msg="⚠️ Katta PDF uchun Telegram MTProto sozlamalari to‘liq emas."
-        elif "chat not found" in s.casefold (  ) :
-            _quiz_group_mark ( chat_id,False)
-            msg="⚠️ Tanlangan guruh Telegramda topilmadi yoki Veritas u guruhda yo‘q. Guruhlar ro‘yxati yangilandi."
         else:
             msg="⚠️ Kitobdan test tuzishda xatolik bo‘ldi. Aniq sabab Railway logiga yozildi."
         return await q.edit_message_text ( msg,reply_markup=back_markup ( "library" ) )
@@ -4586,11 +4518,10 @@ async def bot_membership_update ( update,ctx ) :
         log.info ( "GROUP_REGISTERED chat=%s title=%s status=%s",chat.id,chat.title,status)
         return
     if status in (ChatMemberStatus.LEFT, ChatMemberStatus.BANNED ) :
-        # Sozlamalarni o‘chirmaymiz, faqat faol emas deb belgilaymiz.
-        # Shu bilan test/guruh menyularida eski chat ID chiqmaydi.
-        try: execute ( "UPDATE groups SET bot_active=0 WHERE chat_id=?", ( chat.id, ) )
-        except sqlite3.Error: pass
-        QUIZ_GROUP_ACCESS_CACHE[chat.id]= ( now (  ) ,False)
+        # Guruh yozuvini o‘chirmaymiz: u bilan birga welcome/rules/locks va boshqa
+        # mavjud sozlamalar ham yo‘qolib ketishi mumkin. Bot qayta qo‘shilsa,
+        # ensure_group ( ) shu yozuvni xavfsiz yangilaydi. Broadcast esa yubora
+        # olmagan guruhni fail sifatida hisobotga qo‘shadi.
         log.info ( "GROUP_INACTIVE chat=%s title=%s status=%s",chat.id,chat.title,status)
         return
 
@@ -5083,11 +5014,6 @@ async def callback ( update,ctx ) :
             bid=int ( sbid ) ; chat_id=int ( schat ) ; page=max ( 0,int ( parts[3] ) ) if len ( parts ) ==4 else 0
         except ValueError:
             return await q.answer ( "Noto‘g‘ri so‘rov.",show_alert=True)
-        if not await _quiz_group_accessible ( ctx,chat_id,force=True ) :
-            return await quiz_replace_message(
-                q,ctx,"⚠️ Bu guruh endi faol emas yoki Veritas guruhdan chiqarilgan. Ro‘yxatdan yashirildi.",
-                reply_markup=InlineKeyboardMarkup ( [[InlineKeyboardButton ( "⬅️ Guruhlar",callback_data=f"libquiz:{bid}:{page}" ) ]])
-            )
         if not is_super ( u.id ) and not await is_tg_admin ( ctx.bot,chat_id,u.id ):
             return await q.answer ( "Bu guruhda admin emassiz.",show_alert=True )
         gr=one ( "SELECT title FROM groups WHERE chat_id=?", ( chat_id,) ); book=one ( "SELECT title FROM library_books WHERE id=?", ( bid,) )
@@ -8758,6 +8684,545 @@ async def group_book_callback ( update,ctx ) :
 # END GROUP FUZZY BOOK REQUESTS
 # =========================================================
 
+# =========================================================
+# VERITAS — KITOBDAN SAVOL-JAVOB + KANAL ZAKOVAT
+# - Kitob kartasidan savol-javob
+# - Kitob PDFidan 10/20/30 ta ochiq savol
+# - Kanal postiga savol, linked discussion izohlarida javob
+# - Tezlik ballari: 1-o‘rin 10, 2-o‘rin 7, 3-o‘rin 5, qolgan to‘g‘ri javoblar 3
+# =========================================================
+
+def channel_book_zakovat_init_db (  ) :
+    with db ( ) as c:
+        c.executescript ( '''
+        CREATE TABLE IF NOT EXISTS cbz_games(
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          creator_id INTEGER NOT NULL,
+          book_id INTEGER NOT NULL,
+          channel_id INTEGER NOT NULL,
+          channel_title TEXT DEFAULT '',
+          group_id INTEGER NOT NULL,
+          group_title TEXT DEFAULT '',
+          status TEXT NOT NULL DEFAULT 'preparing',
+          phase TEXT NOT NULL DEFAULT 'preparing',
+          questions_json TEXT NOT NULL DEFAULT '[]',
+          round_no INTEGER NOT NULL DEFAULT -1,
+          channel_message_id INTEGER NOT NULL DEFAULT 0,
+          discussion_message_id INTEGER NOT NULL DEFAULT 0,
+          round_started INTEGER NOT NULL DEFAULT 0,
+          deadline INTEGER NOT NULL DEFAULT 0,
+          created_at INTEGER NOT NULL,
+          finished_at INTEGER NOT NULL DEFAULT 0,
+          error TEXT DEFAULT ''
+        );
+        CREATE INDEX IF NOT EXISTS idx_cbz_active_channel ON cbz_games ( channel_id,status,id ) ;
+        CREATE INDEX IF NOT EXISTS idx_cbz_active_group ON cbz_games ( group_id,status,id ) ;
+        CREATE TABLE IF NOT EXISTS cbz_attempts(
+          game_id INTEGER NOT NULL,
+          round_no INTEGER NOT NULL,
+          user_id INTEGER NOT NULL,
+          message_id INTEGER NOT NULL,
+          name TEXT DEFAULT '',
+          answer_text TEXT DEFAULT '',
+          correct INTEGER NOT NULL DEFAULT 0,
+          received_at INTEGER NOT NULL,
+          PRIMARY KEY ( game_id,round_no,message_id)
+        );
+        CREATE INDEX IF NOT EXISTS idx_cbz_attempt_user ON cbz_attempts ( game_id,round_no,user_id ) ;
+        CREATE TABLE IF NOT EXISTS cbz_round_winners(
+          game_id INTEGER NOT NULL,
+          round_no INTEGER NOT NULL,
+          user_id INTEGER NOT NULL,
+          name TEXT DEFAULT '',
+          rank_no INTEGER NOT NULL,
+          points INTEGER NOT NULL,
+          received_at INTEGER NOT NULL,
+          PRIMARY KEY ( game_id,round_no,user_id)
+        );
+        CREATE INDEX IF NOT EXISTS idx_cbz_round_rank ON cbz_round_winners ( game_id,round_no,rank_no ) ;
+        CREATE TABLE IF NOT EXISTS cbz_scores(
+          game_id INTEGER NOT NULL,
+          user_id INTEGER NOT NULL,
+          name TEXT DEFAULT '',
+          points INTEGER NOT NULL DEFAULT 0,
+          correct INTEGER NOT NULL DEFAULT 0,
+          firsts INTEGER NOT NULL DEFAULT 0,
+          seconds INTEGER NOT NULL DEFAULT 0,
+          thirds INTEGER NOT NULL DEFAULT 0,
+          updated_at INTEGER NOT NULL,
+          PRIMARY KEY ( game_id,user_id)
+        );
+        ''')
+
+
+def _cbz_active ( channel_id=None, group_id=None ) :
+    if channel_id is not None:
+        return one ( "SELECT * FROM cbz_games WHERE channel_id=? AND status IN ('preparing','running','paused') ORDER BY id DESC LIMIT 1", ( int ( channel_id ) , ) )
+    if group_id is not None:
+        return one ( "SELECT * FROM cbz_games WHERE group_id=? AND status IN ('preparing','running','paused') ORDER BY id DESC LIMIT 1", ( int ( group_id ) , ) )
+    return None
+
+
+def _cbz_game ( gid ) :
+    return one ( "SELECT * FROM cbz_games WHERE id=?", ( int ( gid ) , ) )
+
+
+def _cbz_norm ( text ) :
+    import unicodedata
+    x=unicodedata.normalize ( 'NFKD',str ( text or '' ) .casefold (  ) )
+    x=x.replace ( 'ʻ',"'" ) .replace ( '’',"'" ) .replace ( '‘',"'" ) .replace ( '`',"'")
+    x=''.join ( ch for ch in x if not unicodedata.combining ( ch ) )
+    x=re.sub ( r"[^0-9a-zа-яёқғўҳ' ]+",' ',x,flags=re.I)
+    x=x.replace ( "'",'')
+    return re.sub ( r'\s+',' ',x ) .strip ( )
+
+
+def _cbz_answer_matches ( text, accepted ) :
+    from difflib import SequenceMatcher
+    q=_cbz_norm ( text)
+    if not q:return False
+    for raw in accepted or []:
+        a=_cbz_norm ( raw)
+        if not a:continue
+        if q==a:return True
+        if min ( len ( q ) ,len ( a )  ) >=6 and SequenceMatcher ( None,q,a ) .ratio (  ) >=0.88:
+            return True
+        qt=q.split (  ) ;at=a.split ( )
+        if len ( qt ) >=2 and len ( at ) >=2 and min ( len ( q ) ,len ( a )  ) >=9:
+            common=sum ( 1 for w in qt if any ( SequenceMatcher ( None,w,z ) .ratio (  ) >=0.86 for z in at ) )
+            if common/max ( 1,len ( qt )  ) >=0.85 and abs ( len ( qt ) -len ( at )  ) <=1:
+                return True
+    return False
+
+
+def _cbz_parse_items ( raw_text,count ) :
+    raw=_clean_json_text ( raw_text)
+    try:
+        items=json.loads ( raw)
+    except Exception:
+        log.error ( 'CBZ invalid JSON: %s',str ( raw_text ) [:5000])
+        raise RuntimeError ( 'AI savollarni JSON formatida qaytarmadi')
+    out=[]
+    if isinstance ( items,list ) :
+        for x in items:
+            if not isinstance ( x,dict ) :continue
+            q=str ( x.get ( 'q') or x.get ( 'question') or '' ) .strip (  ) [:500]
+            answers=x.get ( 'answers') or []
+            if isinstance ( answers,str ) :answers=[answers]
+            clean=[]
+            if isinstance ( answers,list ) :
+                for a in answers:
+                    a=str ( a or '' ) .strip (  ) [:140]
+                    if a and _cbz_norm ( a) not in {_cbz_norm ( z) for z in clean}:clean.append ( a)
+            exp=str ( x.get ( 'explanation') or '' ) .strip (  ) [:450]
+            source=str ( x.get ( 'source') or '' ) .strip (  ) [:100]
+            if q and clean:out.append ( {'q':q,'answers':clean[:5],'explanation':exp,'source':source})
+            if len ( out ) >=count:break
+    if len ( out ) <count:raise RuntimeError ( f'AI {len ( out ) } ta yaroqli savol qaytardi, {count} ta kerak')
+    return out[:count]
+
+
+def _openai_book_open_qa_sync ( pdf_bytes,filename,title,count ) :
+    if not OPENAI_API_KEY:raise RuntimeError ( 'OPENAI_API_KEY sozlanmagan')
+    if not pdf_bytes or not pdf_bytes.startswith ( b'%PDF' ) :raise RuntimeError ( 'Fayl haqiqiy PDF emas')
+    if len ( pdf_bytes ) >45*1024*1024:raise RuntimeError ( 'PDF 45 MB dan katta')
+    safe= ( filename or 'book.pdf' ) .replace ( '"','' ) .replace ( '\r','' ) .replace ( '\n','')
+    file_data='data:application/pdf;base64,'+base64.b64encode ( pdf_bytes ) .decode ( 'ascii')
+    instruction=(
+      f"Bu PDF — ‘{title}’ kitobi. PDFni tahlil qiling va FAQAT shu kitob mazmuniga tayangan holda aynan {count} ta ochiq Zakovat savoli tuzing. "
+      "Tashqi bilim qo‘shmang. Savollar bir ma’noli, qisqa javob bilan tekshiriladigan va takrorlanmaydigan bo‘lsin. "
+      "Har savol uchun 1-5 ta qabul qilinadigan javob yozing: imlo/ismning tabiiy variantlari bo‘lishi mumkin, lekin noto‘g‘ri javobni qabul qiladigan darajada keng bo‘lmasin. "
+      "Savol va javoblar o‘zbek tilida bo‘lsin. Agar aniq sahifa ma’lum bo‘lsa source maydoniga yozing, taxmin qilmang. "
+      "Faqat JSON massiv qaytaring. Har element: "
+      '{"q":"...","answers":["...","..."],"explanation":"...","source":"12-sahifa"}. '
+      "Markdown yoki boshqa matn yozmang."
+    )
+    payload=json.dumps ( {'model':OPENAI_MODEL,'input':[{'role':'user','content':[
+      {'type':'input_file','filename':safe,'file_data':file_data,'detail':'low'},
+      {'type':'input_text','text':instruction}]}],'max_output_tokens':max ( 3000,count*300 ) },ensure_ascii=False ) .encode ( 'utf-8')
+    req=urllib.request.Request ( 'https://api.openai.com/v1/responses',data=payload,headers={'Authorization':f'Bearer {OPENAI_API_KEY}','Content-Type':'application/json'},method='POST')
+    try:
+        with urllib.request.urlopen ( req,timeout=210) as resp:data=json.loads ( resp.read (  ) .decode ( 'utf-8' ) )
+    except urllib.error.HTTPError as e:
+        detail=''
+        try:detail=e.read (  ) .decode ( 'utf-8','replace' ) [:3000]
+        except Exception:pass
+        raise RuntimeError ( f"OpenAI HTTP {getattr ( e,'code','?' ) }: {detail[:700]}")
+    text=_extract_response_text ( data)
+    if not text:raise RuntimeError ( 'AI bo‘sh javob qaytardi')
+    return _cbz_parse_items ( text,count)
+
+
+def _openai_open_qa_from_context_sync ( context,title,count ) :
+    if not OPENAI_API_KEY:raise RuntimeError ( 'OPENAI_API_KEY sozlanmagan')
+    if not context or len ( context.strip (  )  ) <300:raise RuntimeError ( 'PDFdan savol uchun yetarli matn olinmadi')
+    instruction=(
+      f"Quyidagi material ‘{title}’ kitobidan olingan. FAQAT shu materialga tayangan holda aynan {count} ta ochiq Zakovat savoli tuzing. "
+      "Tashqi bilim qo‘shmang. Savollar bir ma’noli, qisqa javob bilan tekshiriladigan, takrorlanmaydigan bo‘lsin. "
+      "Har savolga 1-5 ta qabul qilinadigan javob variantini yozing. Savol va javob o‘zbekcha bo‘lsin. "
+      "Materialdagi sahifa belgisi aniq bo‘lsa source maydoniga yozing, aks holda bo‘sh qoldiring. "
+      "Faqat JSON massiv: "
+      '{"q":"...","answers":["..."],"explanation":"...","source":"..."}.\n\nKITOB MATERIALI:\n'+context
+    )
+    payload=json.dumps ( {'model':OPENAI_MODEL,'input':instruction,'max_output_tokens':max ( 3000,count*300 ) },ensure_ascii=False ) .encode ( 'utf-8')
+    req=urllib.request.Request ( 'https://api.openai.com/v1/responses',data=payload,headers={'Authorization':f'Bearer {OPENAI_API_KEY}','Content-Type':'application/json'},method='POST')
+    try:
+        with urllib.request.urlopen ( req,timeout=210) as resp:data=json.loads ( resp.read (  ) .decode ( 'utf-8' ) )
+    except urllib.error.HTTPError as e:
+        detail=''
+        try:detail=e.read (  ) .decode ( 'utf-8','replace' ) [:3000]
+        except Exception:pass
+        raise RuntimeError ( f"OpenAI HTTP {getattr ( e,'code','?' ) }: {detail[:700]}")
+    text=_extract_response_text ( data)
+    if not text:raise RuntimeError ( 'AI bo‘sh javob qaytardi')
+    return _cbz_parse_items ( text,count)
+
+
+def _cbz_build_questions_from_path_sync ( path,title,count ) :
+    size=Path ( path ) .stat (  ) .st_size
+    if size<=45*1024*1024:return _openai_book_open_qa_sync ( Path ( path ) .read_bytes (  ) ,Path ( path ) .name,title,count ) ,None
+    context,pages,mode=_extract_large_pdf_context_sync ( path,title,count)
+    return _openai_open_qa_from_context_sync ( context,title,count ) ,{'pages':pages,'mode':mode,'size':size}
+
+
+async def _book_qa_answer_by_id ( ctx,bid,question ) :
+    if not OPENAI_API_KEY or fitz is None:raise RuntimeError ( 'OPENAI_API_KEY va PyMuPDF sozlangan bo‘lishi kerak')
+    book=one ( "SELECT * FROM library_books WHERE id=? AND status='approved'", ( int ( bid ) , ) )
+    if not book or not book['pdf_file_id']:raise RuntimeError ( 'Kitobning matnli PDF fayli topilmadi')
+    import tempfile as _qa_tmp
+    path=None
+    try:
+        with _qa_tmp.NamedTemporaryFile ( suffix='.pdf',delete=False) as f:path=f.name
+        try:
+            tg=await ctx.bot.get_file ( book['pdf_file_id'] ) ;await tg.download_to_drive ( custom_path=path)
+        except TelegramError as exc:
+            if 'file is too big' not in str ( exc ) .lower (  ) :raise
+            await _download_large_telegram_file ( ctx,book['pdf_file_id'],path)
+        terms={v11_norm ( x) for x in str ( question ) .split ( ) if len ( x ) >3}
+        def context (  ) :
+            ranked=[]
+            with fitz.open ( path) as pdf:
+                for idx,page in enumerate ( pdf ) :
+                    t= ( page.get_text ( 'text') or '' ) .strip ( )
+                    if t:
+                        score=sum ( t.casefold (  ) .count ( w.casefold (  ) ) for w in terms)
+                        ranked.append (  ( score,idx,t[:6500] ) )
+            ranked.sort ( key=lambda x: ( -x[0],x[1] ) )
+            chunks=[];used=0
+            for _score,idx,t in ranked[:8]:
+                block=f'[{idx+1}-sahifa]\n{t}'
+                if used+len ( block ) >30000:break
+                chunks.append ( block ) ;used+=len ( block)
+            return '\n\n'.join ( chunks)
+        material=await asyncio.to_thread ( context)
+        if not material:raise RuntimeError ( 'PDF matni olinmadi; skan PDF uchun savol-javob hozir ishlamaydi')
+        prompt= ( "FAQAT quyidagi kitob parchalariga tayangan holda savolga javob bering. Kitobda javob yo‘q bo‘lsa aniq ‘Bu ma’lumot kitobdan topilmadi’ deng. Tashqi bilim qo‘shmang. Javobni o‘zbekcha, tushunarli va ixcham yozing; dalil bo‘lgan sahifa raqamlarini ko‘rsating.\n"+json.dumps ( {'title':book['title'],'excerpts':material,'question':str ( question ) [:1800]},ensure_ascii=False ) )
+        answer=await asyncio.to_thread ( _v11_original_openai_response_sync,prompt)
+        return book,answer
+    finally:
+        if path:Path ( path ) .unlink ( missing_ok=True)
+
+
+_pre_cbz_library_book_markup=library_book_markup
+def library_book_markup ( uid,book_id,back='library' ) :
+    base=_pre_cbz_library_book_markup ( uid,book_id,back)
+    rows=[list ( r) for r in base.inline_keyboard]
+    book=one ( "SELECT pdf_file_id FROM library_books WHERE id=? AND status='approved'", ( book_id, ) )
+    if book and book['pdf_file_id']:
+        insert_at=len ( rows)
+        for i,row in enumerate ( rows ) :
+            if any (  ( getattr ( b,'callback_data',None) or '' ) .startswith ( 'libfavtoggle:') for b in row ) :insert_at=i;break
+        rows.insert ( insert_at,[InlineKeyboardButton ( '❓ Kitobdan savol-javob',callback_data=f'libqa:{book_id}' ) ])
+        rows.insert ( insert_at+1,[InlineKeyboardButton ( '🏆 Kanal Zakovat',callback_data=f'libcbz:{book_id}' ) ])
+    return InlineKeyboardMarkup ( rows)
+
+
+def _cbz_target ( raw ) :
+    raw=str ( raw or '' ) .strip ( )
+    m=re.fullmatch ( r' ( ?:https?:// ) ? ( ?:www\. ) ?t\.me/ ( [A-Za-z0-9_]{5,} )  ( ?:/ ) ? ( ?:\?.* ) ?',raw,re.I)
+    if m:return '@'+m.group ( 1)
+    if re.fullmatch ( r'-?\d+',raw ) :return int ( raw)
+    return raw if raw.startswith ( '@') else '@'+raw.lstrip ( '@')
+
+
+_pre_cbz_library_private_input=library_private_input
+async def library_private_input ( update,ctx ) :
+    msg=update.effective_message;u=update.effective_user
+    if not msg or not u:return await _pre_cbz_library_private_input ( update,ctx)
+    st=STATE.get ( u.id) or {};mode=st.get ( 'mode')
+    if mode=='lib_book_qa':
+        if not msg.text:return await msg.reply_text ( '✍️ Savolingizni matn qilib yozing.')
+        text=msg.text.strip ( )
+        if text.casefold ( ) in {'bekor','cancel','tugatish','stop'}:
+            bid=int ( st.get ( 'book_id',0 )  ) ;STATE.pop ( u.id,None)
+            return await msg.reply_text ( '✅ Kitob savol-javobi tugatildi.',reply_markup=InlineKeyboardMarkup ( [[InlineKeyboardButton ( '📖 Kitobga qaytish',callback_data=f'libbook:{bid}' ) ]] ) )
+        if not ai_rate_ok (  ( 'lib_book_qa',u.id ) ,u.id,8 ) :return await msg.reply_text ( '⏳ 8 soniyadan keyin yana savol bering.')
+        bid=int ( st.get ( 'book_id',0 )  ) ;status=await msg.reply_text ( '📖 Kitob ichidan javob qidiryapman...')
+        try:
+            book,answer=await _book_qa_answer_by_id ( ctx,bid,text)
+            await status.edit_text (  ( f"📚 {book['title']}\n\n{answer}\n\n❓ Yana savol yozishingiz mumkin." ) [:4000],reply_markup=InlineKeyboardMarkup ( [[InlineKeyboardButton ( '⏹ Tugatish',callback_data=f'libqastop:{bid}' ) ]] ) )
+        except Exception:
+            log.exception ( 'Book interactive Q&A failed bid=%s',bid)
+            await status.edit_text ( '⚠️ Kitobdan javob olishda xatolik bo‘ldi. PDF matnli ekanini va AI sozlamalarini tekshiring.')
+        return
+    if mode=='lib_cbz_channel':
+        if not msg.text:return await msg.reply_text ( '📣 Kanal @username, t.me linki yoki -100... ID yuboring.')
+        bid=int ( st.get ( 'book_id',0 ) )
+        try:
+            ch=await ctx.bot.get_chat ( _cbz_target ( msg.text ) )
+            if ch.type!='channel':return await msg.reply_text ( '❌ Bu kanal emas.')
+            bm=await ctx.bot.get_chat_member ( ch.id,ctx.bot.id)
+            if bm.status not in (ChatMemberStatus.ADMINISTRATOR,ChatMemberStatus.OWNER ) :return await msg.reply_text ( '❌ Veritasni avval kanalga post yozish huquqi bilan admin qiling.')
+            if not is_super ( u.id ) :
+                um=await ctx.bot.get_chat_member ( ch.id,u.id)
+                if um.status not in (ChatMemberStatus.ADMINISTRATOR,ChatMemberStatus.OWNER ) :return await msg.reply_text ( '⛔ Siz bu kanal admini emassiz.')
+            linked=getattr ( ch,'linked_chat_id',None)
+            if not linked:return await msg.reply_text ( '❌ Kanalga Discussion/Muhokama guruhi ulanmagan. Izohlar uchun avval guruh ulang.')
+            gr=await ctx.bot.get_chat ( linked ) ;gm=await ctx.bot.get_chat_member ( gr.id,ctx.bot.id)
+            if gm.status not in (ChatMemberStatus.ADMINISTRATOR,ChatMemberStatus.OWNER ) :return await msg.reply_text ( '❌ Veritasni kanalning muhokama guruhiga ham admin qiling.')
+            if _cbz_active ( channel_id=ch.id) or _cbz_active ( group_id=gr.id ) :return await msg.reply_text ( 'ℹ️ Bu kanal/muhokama guruhida Kitob Zakovati allaqachon davom etmoqda.')
+            if v11_live ( gr.id ) :return await msg.reply_text ( 'ℹ️ Muhokama guruhida oddiy Zakovat davom etmoqda. Avval uni yakunlang.')
+            st.update ( {'mode':'lib_cbz_ready','channel_id':ch.id,'channel_title':ch.title or str ( ch.id ) ,'group_id':gr.id,'group_title':gr.title or str ( gr.id ) })
+            STATE[u.id]=st
+            kb=InlineKeyboardMarkup ( [[InlineKeyboardButton ( '10 ta',callback_data='libcbzcount:10' ) ,InlineKeyboardButton ( '20 ta',callback_data='libcbzcount:20' ) ,InlineKeyboardButton ( '✅ 30 ta',callback_data='libcbzcount:30' ) ],[InlineKeyboardButton ( '❌ Bekor',callback_data=f'libbook:{bid}' ) ]])
+            return await msg.reply_text ( f"✅ Kanal: {st['channel_title']}\n💬 Izoh guruhi: {st['group_title']}\n\nNechta savol tayyorlansin?",reply_markup=kb)
+        except TelegramError:
+            return await msg.reply_text ( '❌ Kanal topilmadi. Kanal linkini tekshiring va Veritasni admin qiling.')
+    if mode=='lib_cbz_ready':return await msg.reply_text ( '👇 Savollar sonini tugmalardan tanlang.')
+    return await _pre_cbz_library_private_input ( update,ctx)
+
+
+CBZ_ANSWER_QUEUES={}
+CBZ_ANSWER_WORKERS={}
+
+def _cbz_process_answer_sync ( game_id,round_no,user_id,name,text,message_id,received_at ) :
+    with db ( ) as c:
+        c.execute ( 'BEGIN IMMEDIATE')
+        g=c.execute ( "SELECT * FROM cbz_games WHERE id=?", ( game_id, )  ) .fetchone ( )
+        if not g or g['status']!='running' or g['phase']!='asking' or int ( g['round_no'] ) !=int ( round_no) or int ( received_at ) >=int ( g['deadline'] ) :return 'closed'
+        if c.execute ( "SELECT 1 FROM cbz_round_winners WHERE game_id=? AND round_no=? AND user_id=?", ( game_id,round_no,user_id )  ) .fetchone (  ) :return 'scored'
+        attempts=c.execute ( "SELECT COUNT ( *) n FROM cbz_attempts WHERE game_id=? AND round_no=? AND user_id=?", ( game_id,round_no,user_id )  ) .fetchone (  ) ['n']
+        if int ( attempts ) >=5:return 'attempt_limit'
+        item=json.loads ( g['questions_json'] ) [round_no];correct=1 if _cbz_answer_matches ( text,item.get ( 'answers') or []) else 0
+        try:c.execute ( "INSERT INTO cbz_attempts ( game_id,round_no,user_id,message_id,name,answer_text,correct,received_at) VALUES ( ?,?,?,?,?,?,?,? ) ", ( game_id,round_no,user_id,message_id,str ( name or '' ) [:160],str ( text or '' ) [:300],correct,received_at ) )
+        except sqlite3.IntegrityError:return 'duplicate'
+        if not correct:return 'wrong'
+        rank=int ( c.execute ( "SELECT COUNT ( *) n FROM cbz_round_winners WHERE game_id=? AND round_no=?", ( game_id,round_no )  ) .fetchone (  ) ['n'] ) +1
+        points=10 if rank==1 else 7 if rank==2 else 5 if rank==3 else 3
+        c.execute ( "INSERT INTO cbz_round_winners ( game_id,round_no,user_id,name,rank_no,points,received_at) VALUES ( ?,?,?,?,?,?,? ) ", ( game_id,round_no,user_id,str ( name or '' ) [:160],rank,points,received_at ) )
+        c.execute ( '''INSERT INTO cbz_scores ( game_id,user_id,name,points,correct,firsts,seconds,thirds,updated_at) VALUES ( ?,?,?,?,?,?,?,?,?) ON CONFLICT ( game_id,user_id) DO UPDATE SET name=excluded.name,points=cbz_scores.points+excluded.points,correct=cbz_scores.correct+1,firsts=cbz_scores.firsts+excluded.firsts,seconds=cbz_scores.seconds+excluded.seconds,thirds=cbz_scores.thirds+excluded.thirds,updated_at=excluded.updated_at''', ( game_id,user_id,str ( name or '' ) [:160],points,1,1 if rank==1 else 0,1 if rank==2 else 0,1 if rank==3 else 0,received_at ) )
+        return ('correct',rank,points)
+
+
+async def _cbz_answer_worker ( game_id ) :
+    q=CBZ_ANSWER_QUEUES.get ( game_id)
+    if q is None:return
+    try:
+        while True:
+            try:item=await asyncio.wait_for ( q.get (  ) ,timeout=90)
+            except asyncio.TimeoutError:break
+            try:await asyncio.to_thread ( _cbz_process_answer_sync,*item)
+            except Exception:log.exception ( 'CBZ answer worker failed game=%s',game_id)
+            finally:q.task_done ( )
+    finally:
+        if CBZ_ANSWER_QUEUES.get ( game_id) is q:CBZ_ANSWER_QUEUES.pop ( game_id,None)
+        CBZ_ANSWER_WORKERS.pop ( game_id,None)
+
+
+def _cbz_queue_answer ( ctx,game,user_id,name,text,message_id,received_at ) :
+    gid=int ( game['id'] ) ;q=CBZ_ANSWER_QUEUES.get ( gid)
+    if q is None:q=CBZ_ANSWER_QUEUES.setdefault ( gid,asyncio.Queue ( maxsize=3000 ) )
+    try:q.put_nowait (  ( gid,int ( game['round_no'] ) ,user_id,name,text,message_id,received_at ) )
+    except asyncio.QueueFull:return False
+    w=CBZ_ANSWER_WORKERS.get ( gid)
+    if w is None or w.done (  ) :CBZ_ANSWER_WORKERS[gid]=ctx.application.create_task ( _cbz_answer_worker ( gid ) )
+    return True
+
+
+async def _cbz_drain ( ctx,gid,timeout=10 ) :
+    q=CBZ_ANSWER_QUEUES.get ( int ( gid ) )
+    if q is None or q.empty (  ) :return True
+    w=CBZ_ANSWER_WORKERS.get ( int ( gid ) )
+    if w is None or w.done (  ) :CBZ_ANSWER_WORKERS[int ( gid ) ]=ctx.application.create_task ( _cbz_answer_worker ( int ( gid )  ) )
+    try:await asyncio.wait_for ( q.join (  ) ,timeout=timeout ) ;return True
+    except asyncio.TimeoutError:log.warning ( 'CBZ queue drain timeout game=%s pending=%s',gid,q.qsize (  )  ) ;return False
+
+
+def _cbz_scores_text ( gid,limit=10 ) :
+    rows=all_ ( "SELECT * FROM cbz_scores WHERE game_id=? ORDER BY points DESC,firsts DESC,seconds DESC,thirds DESC,correct DESC,user_id ASC LIMIT ?", ( int ( gid ) ,int ( limit )  ) )
+    if not rows:return 'Hali ball yo‘q.'
+    lines=[]
+    for i,r in enumerate ( rows,1 ) :
+        mark='🥇' if i==1 else '🥈' if i==2 else '🥉' if i==3 else f'{i}.'
+        lines.append ( f"{mark} {r['name']} — {r['points']} ball | ✅ {r['correct']}")
+    return '\n'.join ( lines)
+
+
+async def _cbz_publish_next ( ctx,gid ) :
+    g=_cbz_game ( gid)
+    if not g or g['status']!='running':return
+    qs=json.loads ( g['questions_json'] ) ;idx=int ( g['round_no'] ) +1
+    if idx>=len ( qs ) :return await _cbz_finish ( ctx,gid)
+    item=qs[idx];book=one ( 'SELECT title FROM library_books WHERE id=?', ( g['book_id'], )  ) ;title=book['title'] if book else 'Kitob'
+    try:
+        sent=await ctx.bot.send_message ( int ( g['channel_id'] ) ,f"🏆 KITOB ZAKOVATI • {idx+1}/{len ( qs ) }\n\n📖 {title}\n\n❓ {item['q']}\n\n⏱ 60 soniya\n💬 Javobni post izohiga yozing.\n\n🥇 10 • 🥈 7 • 🥉 5 • ✅ qolgan to‘g‘ri javoblar 3 ball")
+    except TelegramError as exc:
+        execute ( "UPDATE cbz_games SET status='paused',phase='delivery_error',error=? WHERE id=?", ( str ( exc ) [:300],gid )  ) ;return
+    execute ( "UPDATE cbz_games SET round_no=?,channel_message_id=?,discussion_message_id=0,phase='waiting_forward',round_started=?,deadline=0,error='' WHERE id=?", ( idx,sent.message_id,now (  ) ,gid ) )
+
+
+async def cbz_auto_forward_handler ( update,ctx ) :
+    msg=update.effective_message;chat=update.effective_chat
+    if not msg or not chat or chat.type not in ('group','supergroup') or not getattr ( msg,'is_automatic_forward',False ) :return
+    sender=getattr ( msg,'sender_chat',None)
+    if not sender:return
+    g=one ( "SELECT * FROM cbz_games WHERE group_id=? AND channel_id=? AND status='running' AND phase='waiting_forward' ORDER BY id DESC LIMIT 1", ( chat.id,sender.id ) )
+    if not g:return
+    origin=getattr ( msg,'forward_origin',None ) ;origin_mid=int ( getattr ( origin,'message_id',0) or 0)
+    if origin_mid and origin_mid!=int ( g['channel_message_id'] ) :return
+    execute ( "UPDATE cbz_games SET discussion_message_id=?,phase='asking',round_started=?,deadline=? WHERE id=?", ( msg.message_id,now (  ) ,now (  ) +60,g['id'] ) )
+
+
+async def cbz_answer_handler ( update,ctx ) :
+    msg=update.effective_message;chat=update.effective_chat;u=update.effective_user
+    if not msg or not chat or chat.type not in ('group','supergroup') or not u or u.is_bot or not msg.text or msg.sender_chat:return
+    if msg.text.startswith (  ( '*','/' ) ) or len ( msg.text ) >300:return
+    g=one ( "SELECT * FROM cbz_games WHERE group_id=? AND status='running' AND phase IN ('waiting_forward','asking') ORDER BY id DESC LIMIT 1", ( chat.id, ) )
+    if not g:return
+    root=int ( g['discussion_message_id'] or 0 ) ;thread_id=int ( getattr ( msg,'message_thread_id',0) or 0 ) ;reply=getattr ( msg,'reply_to_message',None)
+    if not root and g['phase']=='waiting_forward' and thread_id:
+        sender=getattr ( reply,'sender_chat',None) if reply else None
+        if sender and int ( getattr ( sender,'id',0) or 0 ) ==int ( g['channel_id'] ) :
+            root=thread_id;execute ( "UPDATE cbz_games SET discussion_message_id=?,phase='asking',round_started=?,deadline=? WHERE id=?", ( root,now (  ) ,now (  ) +60,g['id'] )  ) ;g=_cbz_game ( g['id'])
+    if not root:return
+    in_thread= ( thread_id==root) or bool ( reply and int ( getattr ( reply,'message_id',0) or 0 ) ==root) or bool ( reply and int ( getattr ( reply,'message_thread_id',0) or 0 ) ==root)
+    if not in_thread or g['phase']!='asking' or now (  ) >=int ( g['deadline'] ) :return
+    if not _cbz_queue_answer ( ctx,g,u.id,u.full_name,msg.text,msg.message_id,now (  )  ) :await msg.reply_text ( '⚠️ Juda ko‘p javob keldi. Birozdan keyin yana urinib ko‘ring.')
+
+
+async def _cbz_close_round ( ctx,gid ) :
+    await _cbz_drain ( ctx,gid,12 ) ;g=_cbz_game ( gid)
+    if not g or g['status']!='running' or g['phase']!='asking':return
+    qs=json.loads ( g['questions_json'] ) ;idx=int ( g['round_no'] ) ;item=qs[idx]
+    winners=all_ ( "SELECT * FROM cbz_round_winners WHERE game_id=? AND round_no=? ORDER BY rank_no", ( gid,idx )  ) ;lines=[]
+    for r in winners[:3]:
+        icon='🥇' if r['rank_no']==1 else '🥈' if r['rank_no']==2 else '🥉';lines.append ( f"{icon} {r['name']} — +{r['points']}")
+    rest=max ( 0,len ( winners ) -3)
+    if rest:lines.append ( f"✅ Yana {rest} ta to‘g‘ri javob — +3 ball")
+    if not lines:lines.append ( 'Bu safar to‘g‘ri javob topilmadi.')
+    source=f"\n📄 {item['source']}" if item.get ( 'source') else '';exp=f"\n📝 {item['explanation']}" if item.get ( 'explanation') else ''
+    try:await ctx.bot.send_message ( int ( g['channel_id'] ) ,f"✅ {idx+1}-savol javobi: {item['answers'][0]}{source}{exp}\n\n"+'\n'.join ( lines ) +"\n\n📊 Umumiy reyting:\n"+_cbz_scores_text ( gid,5 ) )
+    except TelegramError:pass
+    execute ( "UPDATE cbz_games SET phase='between',deadline=? WHERE id=?", ( now (  ) +5,gid ) )
+
+
+async def _cbz_finish ( ctx,gid,stopped=False ) :
+    await _cbz_drain ( ctx,gid,12 ) ;g=_cbz_game ( gid)
+    if not g or g['status'] in ('finished','stopped','failed' ) :return
+    execute ( "UPDATE cbz_games SET status=?,phase='done',finished_at=?,deadline=0 WHERE id=?", ( 'stopped' if stopped else 'finished',now (  ) ,gid ) )
+    title=one ( 'SELECT title FROM library_books WHERE id=?', ( g['book_id'], ) )
+    try:await ctx.bot.send_message ( int ( g['channel_id'] ) ,f"🏁 KITOB ZAKOVATI {'TO‘XTATILDI' if stopped else 'TUGADI'}\n\n📖 { ( title['title'] if title else 'Kitob' ) }\n\n🏆 Yakuniy reyting:\n{_cbz_scores_text ( gid,20 ) }")
+    except TelegramError:pass
+    CBZ_ANSWER_QUEUES.pop ( int ( gid ) ,None ) ;CBZ_ANSWER_WORKERS.pop ( int ( gid ) ,None)
+
+
+async def cbz_tick ( ctx ) :
+    ts=now (  ) ;due=all_ ( "SELECT id,phase FROM cbz_games WHERE status='running' AND ( ( phase='asking' AND deadline>0 AND deadline<=?) OR (phase='between' AND deadline>0 AND deadline<=? )  ) ", ( ts,ts ) )
+    for r in due:
+        if r['phase']=='asking':await _cbz_close_round ( ctx,int ( r['id'] ) )
+        else:await _cbz_publish_next ( ctx,int ( r['id'] ) )
+    stuck=all_ ( "SELECT id,channel_id FROM cbz_games WHERE status='running' AND phase='waiting_forward' AND round_started>0 AND round_started<=?", ( ts-45, ) )
+    for r in stuck:
+        execute ( "UPDATE cbz_games SET status='paused',phase='discussion_missing',error='Automatic discussion forward not observed' WHERE id=?", ( r['id'], ) )
+        try:await ctx.bot.send_message ( int ( r['channel_id'] ) ,'⚠️ Veritas izohlar oqimini ko‘rmadi. Kanalning Discussion guruhi ulanganini va bot u yerda admin ekanini tekshiring.')
+        except TelegramError:pass
+
+
+async def _cbz_prepare_game ( ctx,gid,count ) :
+    g=_cbz_game ( gid ) ;book=one ( "SELECT title,pdf_file_id FROM library_books WHERE id=? AND status='approved'", ( g['book_id'], ) ) if g else None
+    if not g or not book or not book['pdf_file_id']:
+        execute ( "UPDATE cbz_games SET status='failed',phase='failed',error='Book/PDF missing' WHERE id=?", ( gid, )  ) ;return
+    path=f'/tmp/veritas_cbz_{gid}.pdf'
+    try:
+        try:f=await ctx.bot.get_file ( book['pdf_file_id'] ) ;await f.download_to_drive ( custom_path=path)
+        except TelegramError as exc:
+            if 'file is too big' not in str ( exc ) .lower (  ) :raise
+            await _download_large_telegram_file ( ctx,book['pdf_file_id'],path)
+        with open ( path,'rb') as fh:
+            if fh.read ( 4 ) !=b'%PDF':raise RuntimeError ( 'Telegramdan olingan fayl PDF emas')
+        questions,_meta=await asyncio.to_thread ( _cbz_build_questions_from_path_sync,path,book['title'],count)
+        execute ( "UPDATE cbz_games SET questions_json=?,status='running',phase='ready',round_no=-1,error='' WHERE id=?", ( json.dumps ( questions,ensure_ascii=False ) ,gid ) )
+        try:await ctx.bot.send_message ( int ( g['creator_id'] ) ,f"✅ {book['title']} kitobidan {len ( questions ) } ta Kanal Zakovat savoli tayyorlandi. Birinchi savol kanalga yuborilyapti.")
+        except TelegramError:pass
+        await _cbz_publish_next ( ctx,gid)
+    except Exception as exc:
+        log.exception ( 'CBZ preparation failed game=%s',gid ) ;execute ( "UPDATE cbz_games SET status='failed',phase='failed',error=? WHERE id=?", ( str ( exc ) [:500],gid ) )
+        try:await ctx.bot.send_message ( int ( g['creator_id'] ) ,'⚠️ Kitobdan Kanal Zakovat tayyorlashda xatolik bo‘ldi. Aniq sabab Railway logiga yozildi.')
+        except TelegramError:pass
+    finally:
+        try:Path ( path ) .unlink ( missing_ok=True)
+        except Exception:pass
+
+
+async def cbz_control_handler ( update,ctx ) :
+    msg=update.effective_message;u=update.effective_user;chat=update.effective_chat
+    if not msg or not u or not chat or chat.type not in ('group','supergroup') or not msg.text:return
+    cmd=msg.text.strip (  ) .casefold ( )
+    if cmd not in {'*kznatija','*kzstop'}:return
+    g=_cbz_active ( group_id=chat.id)
+    if not g:return await msg.reply_text ( 'ℹ️ Bu guruhga bog‘langan Kanal Zakovati yo‘q.')
+    if cmd=='*kznatija':
+        await msg.reply_text ( '🏆 Kanal Zakovat reytingi:\n\n'+_cbz_scores_text ( g['id'],20 ) )
+        raise _V11HandlerStop
+    allowed=is_super ( u.id) or int ( g['creator_id'] ) ==u.id or await is_tg_admin ( ctx.bot,chat.id,u.id)
+    if not allowed:return await msg.reply_text ( '⛔ To‘xtatish uchun admin bo‘lishingiz kerak.')
+    await _cbz_finish ( ctx,int ( g['id'] ) ,stopped=True)
+    await msg.reply_text ( '✅ Kanal Zakovati to‘xtatildi.')
+    raise _V11HandlerStop
+
+
+_pre_cbz_callback=callback
+async def callback ( update,ctx ) :
+    q=update.callback_query
+    if not q or not q.data:return await _pre_cbz_callback ( update,ctx)
+    d=q.data;u=q.from_user
+    if d.startswith ( 'libbook:') and (STATE.get ( u.id) or {} ) .get ( 'mode') in {'lib_book_qa','lib_cbz_channel','lib_cbz_ready'}:
+        STATE.pop ( u.id,None)
+    if d.startswith ( 'libqa:' ) :
+        try:bid=int ( d.split ( ':',1 ) [1])
+        except Exception:return await q.answer ( 'Noto‘g‘ri kitob.',show_alert=True)
+        if q.message.chat.type!='private':return await q.answer ( 'Savol-javobni botning shaxsiy chatida oching.',show_alert=True)
+        book=one ( "SELECT title,pdf_file_id FROM library_books WHERE id=? AND status='approved'", ( bid, ) )
+        if not book or not book['pdf_file_id']:return await q.answer ( 'Bu kitobda PDF mavjud emas.',show_alert=True)
+        if not (is_super ( u.id) or ai_user_active ( u.id )  ) :return await quiz_replace_message ( q,ctx,'🔒 Kitobdan AI savol-javob uchun AI Premium kerak.',reply_markup=InlineKeyboardMarkup ( [[InlineKeyboardButton ( '💎 AI Premium',callback_data='aipbuy' ) ],[InlineKeyboardButton ( '⬅️ Kitob',callback_data=f'libbook:{bid}' ) ]] ) )
+        STATE[u.id]={'mode':'lib_book_qa','book_id':bid}
+        return await quiz_replace_message ( q,ctx,f"❓ KITOBDAN SAVOL-JAVOB\n\n📖 {book['title']}\n\nKitob ichidan savolingizni yozing. Veritas faqat shu PDFga tayangan holda javob beradi va sahifani ko‘rsatadi.",reply_markup=InlineKeyboardMarkup ( [[InlineKeyboardButton ( '⏹ Tugatish',callback_data=f'libqastop:{bid}' ) ]] ) )
+    if d.startswith ( 'libqastop:' ) :
+        try:bid=int ( d.split ( ':',1 ) [1])
+        except Exception:return
+        STATE.pop ( u.id,None ) ;return await library_show_book ( q,ctx,bid)
+    if d.startswith ( 'libcbz:' ) :
+        try:bid=int ( d.split ( ':',1 ) [1])
+        except Exception:return await q.answer ( 'Noto‘g‘ri kitob.',show_alert=True)
+        if q.message.chat.type!='private':return await q.answer ( 'Kanal Zakovatni botning shaxsiy chatida sozlang.',show_alert=True)
+        book=one ( "SELECT title,pdf_file_id FROM library_books WHERE id=? AND status='approved'", ( bid, ) )
+        if not book or not book['pdf_file_id']:return await q.answer ( 'Bu kitobda PDF mavjud emas.',show_alert=True)
+        if not OPENAI_API_KEY:return await q.answer ( 'Veritas AI kaliti sozlanmagan.',show_alert=True)
+        STATE[u.id]={'mode':'lib_cbz_channel','book_id':bid}
+        return await quiz_replace_message ( q,ctx,f"🏆 KANAL KITOB ZAKOVATI\n\n📖 {book['title']}\n\n1/2 — Kanalning @username, t.me linki yoki -100... ID sini yuboring.\n\nKanalga Discussion/Muhokama guruhi ulangan bo‘lishi kerak.",reply_markup=InlineKeyboardMarkup ( [[InlineKeyboardButton ( '⬅️ Kitob',callback_data=f'libbook:{bid}' ) ]] ) )
+    if d.startswith ( 'libcbzcount:' ) :
+        try:count=int ( d.split ( ':',1 ) [1])
+        except Exception:return await q.answer ( 'Noto‘g‘ri son.',show_alert=True)
+        st=STATE.get ( u.id) or {}
+        if st.get ( 'mode' ) !='lib_cbz_ready' or count not in (10,20,30 ) :return await q.answer ( 'Kanal sozlash sessiyasi tugagan. Qayta boshlang.',show_alert=True)
+        bid=int ( st['book_id'] ) ;ch=int ( st['channel_id'] ) ;gr=int ( st['group_id'])
+        if _cbz_active ( channel_id=ch) or _cbz_active ( group_id=gr ) :return await q.answer ( 'Bu kanal/guruhda Zakovat allaqachon davom etmoqda.',show_alert=True)
+        with db ( ) as c:gid=c.execute ( "INSERT INTO cbz_games ( creator_id,book_id,channel_id,channel_title,group_id,group_title,status,phase,created_at) VALUES ( ?,?,?,?,?,?,'preparing','preparing',? ) ", ( u.id,bid,ch,st.get ( 'channel_title','' ) ,gr,st.get ( 'group_title','' ) ,now (  )  )  ) .lastrowid
+        STATE.pop ( u.id,None ) ;await q.answer ( 'Savollar tayyorlanmoqda...')
+        await quiz_replace_message ( q,ctx,f"🧠 Kitob o‘qilmoqda...\n\n{count} ta ochiq savol tayyorlanadi. Tayyor bo‘lgach Veritas birinchi savolni kanalga o‘zi joylaydi.\n\nBall: 🥇10 • 🥈7 • 🥉5 • qolgan to‘g‘ri javoblar 3",reply_markup=InlineKeyboardMarkup ( [[InlineKeyboardButton ( '📖 Kitobga qaytish',callback_data=f'libbook:{bid}' ) ]] ) )
+        ctx.application.create_task ( _cbz_prepare_game ( ctx,gid,count )  ) ;return
+    return await _pre_cbz_callback ( update,ctx)
+
 def main (  ) :
     if not TOKEN: raise RuntimeError ( "BOT_TOKEN kiritilmagan.")
     init_db ( )
@@ -8773,11 +9238,15 @@ def main (  ) :
     ai_news_init_db ( )
     poster_init_db ( )
     i18n_init_db ( )
+    channel_book_zakovat_init_db ( )
     app=Application.builder (  ) .bot ( VeritasI18nBot ( token=TOKEN )  ) .build ( )
     app.add_handler ( MessageHandler ( filters.ChatType.GROUPS & filters.TEXT, veritas_wake_handler ) , group=-19)
     app.add_handler ( CallbackQueryHandler ( v12_help, pattern=r'^v12:help$' ) , group=-18)
     app.add_handler ( CallbackQueryHandler ( group_book_callback, pattern=r'^gbook:' ) , group=-18)
     app.add_handler ( MessageHandler ( filters.ChatType.GROUPS & filters.TEXT, group_book_request_handler ) , group=-18)
+    app.add_handler ( MessageHandler ( filters.ChatType.GROUPS & filters.ALL, cbz_auto_forward_handler ) , group=-15)
+    app.add_handler ( MessageHandler ( filters.ChatType.GROUPS & filters.TEXT, cbz_control_handler ) , group=-14)
+    app.add_handler ( MessageHandler ( filters.ChatType.GROUPS & filters.TEXT, cbz_answer_handler ) , group=4)
     app.add_handler ( MessageHandler ( filters.ChatType.GROUPS & filters.TEXT, v12_natural_commands ) , group=-17)
     app.add_handler ( MessageHandler ( filters.TEXT & ~filters.StatusUpdate.ALL, v11_commands ) , group=-16)
     app.add_handler ( CallbackQueryHandler ( v11_callback, pattern=r"^z11:" ) , group=-16)
@@ -8816,6 +9285,7 @@ def main (  ) :
     app.add_handler ( MessageHandler ( filters.ChatType.PRIVATE & filters.TEXT & ~filters.COMMAND & ~filters.Regex ( r"^\*" ) ,private_ai_reply ) ,group=4)
     if app.job_queue:
         app.job_queue.run_repeating ( v11_tick, 3, first=5)
+        app.job_queue.run_repeating ( cbz_tick, 3, first=7)
         app.job_queue.run_repeating ( giveaway_job,60,first=10)
         app.job_queue.run_repeating ( rose_cleanup_job,30,first=15)
         if AUTOBOOK_ENABLED:
