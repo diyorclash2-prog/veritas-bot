@@ -2430,6 +2430,9 @@ async def library_private_input ( update,ctx ) :
         title=title.replace ( "_"," " ) .replace ( "-"," ")
         title=re.sub ( r"\s+"," ",title ) .strip (  ) [:250] or "Nomsiz kitob"
 
+        fmt=filename.rsplit ( ".",1 ) [-1].lower ( ) if "." in filename else "file"
+        pdf_file_id=doc.file_id if fmt=="pdf" else ""
+        pdf_unique_id=uniq if fmt=="pdf" else ""
         with db ( ) as c:
             cur=c.execute(
                 """INSERT INTO library_books
@@ -2437,9 +2440,8 @@ async def library_private_input ( update,ctx ) :
                  audio_file_id,audio_unique_id,added_by,status,created_at,
                  book_file_id,book_unique_id,book_file_name,book_format,book_file_size)
                 VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,? ) """,
-                (title,"","uz","","",doc.file_id,uniq,"","",uid,"approved",now (  ) ,
-                 doc.file_id,uniq,filename,filename.rsplit ( ".",1 ) [-1].lower ( ) if "." in filename else "file",
-                 int ( doc.file_size or 0 ) )
+                (title,"","uz","","",pdf_file_id,pdf_unique_id,"","",uid,"approved",now (  ) ,
+                 doc.file_id,uniq,filename,fmt,int ( doc.file_size or 0 ) )
             )
             bid=cur.lastrowid
 
@@ -8006,6 +8008,464 @@ async def autobook_command ( update,ctx ) :
         return True
     await msg.reply_text ( '📚 Buyruqlar:\n*avtokitob run — hozir qidirish\n*avtokitob status — holat')
     return True
+
+# =========================================================
+# VERITAS FINAL STABILITY PATCH
+# - wake command
+# - Zakovat high-load queue + deadline drain
+# - V9 test stale/double-click protection
+# - V9 navigation/AI collision fix
+# - safe Hadith collection callback tokens
+# - safer/balanced public-domain auto-library
+# =========================================================
+
+def _wake_normalize ( text ) :
+    return (text or '' ) .casefold (  ) .replace ( '’', "'" ) .replace ( '‘', "'" ) .replace ( '`', "'" ) .strip ( )
+
+async def veritas_wake_handler ( update,ctx ) :
+    msg=update.effective_message; chat=update.effective_chat; user=update.effective_user
+    if not msg or not chat or not user or user.is_bot or chat.type not in ('group','supergroup') or not msg.text:
+        return
+    t=_wake_normalize ( msg.text)
+    wake=re.fullmatch ( r"\s*veritas[,.! ]+ ( ?:uyg['’]?on|uygon ) [.!? ]*\s*",t,re.I)
+    ping=re.fullmatch ( r"\s*veritas[,.! ]+ ( ?:shu\s*yerda\s*misan|shuyerdamisan|shu\s*yerdamisan ) [.!? ]*\s*",t,re.I)
+    if not (wake or ping ) :
+        return
+    try:
+        V12_CONSUMED[ ( chat.id,msg.message_id ) ]=now ( )
+    except Exception:
+        pass
+    await msg.reply_text ( "🪶 Labbay, shu yerdaman. Veritas uyg‘oq.")
+    raise _V11HandlerStop
+
+
+# ---- Zakovat high-load answer queue ----
+V11_ANSWER_QUEUES = {}
+V11_ANSWER_WORKERS = {}
+V11_ANSWER_SEEN = {}
+
+async def v11_answer_worker ( game_id ) :
+    queue=V11_ANSWER_QUEUES.get ( game_id)
+    if queue is None:
+        return
+    try:
+        while True:
+            try:
+                item=await asyncio.wait_for ( queue.get (  ) ,timeout=90)
+            except asyncio.TimeoutError:
+                break
+            try:
+                await asyncio.to_thread ( v11_record_answer,*item)
+            except Exception:
+                log.exception ( 'ZAKOVAT_ANSWER_WORKER_FAILED game=%s',game_id)
+            finally:
+                queue.task_done ( )
+    finally:
+        if V11_ANSWER_QUEUES.get ( game_id) is queue:
+            V11_ANSWER_QUEUES.pop ( game_id,None)
+        V11_ANSWER_WORKERS.pop ( game_id,None)
+
+
+def v11_queue_answer ( ctx,game,user_id,name,text,message_id,received_at ) :
+    game_id=int ( game['id'] ) ; round_no=int ( game['round_no'])
+    seen=V11_ANSWER_SEEN.setdefault ( game_id,set (  ) )
+    key= ( round_no,int ( user_id ) )
+    if key in seen:
+        return 'duplicate'
+    queue=V11_ANSWER_QUEUES.get ( game_id)
+    if queue is None:
+        queue=asyncio.Queue ( maxsize=2000)
+        V11_ANSWER_QUEUES[game_id]=queue
+    try:
+        queue.put_nowait (  ( game_id,user_id,name,text,message_id,False,received_at ) )
+    except asyncio.QueueFull:
+        return 'full'
+    seen.add ( key)
+    worker=V11_ANSWER_WORKERS.get ( game_id)
+    if worker is None or worker.done (  ) :
+        V11_ANSWER_WORKERS[game_id]=ctx.application.create_task ( v11_answer_worker ( game_id ) )
+    return 'queued'
+
+
+async def _v11_drain_answer_queue ( ctx,game_id,timeout=8.0 ) :
+    queue=V11_ANSWER_QUEUES.get ( game_id)
+    if queue is None or queue.empty (  ) :
+        return True
+    worker=V11_ANSWER_WORKERS.get ( game_id)
+    if worker is None or worker.done (  ) :
+        V11_ANSWER_WORKERS[game_id]=ctx.application.create_task ( v11_answer_worker ( game_id ) )
+    try:
+        await asyncio.wait_for ( queue.join (  ) ,timeout=timeout)
+        return True
+    except asyncio.TimeoutError:
+        log.warning ( 'ZAKOVAT_QUEUE_DRAIN_TIMEOUT game=%s pending=%s',game_id,queue.qsize (  ) )
+        return False
+
+
+async def v11_game_answers ( update,ctx ) :
+    if not v11_game_question_reply ( update ) :
+        return
+    msg=update.message; user=update.effective_user
+    if not user or user.is_bot or not msg.text or msg.text.startswith (  ( '*','/' )  ) :
+        return
+    if not v11_is_answer ( update ) :
+        await msg.reply_text ( '⏰ Bu savolning javob vaqti tugagan. Joriy savolga reply qiling.')
+        return
+    game=v11_live ( msg.chat.id)
+    if not game:
+        return
+    received_at=now ( )
+    status=v11_queue_answer ( ctx,game,user.id,user.full_name,msg.text,msg.message_id,received_at)
+    if status=='full':
+        await msg.reply_text ( '⚠️ Bir vaqtda juda ko‘p javob keldi. Javobingizni yana bir marta yuboring.')
+
+
+_fixed_old_v11_tick=v11_tick
+async def v11_tick ( ctx ) :
+    due=all_ ( "SELECT id FROM v11_games WHERE status='running' AND phase='asking' AND deadline<=?", ( now (  ) , ) )
+    for row in due:
+        if not await _v11_drain_answer_queue ( ctx,int ( row['id'] )  ) :
+            return
+    return await _fixed_old_v11_tick ( ctx)
+
+
+_fixed_old_v11_finish=v11_finish
+async def v11_finish ( ctx,game ) :
+    gid=int ( game['id'])
+    await _v11_drain_answer_queue ( ctx,gid,timeout=12.0)
+    try:
+        return await _fixed_old_v11_finish ( ctx,game)
+    finally:
+        V11_ANSWER_SEEN.pop ( gid,None)
+        V11_ANSWER_QUEUES.pop ( gid,None)
+        V11_ANSWER_WORKERS.pop ( gid,None)
+
+
+# ---- V9 test: include question index in callback to reject stale/double clicks ----
+async def v9_send_test_question ( msg,uid,edit=False ) :
+    st=STATE.get ( uid) or {}; qs=st.get ( 'questions') or []; idx=int ( st.get ( 'index',0 ) )
+    if idx>=len ( qs ) :
+        return
+    x=qs[idx]; lid=int ( st['lesson_id'])
+    kb=InlineKeyboardMarkup ( [[InlineKeyboardButton(
+        f"{i+1}. {opt}",callback_data=f"v9:ans:{lid}:{idx}:{i}"
+    )] for i,opt in enumerate ( x['options'] ) ])
+    text=f"📝 TEST — {idx+1}/{len ( qs ) }\n\n{x['q']}"
+    if edit:
+        return await msg.edit_text ( text,reply_markup=kb)
+    return await msg.reply_text ( text,reply_markup=kb)
+
+
+_fixed_old_v9_callback=v9_callback
+async def v9_callback ( update,ctx ) :
+    q=update.callback_query
+    if not q or not q.data:
+        return
+    d=q.data; u=q.from_user
+    if d.startswith ( 'v9:ans:' ) :
+        parts=d.split ( ':')
+        if len ( parts ) !=5 or not all ( x.isdigit ( ) for x in parts[2:] ) :
+            return await q.answer ( 'Bu test tugmasi eskirgan. Testni qayta oching.',show_alert=True)
+        lid=int ( parts[2] ) ; question_idx=int ( parts[3] ) ; chosen=int ( parts[4])
+        st=STATE.get ( u.id) or {}
+        if st.get ( 'mode' ) !='v9_test' or int ( st.get ( 'lesson_id',0 )  ) !=lid:
+            return await q.answer ( 'Bu test sessiyasi tugagan.',show_alert=True)
+        qs=st.get ( 'questions') or []; current=int ( st.get ( 'index',0 ) )
+        if question_idx!=current:
+            return await q.answer ( 'Bu savol allaqachon hisoblangan.',show_alert=False)
+        if current>=len ( qs) or chosen<0 or chosen>=len ( qs[current].get ( 'options') or [] ) :
+            return await q.answer ( 'Test holati yangilangan. Qayta oching.',show_alert=True)
+        correct=int ( qs[current]['answer'])
+        if chosen==correct:
+            st['correct']=int ( st.get ( 'correct',0 )  ) +1
+        st['index']=current+1; STATE[u.id]=st
+        await q.answer ( '✅ To‘g‘ri!' if chosen==correct else f'❌ To‘g‘ri javob: {correct+1}')
+        if st['index']>=len ( qs ) :
+            total=len ( qs ) ; corr=int ( st.get ( 'correct',0 )  ) ; score=round ( corr*100/total) if total else 0
+            with db ( ) as c:
+                c.execute ( """INSERT INTO v9_test_results ( lesson_id,group_id,user_id,score,max_score,correct_count,total_count,details,created_at)
+                             VALUES ( ?,?,?,?,100,?,?,?,? ) """, ( lid,st['group_id'],u.id,score,corr,total,json.dumps ( {'test_id':st['test_id']} ) ,now (  )  ) )
+                c.execute ( """INSERT INTO v9_points ( group_id,user_id,points,updated_at) VALUES ( ?,?,?,?)
+                             ON CONFLICT ( group_id,user_id) DO UPDATE SET points=points+excluded.points,updated_at=excluded.updated_at""", ( st['group_id'],u.id,score,now (  )  ) )
+                c.execute ( """INSERT INTO v9_lesson_progress ( lesson_id,user_id,stage,score,updated_at)
+                             VALUES ( ?,?,'completed',?,?)
+                             ON CONFLICT ( lesson_id,user_id) DO UPDATE SET stage='completed',score=excluded.score,updated_at=excluded.updated_at""", ( lid,u.id,score,now (  )  ) )
+            STATE.pop ( u.id,None)
+            return await q.edit_message_text(
+                f"🏁 TEST TUGADI\n\n✅ To‘g‘ri: {corr}/{total}\n🎯 Natija: {score}/100\n🏆 Guruh balliga: +{score}",
+                reply_markup=InlineKeyboardMarkup ( [[InlineKeyboardButton ( '📖 Darsga qaytish',callback_data=f'v9:lesson:view:{lid}' ) ]])
+            )
+        return await v9_send_test_question ( q.message,u.id,edit=True)
+    return await _fixed_old_v9_callback ( update,ctx)
+
+
+# ---- V9 persistent navigation must not fall through into private AI ----
+_fixed_old_v9_private_input=v9_private_input
+async def v9_private_input ( update,ctx ) :
+    msg=update.effective_message; u=update.effective_user
+    if msg and u and msg.chat.type=='private' and (msg.text or '' ) .strip (  ) =='🎓 O‘quv • Talaba':
+        STATE.pop ( u.id,None)
+        ctx.user_data['v9_consumed_message_id']=msg.message_id
+        await msg.reply_text ( '🎓 O‘QUV • TALABA\n\nTa’lim turini tanlang:',reply_markup=v9_entry_markup (  ) )
+        return await msg.reply_text ( 'Asosiy panel:',reply_markup=veritas_global_keyboard (  ) )
+    return await _fixed_old_v9_private_input ( update,ctx)
+
+
+# ---- Hadith collection callbacks: fixed-size token, never raw long collection text ----
+def _hadith_collection_token ( name ) :
+    import hashlib
+    return hashlib.sha1 ( str ( name or '' ) .encode ( 'utf-8' )  ) .hexdigest (  ) [:12]
+
+def _hadith_collection_by_token ( token ) :
+    for row in all_ ( "SELECT DISTINCT collection FROM hadiths WHERE status='approved'" ) :
+        if _hadith_collection_token ( row['collection'] ) ==token:
+            return row['collection']
+    return None
+
+_fixed_old_callback=callback
+async def callback ( update,ctx ) :
+    q=update.callback_query
+    if not q:
+        return
+    d=q.data or ''; u=q.from_user
+    if d=='hadith':
+        await q.answer (  ) ; ensure_user ( u)
+        total=one ( "SELECT COUNT ( *) n FROM hadiths WHERE status='approved'" ) ['n']
+        cols=all_ ( "SELECT collection,COUNT ( *) n FROM hadiths WHERE status='approved' GROUP BY collection ORDER BY collection")
+        kb=[[InlineKeyboardButton ( f"📚 {r['collection'][:40]} · {r['n']}",callback_data=f"hcolid:{_hadith_collection_token ( r['collection'] ) }:0" ) ] for r in cols[:20]]
+        kb.append ( [InlineKeyboardButton ( '🤖 AI Hadis qidirish',callback_data='hadaisearch' ) ])
+        kb.append ( [InlineKeyboardButton ( '🎲 Random hadis',callback_data='hrandom' ) ])
+        if is_hadith_admin ( u.id ) :
+            kb.append ( [InlineKeyboardButton ( '➕ Hadis qo‘shish',callback_data='hadd' ) ])
+        kb.append ( [InlineKeyboardButton ( '⬅️ Orqaga',callback_data='home' ) ,InlineKeyboardButton ( '🏠 Bosh menyu',callback_data='home' ) ])
+        txt=f"📜 SAHIH HADISLAR\n\nJami hadislar: {total}\nTo‘plamni tanlang yoki random hadis o‘qing."
+        try:
+            if q.message.photo or q.message.video or q.message.document or q.message.audio or q.message.animation:
+                await q.message.delete (  ) ; return await ctx.bot.send_message ( q.message.chat.id,txt,reply_markup=InlineKeyboardMarkup ( kb ) )
+            return await q.edit_message_text ( txt,reply_markup=InlineKeyboardMarkup ( kb ) )
+        except TelegramError:
+            return await ctx.bot.send_message ( q.message.chat.id,txt,reply_markup=InlineKeyboardMarkup ( kb ) )
+    if d.startswith ( 'hcolid:' ) :
+        parts=d.split ( ':')
+        if len ( parts ) !=3 or not parts[2].isdigit (  ) :
+            return await q.answer ( 'Noto‘g‘ri tugma.',show_alert=True)
+        collection=_hadith_collection_by_token ( parts[1] ) ; page=max ( 0,int ( parts[2] ) )
+        if not collection:
+            return await q.answer ( 'To‘plam topilmadi.',show_alert=True)
+        await q.answer (  ) ; per=10; off=page*per
+        total=one ( "SELECT COUNT ( *) n FROM hadiths WHERE collection=? AND status='approved'", ( collection, )  ) ['n']
+        rows=all_ ( "SELECT id,number FROM hadiths WHERE collection=? AND status='approved' ORDER BY number LIMIT ? OFFSET ?", ( collection,per,off ) )
+        token=_hadith_collection_token ( collection)
+        kb=[[InlineKeyboardButton ( f"📜 {collection[:28]} {r['number']}",callback_data=f"hshow:{r['id']}" ) ] for r in rows]
+        nav=[]
+        if page>0: nav.append ( InlineKeyboardButton ( '◀️',callback_data=f'hcolid:{token}:{page-1}' ) )
+        if off+per<total: nav.append ( InlineKeyboardButton ( '▶️',callback_data=f'hcolid:{token}:{page+1}' ) )
+        if nav: kb.append ( nav)
+        kb.append ( [InlineKeyboardButton ( '⬅️ Hadislar',callback_data='hadith' ) ])
+        return await q.edit_message_text ( f"📚 {collection} · {total} ta hadis",reply_markup=InlineKeyboardMarkup ( kb ) )
+    return await _fixed_old_callback ( update,ctx)
+
+
+# ---- Safer and balanced public-domain auto-library ----
+_fixed_old_autobook_init_db=autobook_init_db
+def autobook_init_db (  ) :
+    _fixed_old_autobook_init_db ( )
+    with db ( ) as c:
+        c.executescript ( """
+        CREATE TABLE IF NOT EXISTS library_auto_state(
+          key TEXT PRIMARY KEY, value TEXT DEFAULT '', updated_at INTEGER NOT NULL ) ;
+        """)
+
+
+def _autobook_state_get ( key,default='' ) :
+    r=one ( 'SELECT value FROM library_auto_state WHERE key=?', ( key, ) )
+    return str ( r['value']) if r else str ( default)
+
+
+def _autobook_state_set ( key,value ) :
+    execute ( """INSERT INTO library_auto_state ( key,value,updated_at) VALUES ( ?,?,?)
+               ON CONFLICT ( key) DO UPDATE SET value=excluded.value,updated_at=excluded.updated_at""",
+            (key,str ( value ) ,now (  )  ) )
+
+
+def _autobook_host ( url ) :
+    from urllib.parse import urlparse
+    try:return (urlparse ( url ) .hostname or '' ) .casefold ( )
+    except Exception:return ''
+
+
+def _autobook_catalog_url_ok ( url ) :
+    return _autobook_host ( url) in {'gutendex.com','www.gutendex.com'}
+
+
+def _autobook_download_url_ok ( url ) :
+    h=_autobook_host ( url)
+    return h=='gutenberg.org' or h.endswith ( '.gutenberg.org')
+
+
+def _autobook_json ( url, timeout=25 ) :
+    if not _autobook_catalog_url_ok ( url ) :
+        raise RuntimeError ( 'AUTOBOOK_CATALOG_HOST_NOT_ALLOWED')
+    req=urllib.request.Request ( url,headers={'User-Agent':'VeritasBot/9.4 public-domain-library','Accept':'application/json'})
+    with urllib.request.urlopen ( req,timeout=timeout) as r:
+        return json.loads ( r.read (  ) .decode ( 'utf-8','replace' ) )
+
+
+def _autobook_bytes ( url, timeout=60, max_bytes=45*1024*1024 ) :
+    if not _autobook_download_url_ok ( url ) :
+        raise RuntimeError ( 'AUTOBOOK_DOWNLOAD_HOST_NOT_ALLOWED')
+    req=urllib.request.Request ( url,headers={'User-Agent':'VeritasBot/9.4 public-domain-library'})
+    with urllib.request.urlopen ( req,timeout=timeout) as r:
+        data=r.read ( max_bytes+1)
+    if len ( data ) >max_bytes:
+        raise RuntimeError ( 'Fayl 45 MB dan katta')
+    return data
+
+
+def _autobook_pick_format ( formats ) :
+    if not isinstance ( formats,dict ) :
+        return ('','','')
+    prefs=(
+        ('epub','application/epub+zip' ) ,
+        ('txt','text/plain; charset=utf-8' ) , ( 'txt','text/plain; charset=us-ascii' ) , ( 'txt','text/plain' ) ,
+    )
+    for ext,mime in prefs:
+        url=formats.get ( mime)
+        if isinstance ( url,str) and url.startswith ( 'https://') and _autobook_download_url_ok ( url ) :
+            return ext,mime,url
+    for mime,url in formats.items (  ) :
+        if not isinstance ( url,str) or not url.startswith ( 'https://') or not _autobook_download_url_ok ( url ) :
+            continue
+        base=mime.split ( ';',1 ) [0].strip (  ) .lower ( )
+        if base=='application/epub+zip': return 'epub',mime,url
+        if base=='text/plain': return 'txt',mime,url
+    return ('','','')
+
+
+def _autobook_candidate_for_lang ( lang,max_pages=8 ) :
+    from urllib.parse import urlencode
+    page=max ( 1,int ( _autobook_state_get ( 'page:'+lang,'1') or 1 ) )
+    for _ in range ( max_pages ) :
+        q=urlencode ( {'copyright':'false','languages':lang,'sort':'popular','page':page})
+        url='https://gutendex.com/books?'+q
+        try:
+            data=_autobook_json ( url)
+        except Exception:
+            if page!=1:
+                page=1; _autobook_state_set ( 'page:'+lang,1)
+                continue
+            raise
+        results=data.get ( 'results') or []
+        for item in results:
+            sid=str ( item.get ( 'id') or '' ) .strip ( )
+            if not sid or item.get ( 'copyright') is not False:
+                continue
+            langs=[str ( x ) .lower ( ) for x in (item.get ( 'languages') or [] ) ]
+            if lang not in langs:
+                continue
+            prev=one ( "SELECT status,created_at FROM library_auto_imports WHERE source='gutenberg' AND source_book_id=?", ( sid, ) )
+            if prev:
+                status=str ( prev['status'] or '')
+                if status in {'added','duplicate','skipped','downloading'}:
+                    continue
+                if status=='failed' and now (  ) -int ( prev['created_at'] or 0 ) <3600:
+                    continue
+            ext,mime,download_url=_autobook_pick_format ( item.get ( 'formats') or {})
+            if not download_url:
+                execute ( """INSERT INTO library_auto_imports ( source,source_book_id,title,lang,status,detail,created_at)
+                           VALUES ( 'gutenberg',?,?,?,'skipped','EPUB/TXT yoki ruxsatli HTTPS manzil yoq',?)
+                           ON CONFLICT ( source,source_book_id) DO UPDATE SET status='skipped',detail=excluded.detail,created_at=excluded.created_at""",
+                        (sid,str ( item.get ( 'title') or '' ) [:250],lang,now (  )  ) )
+                continue
+            return item,lang,ext,mime,download_url
+        if data.get ( 'next' ) :
+            page+=1; _autobook_state_set ( 'page:'+lang,page)
+        else:
+            page=1; _autobook_state_set ( 'page:'+lang,1 ) ; return None
+    return None
+
+
+async def autobook_import_one ( ctx,lang=None ) :
+    lang=lang if lang in AUTOBOOK_LANGS else AUTOBOOK_LANGS[0]
+    candidate=await asyncio.to_thread ( _autobook_candidate_for_lang,lang)
+    if not candidate:
+        return ('empty',None)
+    item,lang,ext,mime,url=candidate; sid=str ( item['id'] ) ; title=str ( item.get ( 'title') or 'Nomsiz kitob' ) .strip (  ) [:250]
+    try:
+        execute ( """INSERT INTO library_auto_imports ( source,source_book_id,title,lang,source_url,status,detail,created_at)
+                   VALUES ( 'gutenberg',?,?,?,?, 'downloading','',?)
+                   ON CONFLICT ( source,source_book_id) DO UPDATE SET title=excluded.title,lang=excluded.lang,
+                   source_url=excluded.source_url,status='downloading',detail='',created_at=excluded.created_at""",
+                (sid,title,lang,url,now (  )  ) )
+        raw=await asyncio.to_thread ( _autobook_bytes,url)
+        safe=re.sub ( r'[^0-9A-Za-zА-Яа-яЁё _.-]+','',title ) [:90].strip ( ) or ('book_'+sid)
+        filename=f'{safe}.{ext}'
+        import io as _autobook_io
+        buf=_autobook_io.BytesIO ( raw ) ; buf.name=filename
+        storage_chat=TG_STORAGE_CHAT_ID or LIBRARY_AUTO_CHAT_ID
+        if not storage_chat:
+            raise RuntimeError ( 'TG_STORAGE_CHAT_ID sozlanmagan')
+        sent=await ctx.bot.send_document ( chat_id=storage_chat,document=buf,filename=filename,
+            caption=f'📚 AUTOBOOK • Gutenberg #{sid}\n{title}'[:1000])
+        doc=sent.document
+        if not doc:
+            raise RuntimeError ( 'Telegram document qaytarmadi')
+        author=_autobook_author ( item)
+        uniq=doc.file_unique_id or ''
+        dup=one ( "SELECT id FROM library_books WHERE status='approved' AND (book_unique_id=? OR pdf_unique_id=? ) ", ( uniq,uniq ) ) if uniq else None
+        if not dup:
+            dup=one ( "SELECT id FROM library_books WHERE status='approved' AND lower ( trim ( title )  ) =lower ( trim ( ? ) ) AND lower ( trim ( author )  ) =lower ( trim ( ? )  ) ", ( title,author ) )
+        if dup:
+            bid=int ( dup['id'])
+            execute ( "UPDATE library_auto_imports SET book_id=?,status='duplicate',detail='Kutubxonada mavjud',created_at=? WHERE source='gutenberg' AND source_book_id=?", ( bid,now (  ) ,sid ) )
+            return ('duplicate',bid)
+        with db ( ) as c:
+            bid=c.execute ( """INSERT INTO library_books ( title,author,lang,description,added_by,status,created_at,
+                book_file_id,book_unique_id,book_file_name,book_format,book_file_size,pdf_file_id,pdf_unique_id)
+                VALUES ( ?,?,?,?,0,'approved',?,?,?,?,?,?,?,? ) """,
+                (title,author,lang,_autobook_desc ( item ) ,now (  ) ,doc.file_id,uniq,filename,ext,int ( doc.file_size or len ( raw )  ) ,'','' )  ) .lastrowid
+            cats= ( item.get ( 'bookshelves') or item.get ( 'subjects') or [] ) [:5]
+            for cat in cats:
+                cat=str ( cat ) .strip (  ) [:100]
+                if not cat: continue
+                c.execute ( "INSERT OR IGNORE INTO library_categories ( name) VALUES ( ? ) ", ( cat, ) )
+                cr=c.execute ( "SELECT id FROM library_categories WHERE name=? COLLATE NOCASE", ( cat, )  ) .fetchone ( )
+                if cr: c.execute ( "INSERT OR IGNORE INTO library_book_categories ( book_id,category_id) VALUES ( ?,? ) ", ( bid,cr['id'] ) )
+            c.execute ( "UPDATE library_auto_imports SET book_id=?,status='added',detail='',created_at=? WHERE source='gutenberg' AND source_book_id=?", ( bid,now (  ) ,sid ) )
+            c.execute ( "INSERT INTO audit ( actor_id,chat_id,action,detail,created_at) VALUES ( 0,0,'library_auto_add',?,? ) ", ( str ( bid ) ,now (  )  ) )
+        return ('added',bid)
+    except Exception as exc:
+        detail=str ( exc ) [:500]
+        permanent= ( '45 MB dan katta' in detail or 'HOST_NOT_ALLOWED' in detail)
+        status='skipped' if permanent else 'failed'
+        execute ( "UPDATE library_auto_imports SET status=?,detail=?,created_at=? WHERE source='gutenberg' AND source_book_id=?", ( status,detail,now (  ) ,sid ) )
+        log.warning ( 'AUTOBOOK failed Gutenberg id=%s lang=%s: %s',sid,lang,exc)
+        return (status,detail[:160])
+
+
+async def autobook_run ( ctx,limit=None ) :
+    if not AUTOBOOK_ENABLED:
+        return {'added':0,'duplicate':0,'failed':0,'skipped':0,'empty':1}
+    if AUTOBOOK_LOCK.locked (  ) :
+        return {'busy':1}
+    stats={'added':0,'duplicate':0,'failed':0,'skipped':0,'empty':0}
+    langs=list ( AUTOBOOK_LANGS ) ; wanted=limit or AUTOBOOK_PER_RUN
+    async with AUTOBOOK_LOCK:
+        rr=int ( _autobook_state_get ( 'rr','0') or 0) % len ( langs)
+        for slot in range ( wanted ) :
+            got=False
+            for offset in range ( len ( langs )  ) :
+                lang=langs[ ( rr+slot+offset ) %len ( langs ) ]
+                status,_value=await autobook_import_one ( ctx,lang)
+                stats[status]=stats.get ( status,0 ) +1
+                if status!='empty':
+                    got=True; break
+            if not got:
+                break
+        _autobook_state_set ( 'rr', ( rr+wanted ) %len ( langs ) )
+    return stats
+
+
 def main (  ) :
     if not TOKEN: raise RuntimeError ( "BOT_TOKEN kiritilmagan.")
     init_db ( )
@@ -8022,6 +8482,7 @@ def main (  ) :
     poster_init_db ( )
     i18n_init_db ( )
     app=Application.builder (  ) .bot ( VeritasI18nBot ( token=TOKEN )  ) .build ( )
+    app.add_handler ( MessageHandler ( filters.ChatType.GROUPS & filters.TEXT, veritas_wake_handler ) , group=-19)
     app.add_handler ( CallbackQueryHandler ( v12_help, pattern=r'^v12:help$' ) , group=-18)
     app.add_handler ( MessageHandler ( filters.ChatType.GROUPS & filters.TEXT, v12_natural_commands ) , group=-17)
     app.add_handler ( MessageHandler ( filters.TEXT & ~filters.StatusUpdate.ALL, v11_commands ) , group=-16)
