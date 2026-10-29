@@ -4050,7 +4050,9 @@ async def quiz_replace_message ( q, ctx, text, reply_markup=None ) :
         return await ctx.bot.send_message ( q.message.chat.id, text, reply_markup=reply_markup)
 
 async def _quiz_allowed_groups ( ctx,uid ) :
-    rows=all_ ( "SELECT chat_id,title FROM groups ORDER BY title" )
+    # Barcha mos guruhlarni qaytaramiz. Oldin bu yerda [:40] cheklovi bor edi,
+    # keyin menyuda yana [:20] kesilardi — shu sabab ayrim guruhlar ko‘rinmasdi.
+    rows=all_ ( "SELECT chat_id,title FROM groups ORDER BY title COLLATE NOCASE,chat_id" )
     out=[]
     for r in rows:
         cid=int ( r["chat_id"] )
@@ -4059,8 +4061,9 @@ async def _quiz_allowed_groups ( ctx,uid ) :
             continue
         try:
             if await is_tg_admin ( ctx.bot,cid,uid ): out.append ( (cid,r["title"] or str ( cid )) )
-        except Exception: pass
-    return out[:40]
+        except Exception:
+            pass
+    return out
 
 async def _download_large_telegram_file ( ctx, file_id, path ) :
     """
@@ -4969,24 +4972,53 @@ async def callback ( update,ctx ) :
         return
 
     if d.startswith ( "libquiz:" ) :
-        bid=int ( d.split ( ":" )[1] )
+        parts=d.split ( ":")
+        try:
+            bid=int ( parts[1])
+            page=max ( 0,int ( parts[2] ) ) if len ( parts ) >2 else 0
+        except (ValueError,IndexError ) :
+            return await q.answer ( "Noto‘g‘ri so‘rov.",show_alert=True)
         r=one ( "SELECT title,pdf_file_id FROM library_books WHERE id=? AND status='approved'", ( bid,) )
         if not r or not r["pdf_file_id"]: return await q.answer ( "Kitob fayli mavjud emas",show_alert=True )
         groups=await _quiz_allowed_groups ( ctx,u.id )
         if not groups:
             return await quiz_replace_message ( q,ctx,"👥 Test yuborish uchun Veritas ishlayotgan kamida bitta guruhda admin bo‘lishingiz kerak.",reply_markup=InlineKeyboardMarkup ( [[InlineKeyboardButton ( "⬅️ Kitob",callback_data=f"libbook:{bid}" ) ]] ) )
+
+        # Telegram menyusini haddan tashqari uzun qilmaymiz: barcha guruhlar
+        # sahifalanadi. Oldingi kod faqat birinchi 20 tasini ko‘rsatardi.
+        per=10
+        total=len ( groups)
+        pages=max ( 1, ( total+per-1 ) //per)
+        page=min ( page,pages-1)
+        start=page*per
         kb=[]
-        for cid,title in groups[:20]: kb.append ( [InlineKeyboardButton ( "👥 "+title[:35],callback_data=f"libqgrp:{bid}:{cid}" ) ] )
-        kb.append ( [InlineKeyboardButton ( "⬅️ Kitob",callback_data=f"libbook:{bid}" ) ] )
-        return await quiz_replace_message ( q,ctx,f"🧠 TEST TUZISH\n\n📖 {r['title']}\n\nTest qaysi guruhga yuborilsin?",reply_markup=InlineKeyboardMarkup ( kb ) )
+        for cid,title in groups[start:start+per]:
+            kb.append ( [InlineKeyboardButton ( "👥 "+title[:35],callback_data=f"libqgrp:{bid}:{cid}:{page}" ) ])
+        nav=[]
+        if page>0:
+            nav.append ( InlineKeyboardButton ( "◀️",callback_data=f"libquiz:{bid}:{page-1}" ) )
+        nav.append ( InlineKeyboardButton ( f"{page+1}/{pages}",callback_data=f"libquiz:{bid}:{page}" ) )
+        if page+1<pages:
+            nav.append ( InlineKeyboardButton ( "▶️",callback_data=f"libquiz:{bid}:{page+1}" ) )
+        if nav:
+            kb.append ( nav)
+        kb.append ( [InlineKeyboardButton ( "⬅️ Kitob",callback_data=f"libbook:{bid}" ) ])
+        return await quiz_replace_message ( q,ctx,f"🧠 TEST TUZISH\n\n📖 {r['title']}\n\nTest qaysi guruhga yuborilsin?\n👥 Jami: {total} ta guruh",reply_markup=InlineKeyboardMarkup ( kb ) )
 
     if d.startswith ( "libqgrp:" ) :
-        _,sbid,schat=d.split ( ":" ); bid=int ( sbid ); chat_id=int ( schat )
+        parts=d.split ( ":")
+        if len ( parts) not in (3,4 ) :
+            return await q.answer ( "Noto‘g‘ri so‘rov.",show_alert=True)
+        _,sbid,schat=parts[:3]
+        try:
+            bid=int ( sbid ) ; chat_id=int ( schat ) ; page=max ( 0,int ( parts[3] ) ) if len ( parts ) ==4 else 0
+        except ValueError:
+            return await q.answer ( "Noto‘g‘ri so‘rov.",show_alert=True)
         if not is_super ( u.id ) and not await is_tg_admin ( ctx.bot,chat_id,u.id ):
             return await q.answer ( "Bu guruhda admin emassiz.",show_alert=True )
         gr=one ( "SELECT title FROM groups WHERE chat_id=?", ( chat_id,) ); book=one ( "SELECT title FROM library_books WHERE id=?", ( bid,) )
         if not gr or not book: return await q.answer ( "Kitob yoki guruh topilmadi.",show_alert=True )
-        kb=InlineKeyboardMarkup ( [[InlineKeyboardButton ( "5 ta",callback_data=f"libqrun:{bid}:{chat_id}:5" ),InlineKeyboardButton ( "10 ta",callback_data=f"libqrun:{bid}:{chat_id}:10" ),InlineKeyboardButton ( "20 ta",callback_data=f"libqrun:{bid}:{chat_id}:20" )],[InlineKeyboardButton ( "⬅️ Guruhlar",callback_data=f"libquiz:{bid}" ) ]] )
+        kb=InlineKeyboardMarkup ( [[InlineKeyboardButton ( "5 ta",callback_data=f"libqrun:{bid}:{chat_id}:5" ),InlineKeyboardButton ( "10 ta",callback_data=f"libqrun:{bid}:{chat_id}:10" ),InlineKeyboardButton ( "20 ta",callback_data=f"libqrun:{bid}:{chat_id}:20" )],[InlineKeyboardButton ( "⬅️ Guruhlar",callback_data=f"libquiz:{bid}:{page}" ) ]] )
         return await quiz_replace_message ( q,ctx,f"🧠 TEST TUZISH\n\n📖 {book['title']}\n👥 {gr['title']}\n\nNechta test tuzilsin?",reply_markup=kb )
 
     if d.startswith ( "libqrun:" ) :
@@ -8466,6 +8498,192 @@ async def autobook_run ( ctx,limit=None ) :
     return stats
 
 
+
+# =========================================================
+# GROUP FUZZY BOOK REQUESTS
+# "Veritas, Mehrobdan chayon kitobini ber" kabi so'rovlarni
+# xato yozilgan nom bilan ham Vasatiya kutubxonasidan topadi.
+# Tashqi internetdan kitob uydirmaydi: faqat library_books bazasi.
+# =========================================================
+_GROUP_BOOK_FILLERS = {
+    'veritas','kitob','kitobi','kitobni','kitobini','kitobdan','kitobcha',
+    'asar','asari','asarni','roman','romani','pdf','epub','fayl','file',
+    'menga','bizga','shu','shuni','iltimos','qani','bormi','bor','kerak',
+    'top','topib','qidir','qidirib','ber','bering','bersang','bersangiz',
+    'yubor','yuboring','yuborsang','tashla','tashlang','chiqar','chiqarib',
+    'olib','kel','keling','uchun','haqida'
+}
+
+_GROUP_BOOK_CYR = str.maketrans ( {
+    'а':'a','б':'b','в':'v','г':'g','д':'d','е':'e','ё':'yo','ж':'j','з':'z',
+    'и':'i','й':'y','к':'k','л':'l','м':'m','н':'n','о':'o','п':'p','р':'r',
+    'с':'s','т':'t','у':'u','ф':'f','х':'x','ц':'ts','ч':'ch','ш':'sh',
+    'ъ':'','ь':'','э':'e','ю':'yu','я':'ya','қ':'q','ғ':'g','ў':'o','ҳ':'h'
+})
+
+def _group_book_norm ( text ) :
+    import unicodedata
+    x=unicodedata.normalize ( 'NFKD',str ( text or '' ) .casefold (  ) )
+    x=x.translate ( _GROUP_BOOK_CYR)
+    x=x.replace ( 'ʻ',"'" ) .replace ( '’',"'" ) .replace ( '‘',"'" ) .replace ( '`',"'")
+    x=''.join ( ch for ch in x if not unicodedata.combining ( ch ) )
+    x=x.replace ( "'",'')
+    x=re.sub ( r'[^a-z0-9]+',' ',x)
+    return re.sub ( r'\s+',' ',x ) .strip ( )
+
+def _group_book_words ( text, drop_fillers=False ) :
+    words=_group_book_norm ( text ) .split ( )
+    if drop_fillers:
+        words=[w for w in words if w not in _GROUP_BOOK_FILLERS]
+    return words
+
+def _group_book_query ( text, bot_username='' ) :
+    """Return (query, explicit_book_intent, addressed ) ."""
+    raw=str ( text or '')
+    low=_group_book_norm ( raw)
+    addressed=bool ( re.search ( r'\bveritas\b',low,re.I ) )
+    if bot_username:
+        addressed=addressed or ('@'+bot_username.casefold (  ) .lstrip ( '@') in raw.casefold (  ) )
+    if not addressed:
+        return '',False,False
+    explicit=bool ( re.search ( r'\b ( kitob\w*|asar\w*|roman\w*|pdf\w*|epub\w*|fayl\w* ) \b',low,re.I ) )
+    # Remove @botusername before normalization/filler cleanup.
+    cleaned=raw
+    if bot_username:
+        cleaned=re.sub ( r'@'+re.escape ( bot_username.lstrip ( '@' )  ) , ' ', cleaned, flags=re.I)
+    words=_group_book_words ( cleaned,drop_fillers=True)
+    return ' '.join ( words ) .strip (  ) ,explicit,True
+
+def _group_book_score ( query,title,author='' ) :
+    """0..1 fuzzy score. Token matching tolerates small spelling mistakes."""
+    from difflib import SequenceMatcher
+    q=_group_book_norm ( query ) ; t=_group_book_norm ( title ) ; a=_group_book_norm ( author)
+    if not q or not t:return 0.0
+    if q==t:return 1.0
+    if q in t or t in q:
+        # Exact phrase inside a longer title/edition string.
+        return 0.985
+    qtok=[w for w in q.split ( ) if len ( w ) >1]
+    ttok=[w for w in t.split ( ) if len ( w ) >1]
+    if not qtok or not ttok:return SequenceMatcher ( None,q,t ) .ratio ( )
+    token_best=[]
+    for qw in qtok:
+        best=max (  ( SequenceMatcher ( None,qw,tw ) .ratio ( ) for tw in ttok ) ,default=0.0)
+        token_best.append ( best)
+    token_avg=sum ( token_best ) /len ( token_best)
+    strong=sum ( 1 for x in token_best if x>=0.72 ) /len ( token_best)
+    whole=SequenceMatcher ( None,q,t ) .ratio ( )
+    # Query may contain author name too; use the combined field as a weaker signal.
+    combo= ( t+' '+a ) .strip ( )
+    combo_whole=SequenceMatcher ( None,q,combo ) .ratio ( ) if combo else 0.0
+    score=max ( whole,0.72*token_avg+0.20*strong+0.08*combo_whole)
+    # Single-word queries need a stronger spelling match to avoid random books.
+    if len ( qtok ) ==1:
+        score=max ( whole,token_best[0]*0.96)
+    return min ( 1.0,score)
+
+def group_book_matches ( query,limit=6 ) :
+    rows=all_ ( """SELECT id,title,author,lang,book_file_id,pdf_file_id,book_file_name,book_format
+                 FROM library_books WHERE status='approved' ORDER BY id DESC""")
+    ranked=[]
+    for r in rows:
+        score=_group_book_score ( query,r['title'] or '',r['author'] or '')
+        if score>=0.54:
+            ranked.append (  ( score,r ) )
+    ranked.sort ( key=lambda x: ( -x[0],-int ( x[1]['id'] )  ) )
+    return ranked[:max ( 1,int ( limit )  ) ]
+
+async def _group_send_book_file ( msg,ctx,book ) :
+    """Send the real stored book file into the same group; never invent a file."""
+    candidates=[]
+    for raw in (book['book_file_id'],book['pdf_file_id'] ) :
+        fid=str ( raw or '' ) .strip ( )
+        if fid and fid not in candidates:candidates.append ( fid)
+    title=str ( book['title'] or 'Kitob' ) [:700]
+    author=str ( book['author'] or '' ) .strip (  ) [:180]
+    caption='📚 '+title+ ( f'\n✍️ {author}' if author else '' ) +'\nVasatiya kutubxonasi'
+    for fid in candidates:
+        try:
+            await ctx.bot.send_document(
+                chat_id=msg.chat.id,document=fid,caption=caption[:1024],
+                reply_to_message_id=msg.message_id
+            )
+        except BadRequest as exc:
+            if library_invalid_file_error ( exc ) :
+                log.warning ( 'GROUP_BOOK invalid file id book_id=%s',book['id'])
+                continue
+            log.warning ( 'GROUP_BOOK Telegram rejected book_id=%s: %s',book['id'],exc)
+            break
+        except TelegramError as exc:
+            log.warning ( 'GROUP_BOOK send failed book_id=%s: %s',book['id'],exc)
+            break
+        else:
+            try:execute ( 'UPDATE library_books SET downloads=COALESCE ( downloads,0 ) +1 WHERE id=?', ( book['id'], ) )
+            except sqlite3.Error:pass
+            return True
+    await msg.reply_text(
+        f"📖 {title}\n\nKitob topildi, lekin saqlangan fayl hozir yuborilmadi.",
+        reply_markup=InlineKeyboardMarkup ( [[InlineKeyboardButton ( '📖 Kitobni ochish',callback_data=f"libbook:{book['id']}" ) ]])
+    )
+    return False
+
+async def group_book_request_handler ( update,ctx ) :
+    msg=update.effective_message;chat=update.effective_chat;user=update.effective_user
+    if not msg or not chat or chat.type not in ('group','supergroup') or not user or user.is_bot or not msg.text:return
+    if msg.sender_chat:return
+    if v11_game_question_reply ( update ) :return
+    query,explicit,addressed=_group_book_query ( msg.text,ctx.bot.username or '')
+    if not addressed:return
+    # Very short non-book messages such as "Veritas salom" must remain normal AI chat.
+    if not query and not explicit:return
+    matches=await asyncio.to_thread ( group_book_matches,query,6) if query else []
+    # Without an explicit "book" word, intercept only a very strong title match.
+    if not explicit and (not matches or matches[0][0]<0.90 ) :
+        return
+    marker= ( chat.id,msg.message_id)
+    V12_CONSUMED[marker]=now ( )
+    if not matches:
+        await msg.reply_text(
+            "📚 Vasatiya kutubxonasidan bu nomga yaqin kitob topilmadi.\n"
+            "Nomini boshqacharoq yozib ko‘ring."
+        )
+        raise _V11HandlerStop
+    top_score,top=matches[0]
+    second=matches[1][0] if len ( matches ) >1 else 0.0
+    # Strong match -> immediately send the book to the group.
+    if top_score>=0.78 and (len ( matches ) ==1 or top_score-second>=0.035 ) :
+        await _group_send_book_file ( msg,ctx,top)
+        raise _V11HandlerStop
+    # Ambiguous typo -> let the user choose, still only from real library rows.
+    good=[ ( s,r) for s,r in matches if s>=max ( 0.56,top_score-0.12 ) ][:5]
+    kb=[[InlineKeyboardButton(
+            '📖 '+str ( r['title'] or 'Nomsiz' ) [:48],callback_data=f"gbook:{r['id']}"
+        )] for s,r in good]
+    await msg.reply_text(
+        "📚 Nomda xato bo‘lishi mumkin. Qaysi kitobni nazarda tutdingiz?",
+        reply_markup=InlineKeyboardMarkup ( kb)
+    )
+    raise _V11HandlerStop
+
+async def group_book_callback ( update,ctx ) :
+    q=update.callback_query
+    if not q or not q.data or not q.message:return
+    try:bid=int ( q.data.split ( ':',1 ) [1])
+    except (ValueError,IndexError ) :
+        await q.answer ( 'Noto‘g‘ri kitob.',show_alert=True ) ;raise _V11HandlerStop
+    book=one ( """SELECT id,title,author,lang,book_file_id,pdf_file_id,book_file_name,book_format
+                FROM library_books WHERE id=? AND status='approved'""", ( bid, ) )
+    if not book:
+        await q.answer ( 'Kitob topilmadi.',show_alert=True ) ;raise _V11HandlerStop
+    await q.answer ( '📚 Kitob yuborilyapti...')
+    # Callback xabarini oddiy message kabi helperga uzatamiz.
+    await _group_send_book_file ( q.message,ctx,book)
+    raise _V11HandlerStop
+
+# =========================================================
+# END GROUP FUZZY BOOK REQUESTS
+# =========================================================
+
 def main (  ) :
     if not TOKEN: raise RuntimeError ( "BOT_TOKEN kiritilmagan.")
     init_db ( )
@@ -8484,6 +8702,8 @@ def main (  ) :
     app=Application.builder (  ) .bot ( VeritasI18nBot ( token=TOKEN )  ) .build ( )
     app.add_handler ( MessageHandler ( filters.ChatType.GROUPS & filters.TEXT, veritas_wake_handler ) , group=-19)
     app.add_handler ( CallbackQueryHandler ( v12_help, pattern=r'^v12:help$' ) , group=-18)
+    app.add_handler ( CallbackQueryHandler ( group_book_callback, pattern=r'^gbook:' ) , group=-18)
+    app.add_handler ( MessageHandler ( filters.ChatType.GROUPS & filters.TEXT, group_book_request_handler ) , group=-18)
     app.add_handler ( MessageHandler ( filters.ChatType.GROUPS & filters.TEXT, v12_natural_commands ) , group=-17)
     app.add_handler ( MessageHandler ( filters.TEXT & ~filters.StatusUpdate.ALL, v11_commands ) , group=-16)
     app.add_handler ( CallbackQueryHandler ( v11_callback, pattern=r"^z11:" ) , group=-16)
