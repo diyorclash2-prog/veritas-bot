@@ -8726,12 +8726,21 @@ BOOK_CHANNEL_PENDING_FORWARDS = {}
 
 
 def book_channel_init_db (  ) :
+    """Upgrade both fresh and existing channel-Zakovat tables, without deleting data.
+
+    An existing table is left unchanged by CREATE TABLE IF NOT EXISTS.  In old
+    Railway volumes the missing discussion_group_id made CREATE INDEX crash the
+    entire bot.  Create tables first, ADD missing columns, THEN create indexes.
+    Safe to call again on each deployment.
+    """
     with db ( ) as c:
-        c.executescript ( '''
+        # Step 1: create only tables, never indexes before migrating columns.
+        c.executescript ( """
         CREATE TABLE IF NOT EXISTS book_channel_links(
           group_id INTEGER PRIMARY KEY, group_title TEXT DEFAULT '',
           channel_id INTEGER DEFAULT 0, channel_title TEXT DEFAULT '',
-          bot_can_post INTEGER DEFAULT 0, updated_at INTEGER NOT NULL, diagnostic TEXT DEFAULT '' ) ;
+          bot_can_post INTEGER DEFAULT 0, updated_at INTEGER NOT NULL,
+          diagnostic TEXT DEFAULT '' ) ;
 
         CREATE TABLE IF NOT EXISTS book_channel_games(
           id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -8745,13 +8754,7 @@ def book_channel_init_db (  ) :
           channel_message_id INTEGER DEFAULT 0,
           discussion_message_id INTEGER DEFAULT 0,
           created_at INTEGER NOT NULL, finished_at INTEGER DEFAULT 0,
-          report_message_id INTEGER DEFAULT 0,
-          delivery_error TEXT DEFAULT '' ) ;
-        CREATE UNIQUE INDEX IF NOT EXISTS idx_book_channel_one_live
-          ON book_channel_games ( channel_id)
-          WHERE status IN ('preparing','running','paused' ) ;
-        CREATE INDEX IF NOT EXISTS idx_book_channel_discussion_live
-          ON book_channel_games ( discussion_group_id,status,phase ) ;
+          report_message_id INTEGER DEFAULT 0, delivery_error TEXT DEFAULT '' ) ;
 
         CREATE TABLE IF NOT EXISTS book_channel_rounds(
           game_id INTEGER NOT NULL, round_no INTEGER NOT NULL,
@@ -8760,10 +8763,6 @@ def book_channel_init_db (  ) :
           discussion_message_id INTEGER NOT NULL DEFAULT 0,
           opened_at REAL DEFAULT 0, deadline REAL DEFAULT 0,
           PRIMARY KEY ( game_id,round_no )  ) ;
-        CREATE INDEX IF NOT EXISTS idx_book_channel_round_discussion
-          ON book_channel_rounds ( discussion_group_id,discussion_message_id ) ;
-        CREATE INDEX IF NOT EXISTS idx_book_channel_round_channel
-          ON book_channel_rounds ( channel_id,channel_message_id ) ;
 
         CREATE TABLE IF NOT EXISTS book_channel_players(
           game_id INTEGER NOT NULL, user_id INTEGER NOT NULL, name TEXT NOT NULL,
@@ -8778,12 +8777,125 @@ def book_channel_init_db (  ) :
           correct_rank INTEGER DEFAULT 0, points INTEGER DEFAULT 0,
           elapsed REAL DEFAULT 0, created_at REAL NOT NULL,
           PRIMARY KEY ( game_id,round_no,user_id )  ) ;
+        """)
+
+        # Step 2: migrate old schemas BEFORE any indexes using those fields.
+        # All additions have SQLite-compatible defaults, so old rows remain valid.
+        required = {
+            'book_channel_links': {
+                'group_title': "TEXT DEFAULT ''",
+                'channel_id': 'INTEGER DEFAULT 0',
+                'channel_title': "TEXT DEFAULT ''",
+                'bot_can_post': 'INTEGER DEFAULT 0',
+                'updated_at': 'INTEGER DEFAULT 0',
+                'diagnostic': "TEXT DEFAULT ''",
+            },
+            'book_channel_games': {
+                'book_id': 'INTEGER DEFAULT 0',
+                'creator_id': 'INTEGER DEFAULT 0',
+                'channel_id': 'INTEGER DEFAULT 0',
+                'discussion_group_id': 'INTEGER DEFAULT 0',
+                'title': "TEXT DEFAULT ''",
+                'questions_json': "TEXT DEFAULT '[]'",
+                'status': "TEXT DEFAULT 'preparing'",
+                'round_no': 'INTEGER DEFAULT -1',
+                'phase': "TEXT DEFAULT 'preparing'",
+                'deadline': 'INTEGER DEFAULT 0',
+                'round_started': 'INTEGER DEFAULT 0',
+                'channel_message_id': 'INTEGER DEFAULT 0',
+                'discussion_message_id': 'INTEGER DEFAULT 0',
+                'created_at': 'INTEGER DEFAULT 0',
+                'finished_at': 'INTEGER DEFAULT 0',
+                'report_message_id': 'INTEGER DEFAULT 0',
+                'delivery_error': "TEXT DEFAULT ''",
+            },
+            'book_channel_rounds': {
+                'channel_id': 'INTEGER DEFAULT 0',
+                'discussion_group_id': 'INTEGER DEFAULT 0',
+                'channel_message_id': 'INTEGER DEFAULT 0',
+                'discussion_message_id': 'INTEGER DEFAULT 0',
+                'opened_at': 'REAL DEFAULT 0',
+                'deadline': 'REAL DEFAULT 0',
+            },
+            'book_channel_players': {
+                'name': "TEXT DEFAULT ''",
+                'points': 'INTEGER DEFAULT 0',
+                'correct': 'INTEGER DEFAULT 0',
+                'elapsed': 'REAL DEFAULT 0',
+                'joined_at': 'INTEGER DEFAULT 0',
+            },
+            'book_channel_answers': {
+                'message_id': 'INTEGER DEFAULT 0',
+                'answer': "TEXT DEFAULT ''",
+                'correct': 'INTEGER DEFAULT 0',
+                'correct_rank': 'INTEGER DEFAULT 0',
+                'points': 'INTEGER DEFAULT 0',
+                'elapsed': 'REAL DEFAULT 0',
+                'created_at': 'REAL DEFAULT 0',
+            },
+        }
+        old_columns={}
+        for table, needed in required.items (  ) :
+            existing={row[1] for row in c.execute ( f'PRAGMA table_info ( {table} ) ' ) }
+            old_columns[table]=existing
+            for col, declaration in needed.items (  ) :
+                if col not in existing:
+                    c.execute ( f'ALTER TABLE {table} ADD COLUMN {col} {declaration}')
+                    log.info ( 'BOOK_CHANNEL schema upgraded: %s.%s',table,col)
+
+        # Restore older column names where available, rather than erasing records.
+        old_games=old_columns['book_channel_games']
+        old_rounds=old_columns['book_channel_rounds']
+        for old in ('group_id', 'answer_group_id', 'linked_group_id', 'discussion_id' ) :
+            if old in old_games:
+                c.execute ( f"""UPDATE book_channel_games SET discussion_group_id={old}
+                    WHERE COALESCE ( discussion_group_id,0 ) =0
+                    AND COALESCE ( {old},0 ) <>0""")
+            if old in old_rounds:
+                c.execute ( f"""UPDATE book_channel_rounds SET discussion_group_id={old}
+                    WHERE COALESCE ( discussion_group_id,0 ) =0
+                    AND COALESCE ( {old},0 ) <>0""")
+        c.execute ( """UPDATE book_channel_games
+            SET discussion_group_id= ( SELECT group_id FROM book_channel_links l
+                 WHERE l.channel_id=book_channel_games.channel_id
+                 ORDER BY updated_at DESC LIMIT 1)
+            WHERE COALESCE ( discussion_group_id,0 ) =0
+              AND EXISTS ( SELECT 1 FROM book_channel_links l
+                         WHERE l.channel_id=book_channel_games.channel_id
+                           AND l.channel_id<>0 ) """)
+        c.execute ( """UPDATE book_channel_rounds
+            SET discussion_group_id= ( SELECT g.discussion_group_id
+                 FROM book_channel_games g WHERE g.id=book_channel_rounds.game_id)
+            WHERE COALESCE ( discussion_group_id,0 ) =0
+              AND EXISTS ( SELECT 1 FROM book_channel_games g
+                 WHERE g.id=book_channel_rounds.game_id AND g.discussion_group_id<>0 ) """)
+        c.execute ( """UPDATE book_channel_rounds
+            SET channel_id= ( SELECT g.channel_id FROM book_channel_games g
+                WHERE g.id=book_channel_rounds.game_id)
+            WHERE COALESCE ( channel_id,0 ) =0
+              AND EXISTS ( SELECT 1 FROM book_channel_games g
+                 WHERE g.id=book_channel_rounds.game_id AND g.channel_id<>0 ) """)
+
+        # Step 3: indexes are safe now, including old partial databases.
+        # Do not destroy or silently rewrite existing games just to fit the
+        # unique live-game rule. If there are legacy duplicates, log and keep
+        # the bot running; new game creation also checks for a live game.
+        try:
+            c.execute ( """CREATE UNIQUE INDEX IF NOT EXISTS idx_book_channel_one_live
+                ON book_channel_games ( channel_id)
+                WHERE status IN ('preparing','running','paused' ) """)
+        except sqlite3.IntegrityError:
+            log.error ( 'BOOK_CHANNEL: duplicate active games; unique index deferred. Existing games preserved.')
+        c.executescript ( """
+        CREATE INDEX IF NOT EXISTS idx_book_channel_discussion_live
+          ON book_channel_games ( discussion_group_id,status,phase ) ;
+        CREATE INDEX IF NOT EXISTS idx_book_channel_round_discussion
+          ON book_channel_rounds ( discussion_group_id,discussion_message_id ) ;
+        CREATE INDEX IF NOT EXISTS idx_book_channel_round_channel
+          ON book_channel_rounds ( channel_id,channel_message_id ) ;
         CREATE INDEX IF NOT EXISTS idx_book_channel_answers_round
           ON book_channel_answers ( game_id,round_no,correct,correct_rank ) ;
-        ''')
-        cols={r[1] for r in c.execute ( 'PRAGMA table_info ( book_channel_links ) ' ) .fetchall (  ) }
-        if 'diagnostic' not in cols:
-            c.execute ( "ALTER TABLE book_channel_links ADD COLUMN diagnostic TEXT DEFAULT ''")
+        """)
 
 
 # v11_init_db main ( ) ichida allaqachon chaqiriladi; shu orqali yangi jadvallar ham yaratiladi.
