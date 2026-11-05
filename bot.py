@@ -29,7 +29,7 @@ except ImportError:
 
 from telegram import (
     Update, InlineKeyboardButton, InlineKeyboardMarkup, ReplyKeyboardMarkup, KeyboardButton, ChatPermissions,
-    LabeledPrice
+    LabeledPrice, ReactionTypeEmoji, ReplyParameters
 )
 from telegram.constants import ChatMemberStatus
 from telegram.error import TelegramError, BadRequest, Forbidden
@@ -5288,6 +5288,9 @@ def parse_duration ( v ) :
     return n*{'s':1,'m':60,'h':3600,'d':86400,'w':604800}[unit]
 
 def rose_content_kind ( msg ) :
+    # Kanalning Discussion guruhiga avtomatik yuborilgan xabari — spam forward emas.
+    # Uni o‘chirish kanal postining izohlarini ham yopib qo‘yadi.
+    if getattr ( msg, 'is_automatic_forward', False ) :return ''
     if msg.forward_origin:return 'forward'
     if msg.contact:return 'contact'
     if msg.location or msg.venue:return 'location'
@@ -5389,6 +5392,8 @@ async def star_text_router ( update,ctx ) :
 _original_passive=passive
 async def passive ( update,ctx ) :
     msg=update.effective_message; chat=update.effective_chat; u=update.effective_user
+    # Discussion kanal avtomatik forwardini Rose ham, oddiy passive ham o‘chirmasin.
+    if msg and getattr ( msg,'is_automatic_forward',False ) :return
     if msg and chat and u and not u.is_bot and chat.type in ('group','supergroup' ) :
         ensure_group ( chat ) ; rr=rose_row ( chat.id)
         if not await protected ( ctx.bot,chat.id,u.id) and not one ( 'SELECT 1 FROM approved WHERE chat_id=? AND user_id=?', ( chat.id,u.id )  ) :
@@ -8723,6 +8728,11 @@ BOOK_CHANNEL_ANSWER_QUEUES = {}
 BOOK_CHANNEL_ANSWER_WORKERS = {}
 BOOK_CHANNEL_ANSWER_SEEN = {}
 BOOK_CHANNEL_PENDING_FORWARDS = {}
+BOOK_CHANNEL_FEEDBACK_CONTEXTS = {}
+BOOK_CHANNEL_FEEDBACK_TASKS = {}
+BOOK_CHANNEL_FEEDBACK_SEM = asyncio.Semaphore ( 3)
+BOOK_CHANNEL_AI_VERIFY = os.getenv ( 'BOOK_CHANNEL_AI_VERIFY','1' ) .strip (  ) .lower ( ) not in ('0','false','off','no')
+BOOK_CHANNEL_AI_VERIFY_LIMIT = 60
 
 
 def book_channel_init_db (  ) :
@@ -8763,6 +8773,7 @@ def book_channel_init_db (  ) :
           channel_message_id INTEGER NOT NULL DEFAULT 0,
           discussion_message_id INTEGER NOT NULL DEFAULT 0,
           opened_at REAL DEFAULT 0, deadline REAL DEFAULT 0,
+          deleted_at INTEGER DEFAULT 0,
           PRIMARY KEY ( game_id,round_no )  ) ;
 
         CREATE TABLE IF NOT EXISTS book_channel_players(
@@ -8777,6 +8788,7 @@ def book_channel_init_db (  ) :
           answer TEXT NOT NULL, correct INTEGER NOT NULL DEFAULT 0,
           correct_rank INTEGER DEFAULT 0, points INTEGER DEFAULT 0,
           elapsed REAL DEFAULT 0, created_at REAL NOT NULL,
+          feedback_sent INTEGER DEFAULT 0,
           PRIMARY KEY ( game_id,round_no,user_id )  ) ;
         """)
 
@@ -8818,6 +8830,7 @@ def book_channel_init_db (  ) :
                 'discussion_message_id': 'INTEGER DEFAULT 0',
                 'opened_at': 'REAL DEFAULT 0',
                 'deadline': 'REAL DEFAULT 0',
+                'deleted_at': 'INTEGER DEFAULT 0',
             },
             'book_channel_players': {
                 'name': "TEXT DEFAULT ''",
@@ -8834,6 +8847,7 @@ def book_channel_init_db (  ) :
                 'points': 'INTEGER DEFAULT 0',
                 'elapsed': 'REAL DEFAULT 0',
                 'created_at': 'REAL DEFAULT 0',
+                'feedback_sent': 'INTEGER DEFAULT 0',
             },
         }
         old_columns={}
@@ -8994,23 +9008,212 @@ def _book_channel_points ( rank ) :
     return 10 if rank == 1 else 7 if rank == 2 else 5 if rank == 3 else 3
 
 
+def _book_channel_tokens ( text ) :
+    '''Uzbek case endings, possessives and common equivalent nouns.
+
+    Do not accept answers on a simple substring test: a partial unrelated word
+    must not become a correct answer.
+    '''
+    import unicodedata
+    s=unicodedata.normalize ( 'NFKC',str ( text or '' )  ) .casefold ( )
+    s=re.sub ( r"[ʻ‘’`'ʼ]",'',s)
+    raw=re.findall ( r'\w+',s,flags=re.U)
+    out=[]
+    synonyms={
+        'bazm':'ziyofat','mehmondorchilik':'ziyofat','mehmonnavozlik':'ziyofat',
+        'ziyofat':'ziyofat','tantana':'ziyofat',
+        'otkaz':'qil','uyushtir':'qil','tashkil':'qil','qil':'qil',
+        'panas':'pana','pana':'pana',
+        'derazan':'deraza','deraza':'deraza',
+    }
+    endings= ( 'larining','laridan','larida','larning','larimiz','laring','lardan','larga',
+             'ning','nini','lari','larni','larda','larga','niki','dan','iga','ini',
+             'lari','siga','sini','ning','siz','isi','iga','ida','ga','ni','da','si','i')
+    for w in raw:
+        if w in ('bu','shu','o‘sha','usha','bir','yaxshi','aynan','uchun','deb','edi','ekan' ) :
+            continue
+        for suffix in endings:
+            if len ( w ) >len ( suffix ) +3 and w.endswith ( suffix ) :
+                w=w[:-len ( suffix ) ];break
+        for suffix in ('ishni','ish','ishni','moqni','moq' ) :
+            if len ( w ) >len ( suffix ) +3 and w.endswith ( suffix ) :
+                w=w[:-len ( suffix ) ];break
+        for key,value in synonyms.items (  ) :
+            if w.startswith ( key) and len ( w ) -len ( key ) <=2:
+                w=value;break
+        if w in ('qil','qilish','qilishni','ekan' ) :
+            continue
+        if w:out.append ( w)
+    return out
+
+
 def _book_channel_answer_matches ( text, aliases ) :
     from difflib import SequenceMatcher
     got=v11_norm ( text)
-    if not got:
+    if not got or len ( got ) <2:
         return False
     norms=[v11_norm ( x) for x in (aliases or []) if v11_norm ( x ) ]
     if got in norms:
         return True
-    # Uzunroq javoblarda kichik imlo xatosiga ruxsat; qisqa javoblarda xato musbat bo‘lmasin.
-    for want in norms:
-        if min ( len ( got ) ,len ( want ) ) < 5:
-            continue
-        if abs ( len ( got ) -len ( want ) ) > max ( 2, int ( max ( len ( got ) ,len ( want )  ) *0.25 )  ) :
-            continue
-        if SequenceMatcher ( None,got,want ) .ratio ( ) >= 0.90:
+    candidate=_book_channel_tokens ( text)
+    if not candidate:return False
+    for original,want in zip ( aliases or [],norms ) :
+        # Minor typos only for sufficiently long complete answers.
+        if min ( len ( got ) ,len ( want )  ) >=5 and abs ( len ( got ) -len ( want )  ) <=max ( 2,int ( max ( len ( got ) ,len ( want )  ) *.22 )  ) :
+            if SequenceMatcher ( None,got,want ) .ratio (  ) >=.91:
+                return True
+        target=_book_channel_tokens ( original)
+        if not target:continue
+        # A short personal name can be accepted with Uzbek case suffixes.
+        if len ( candidate ) ==len ( target ) ==1:
+            a,b=candidate[0],target[0]
+            if a==b:return True
+            if min ( len ( a ) ,len ( b )  ) >=5 and SequenceMatcher ( None,a,b ) .ratio (  ) >=.92:
+                return True
+        # A full phrase with the same core tokens (or one extra modifier)
+        # counts; generic one-word fragments of a longer phrase do not.
+        if len ( candidate ) >=2 and len ( target ) >=2:
+            x=set ( candidate ) ;y=set ( target)
+            if x==y or (len ( x&y ) >=2 and (len ( x&y ) /max ( len ( x ) ,len ( y )  )  ) >=.8 ) :
+                return True
+        if len ( candidate ) ==1 and len ( target ) ==1 and candidate[0]==target[0]:
             return True
     return False
+
+
+def _book_channel_ai_recheck_sync ( question,aliases,why,candidates ) :
+    '''Strict, optional one-request adjudication of meaning-equivalent answers.
+
+    Return message IDs only. No extra points are created here. If API is down,
+    deterministic answers already scored remain intact.
+    '''
+    if not BOOK_CHANNEL_AI_VERIFY or not OPENAI_API_KEY or not candidates:
+        return set ( )
+    payload={
+        'model':OPENAI_MODEL,
+        'instructions':(
+            'Siz Zakovat hakamisiz. Sizga savol, kitobdan olingan to‘g‘ri javoblar, '
+            'izoh va ishtirokchi javoblari JSON orqali beriladi. '
+            'Faqat MA’NOSI AYNAN BIR XIL javobni qabul qiling. '
+            'Masalan "Zebi" va "Zebining", "ziyofat" va "bazm uyushtirish" '
+            'mos bo‘lishi mumkin. Noto‘g‘ri shaxs, joy, voqea, taxmin, javobning '
+            'juda umumiy qismi yoki qarama-qarshi ma’noni hech qachon qabul qilmang. '
+            'Javobni savoldagi fakt va IZOH bilan solishtiring. '
+            'Faqat {"accepted_ids":[son,...]} ko‘rinishidagi JSON qaytaring. '
+            'Ishonch yetarli bo‘lmasa IDni kiritmang.'
+        ),
+        'input':json.dumps ( {'question':question,'expected':aliases,'explanation':why,
+                            'candidates':candidates},ensure_ascii=False ) ,
+        'max_output_tokens':650
+    }
+    req=urllib.request.Request ( 'https://api.openai.com/v1/responses',
+        data=json.dumps ( payload,ensure_ascii=False ) .encode (  ) ,
+        headers={'Authorization':f'Bearer {OPENAI_API_KEY}','Content-Type':'application/json'},
+        method='POST')
+    try:
+        with urllib.request.urlopen ( req,timeout=25) as response:
+            data=json.loads ( response.read (  ) .decode (  ) )
+        raw=_clean_json_text ( _extract_response_text ( data ) )
+        verdict=json.loads ( raw)
+        valid={int ( x['id']) for x in candidates}
+        accepted={int ( i) for i in verdict.get ( 'accepted_ids',[]) if str ( i ) .lstrip ( '-' ) .isdigit (  ) }
+        return accepted&valid
+    except Exception as exc:
+        log.warning ( 'BOOK_CHANNEL semantic recheck unavailable: %s',str ( exc ) [:220])
+        return set ( )
+
+
+def _book_channel_regrade_round ( game_id,round_no,accepted_message_ids ) :
+    '''Recalculate ranks and every player's totals atomically, no double credit.'''
+    accepted={int ( i) for i in accepted_message_ids}
+    if not accepted:return []
+    newly_correct=[]
+    with db ( ) as c:
+        c.execute ( 'BEGIN IMMEDIATE')
+        rows=c.execute ( '''SELECT message_id,user_id,correct FROM book_channel_answers
+                          WHERE game_id=? AND round_no=? ORDER BY created_at,message_id''',
+                       (game_id,round_no )  ) .fetchall ( )
+        for r in rows:
+            if int ( r['message_id']) in accepted and not int ( r['correct'] ) :
+                c.execute ( '''UPDATE book_channel_answers SET correct=1 WHERE
+                  game_id=? AND round_no=? AND user_id=?''', ( game_id,round_no,r['user_id'] ) )
+                newly_correct.append ( int ( r['message_id'] ) )
+        rank=0
+        for r in rows:
+            is_correct=bool ( r['correct']) or int ( r['message_id']) in accepted
+            if is_correct:
+                rank+=1;pts=_book_channel_points ( rank)
+            else:pts=0
+            c.execute ( '''UPDATE book_channel_answers SET correct_rank=?,points=?
+                 WHERE game_id=? AND round_no=? AND user_id=?''',
+                 (rank if is_correct else 0,pts,game_id,round_no,r['user_id'] ) )
+        c.execute ( '''UPDATE book_channel_players SET
+                  points=COALESCE (  ( SELECT SUM ( a.points) FROM book_channel_answers a
+                      WHERE a.game_id=book_channel_players.game_id AND a.user_id=book_channel_players.user_id ) ,0 ) ,
+                  correct=COALESCE (  ( SELECT COUNT ( *) FROM book_channel_answers a
+                      WHERE a.game_id=book_channel_players.game_id AND a.user_id=book_channel_players.user_id AND a.correct=1 ) ,0 ) ,
+                  elapsed=COALESCE (  ( SELECT SUM ( a.elapsed) FROM book_channel_answers a
+                      WHERE a.game_id=book_channel_players.game_id AND a.user_id=book_channel_players.user_id AND a.correct=1 ) ,0)
+                  WHERE game_id=?''', ( game_id, ) )
+    return newly_correct
+
+
+def _book_channel_schedule_feedback ( ctx,game_id,round_no,message_id,chat_id ) :
+    # Scoring must not wait for potentially slow Telegram reactions.
+    task=ctx.application.create_task ( _book_channel_feedback ( ctx,game_id,round_no,message_id,chat_id ) )
+    tasks=BOOK_CHANNEL_FEEDBACK_TASKS.setdefault ( int ( game_id ) ,set (  ) )
+    tasks.add ( task)
+    task.add_done_callback ( lambda t:tasks.discard ( t ) )
+
+
+async def _book_channel_feedback ( ctx,game_id,round_no,message_id,chat_id ) :
+    async with BOOK_CHANNEL_FEEDBACK_SEM:
+        return await _book_channel_feedback_inner ( ctx,game_id,round_no,message_id,chat_id)
+
+
+async def _book_channel_feedback_inner ( ctx,game_id,round_no,message_id,chat_id ) :
+    row=one ( '''SELECT feedback_sent,correct FROM book_channel_answers
+               WHERE game_id=? AND round_no=? AND message_id=?''',
+            (game_id,round_no,message_id ) )
+    if not row or not row['correct'] or row['feedback_sent']:return
+    for emoji in ('🏆','👍' ) :
+        try:
+            await ctx.bot.set_message_reaction ( chat_id=chat_id,message_id=message_id,
+                                               reaction=[ReactionTypeEmoji ( emoji ) ])
+            break
+        except (TelegramError,AttributeError,TypeError) as exc:
+            log.debug ( 'BOOK_CHANNEL reaction %s unavailable: %s',emoji,str ( exc ) [:120])
+    try:
+        await ctx.bot.send_message ( chat_id=chat_id,
+            text='🏆 Qoyil! Javobingiz to‘g‘ri. Barakalla!',
+            reply_parameters=ReplyParameters ( message_id=message_id,allow_sending_without_reply=False ) )
+        execute ( '''UPDATE book_channel_answers SET feedback_sent=1 WHERE
+                   game_id=? AND round_no=? AND message_id=?''',
+                (game_id,round_no,message_id ) )
+    except TelegramError as exc:
+        log.warning ( 'BOOK_CHANNEL reply failed game=%s message=%s: %s',game_id,message_id,str ( exc ) [:150])
+
+
+async def _book_channel_delete_old_posts ( ctx,game_id,keep_round=None ) :
+    '''Delete only finished channel question posts, never discussion auto-forwards.
+
+    Current post is kept until a NEW post's discussion thread is alive.
+    This prevents old-post cleanup from temporarily removing the only comment
+    thread in the channel. When finished, delete remaining question posts.
+    '''
+    rows=all_ ( '''SELECT round_no,channel_id,channel_message_id FROM book_channel_rounds
+         WHERE game_id=? AND channel_message_id<>0 AND COALESCE ( deleted_at,0 ) =0
+         ORDER BY round_no''', ( game_id, ) )
+    for r in rows:
+        rn=int ( r['round_no'])
+        if keep_round is not None and rn>=int ( keep_round ) :continue
+        # Telegram delete limits can prevent deletion after 48 hours.
+        try:
+            await ctx.bot.delete_message ( int ( r['channel_id'] ) ,int ( r['channel_message_id'] ) )
+            execute ( '''UPDATE book_channel_rounds SET deleted_at=?
+                       WHERE game_id=? AND round_no=?''', ( now (  ) ,game_id,rn ) )
+        except TelegramError as exc:
+            log.warning ( 'BOOK_CHANNEL old post deletion failed game=%s round=%s: %s',game_id,rn,str ( exc ) [:200])
 
 
 def _book_channel_extract_questions ( raw_text, count ) :
@@ -9147,7 +9350,7 @@ def _book_channel_openai_sync ( path,title,count=BOOK_CHANNEL_QUESTION_COUNT,pro
                 'SAVOL VA JAVOB FAQAT BERILGAN PDF MATNI/SAHIFALARIDAGI FAKTLARGA TAYANSIN. '
                 'Tashqi bilim, uydirma, noaniq fikr va umumiy topishmoq bo‘lmasin. '
                 'Qiziqarli, tushunarli, bir-biridan farqli savollar bo‘lsin. '
-                'Har savolda q, answers (1-3 aniq javob varianti ) , why kalitlari bo‘lsin. '
+                'Har savolda q, answers (kamida 4, ko‘pi bilan 10 ta ma’nodosh va kelishik varianti, jumladan aniq ism va qisqa javob ) , why kalitlari bo‘lsin. '
                 'O‘zbek tilida FAQAT JSON MASSIV, hech qanday markdown yo‘q. '
                 'Namuna: [{"q":"Savol?","answers":["aniq javob"],"why":"qisqa izoh"}]. '
                 f'Bundan oldingi savollarni TAKRORLAMANG: {avoid or "yo‘q"}. '
@@ -9320,7 +9523,14 @@ async def _book_channel_answer_worker ( game_id ) :
             except asyncio.TimeoutError:
                 break
             try:
-                await asyncio.to_thread ( _book_channel_record_answer,*item)
+                verdict=await asyncio.to_thread ( _book_channel_record_answer,*item[:6])
+                if verdict=='correct':
+                    ctx=BOOK_CHANNEL_FEEDBACK_CONTEXTS.get ( game_id)
+                    if ctx:
+                        round_row=one ( 'SELECT round_no FROM book_channel_answers WHERE game_id=? AND user_id=? AND message_id=?',
+                                      (game_id,item[1],item[4] ) )
+                        if round_row:
+                            _book_channel_schedule_feedback ( ctx,game_id,int ( round_row['round_no'] ) ,int ( item[4] ) ,int ( item[6] ) )
             except Exception:
                 log.exception ( 'BOOK_CHANNEL answer worker failed game=%s',game_id)
             finally:
@@ -9338,10 +9548,11 @@ def _book_channel_queue_answer ( ctx,game,user_id,name,text,message_id,received_
     if key in seen:
         return 'duplicate'
     queue=BOOK_CHANNEL_ANSWER_QUEUES.get ( gid)
+    BOOK_CHANNEL_FEEDBACK_CONTEXTS[gid]=ctx
     if queue is None:
         queue=asyncio.Queue ( maxsize=3000 ) ; BOOK_CHANNEL_ANSWER_QUEUES[gid]=queue
     try:
-        queue.put_nowait (  ( gid,user_id,name,text,message_id,received_at ) )
+        queue.put_nowait (  ( gid,user_id,name,text,message_id,received_at,int ( game['discussion_group_id'] )  ) )
     except asyncio.QueueFull:
         return 'full'
     seen.add ( key)
@@ -9353,7 +9564,8 @@ def _book_channel_queue_answer ( ctx,game,user_id,name,text,message_id,received_
 
 async def _book_channel_drain ( ctx,game_id,timeout=10.0 ) :
     queue=BOOK_CHANNEL_ANSWER_QUEUES.get ( int ( game_id ) )
-    if queue is None or queue.empty (  ) :
+    # .empty ( ) is True even while a worker processes the last answer!
+    if queue is None:
         return True
     worker=BOOK_CHANNEL_ANSWER_WORKERS.get ( int ( game_id ) )
     if worker is None or worker.done (  ) :
@@ -9378,7 +9590,8 @@ async def book_channel_group_router ( update,ctx ) :
                    WHERE r.channel_id=? AND r.channel_message_id=?
                      AND g.status='running' ORDER BY r.game_id DESC LIMIT 1''', ( cid,mid ) )
         if row and int ( row['discussion_group_id'] ) ==int ( chat.id ) :
-            _book_channel_activate_forward ( int ( row['game_id'] ) ,int ( row['round_no'] ) ,chat.id,msg.message_id)
+            if _book_channel_activate_forward ( int ( row['game_id'] ) ,int ( row['round_no'] ) ,chat.id,msg.message_id ) :
+                ctx.application.create_task ( _book_channel_delete_old_posts ( ctx,int ( row['game_id'] ) ,int ( row['round_no'] )  ) )
         else:
             BOOK_CHANNEL_PENDING_FORWARDS[ ( cid,mid ) ]= ( chat.id,msg.message_id,time.time (  ) )
         return
@@ -9395,7 +9608,8 @@ async def book_channel_group_router ( update,ctx ) :
                    WHERE r.channel_id=? AND r.channel_message_id=? AND g.status='running'
                    ORDER BY r.game_id DESC LIMIT 1''', ( cid,mid ) )
         if row and int ( row['discussion_group_id'] ) ==int ( chat.id ) :
-            _book_channel_activate_forward ( int ( row['game_id'] ) ,int ( row['round_no'] ) ,chat.id,replied_to.message_id)
+            if _book_channel_activate_forward ( int ( row['game_id'] ) ,int ( row['round_no'] ) ,chat.id,replied_to.message_id ) :
+                ctx.application.create_task ( _book_channel_delete_old_posts ( ctx,int ( row['game_id'] ) ,int ( row['round_no'] )  ) )
     game=one ( '''SELECT g.* FROM book_channel_games g
                 JOIN book_channel_rounds r ON r.game_id=g.id AND r.round_no=g.round_no
                 WHERE g.discussion_group_id=? AND g.status='running' AND g.phase='asking'
@@ -9439,7 +9653,8 @@ async def _book_channel_publish_question ( ctx,game ) :
                      WHERE id=?''', ( idx,sent.message_id,now (  ) +90,gid ) )
     pending=BOOK_CHANNEL_PENDING_FORWARDS.pop (  ( int ( game['channel_id'] ) ,sent.message_id ) ,None)
     if pending and int ( pending[0] ) ==int ( game['discussion_group_id'] ) :
-        _book_channel_activate_forward ( gid,idx,int ( pending[0] ) ,int ( pending[1] ) )
+        if _book_channel_activate_forward ( gid,idx,int ( pending[0] ) ,int ( pending[1] )  ) :
+            ctx.application.create_task ( _book_channel_delete_old_posts ( ctx,gid,idx ) )
 
 
 def _book_channel_round_winners ( game_id,round_no ) :
@@ -9459,10 +9674,22 @@ async def _book_channel_close_round ( ctx,game ) :
     gid=int ( game['id'] ) ; round_no=int ( game['round_no'])
     await _book_channel_drain ( ctx,gid,timeout=12.0)
     game=one ( 'SELECT * FROM book_channel_games WHERE id=?', ( gid, ) )
-    if not game or game['status']!='running' or game['phase']!='asking':
+    if not game or game['status']!='running' or game['phase'] not in ('asking','closing' ) :
         return
     questions=json.loads ( game['questions_json'] ) ; item=questions[round_no]
     execute ( "UPDATE book_channel_games SET phase='closing' WHERE id=?", ( gid, ) )
+    if BOOK_CHANNEL_AI_VERIFY:
+        pending=all_ ( '''SELECT message_id,answer FROM book_channel_answers
+              WHERE game_id=? AND round_no=? AND correct=0 ORDER BY created_at,message_id
+              LIMIT ?''', ( gid,round_no,BOOK_CHANNEL_AI_VERIFY_LIMIT ) )
+        if pending:
+            candidates=[{'id':int ( r['message_id'] ) ,'answer':r['answer']} for r in pending]
+            accepted=await asyncio.to_thread ( _book_channel_ai_recheck_sync,
+                item['q'],item.get ( 'answers') or [],item.get ( 'why') or '',candidates)
+            if accepted:
+                changed=_book_channel_regrade_round ( gid,round_no,accepted)
+                for mid in changed:
+                    _book_channel_schedule_feedback ( ctx,gid,round_no,mid,int ( game['discussion_group_id'] ) )
     winners=_book_channel_round_winners ( gid,round_no)
     marks=['🥇','🥈','🥉']
     lines=[]
@@ -9483,11 +9710,12 @@ async def _book_channel_close_round ( ctx,game ) :
             text=closed[:4096],
             reply_markup=InlineKeyboardMarkup ( [[InlineKeyboardButton ( '🏆 Ballim',callback_data=f'bcz:score:{gid}' ) ]])
         )
-    except TelegramError:
-        try:
-            await ctx.bot.send_message ( int ( game['channel_id'] ) ,closed[:4096])
-        except TelegramError:
-            pass
+    except TelegramError as exc:
+        # Do not publish an untracked extra channel post; it would remain forever
+        # and create a separate comments thread. The result is in SQLite.
+        if 'message is not modified' not in str ( exc ) .lower (  ) :
+            log.warning ( 'BOOK_CHANNEL closing edit unavailable game=%s round=%s: %s',
+                        gid,round_no,str ( exc ) [:160])
     # Eski roundning in-memory duplicate kalitlarini tozalaymiz.
     seen=BOOK_CHANNEL_ANSWER_SEEN.get ( gid)
     if seen is not None:
@@ -9522,6 +9750,12 @@ async def _book_channel_finish ( ctx,game ) :
             await ctx.bot.send_message ( int ( game['creator_id'] ) ,f"✅ Kanal Kitob Zakovat #{gid} yakunlandi.\n📖 {game['title']}")
         except TelegramError:
             pass
+    feedback=list ( BOOK_CHANNEL_FEEDBACK_TASKS.get ( gid, (  )  ) )
+    if feedback:
+        await asyncio.wait ( feedback,timeout=15)
+    await _book_channel_delete_old_posts ( ctx,gid)
+    BOOK_CHANNEL_FEEDBACK_TASKS.pop ( gid,None)
+    BOOK_CHANNEL_FEEDBACK_CONTEXTS.pop ( gid,None)
     BOOK_CHANNEL_ANSWER_SEEN.pop ( gid,None)
     BOOK_CHANNEL_ANSWER_QUEUES.pop ( gid,None)
     BOOK_CHANNEL_ANSWER_WORKERS.pop ( gid,None)
@@ -9556,7 +9790,11 @@ async def book_channel_tick ( ctx ) :
                             reply_markup=_book_channel_control_markup ( gid ) )
                     except TelegramError:pass
                 elif phase=='asking':await _book_channel_close_round ( ctx,game)
-                elif phase in ('publishing','closing' ) :
+                elif phase=='closing':
+                    # Resume a close interrupted by deployment/restart; do not
+                    # skip the round or lose already recorded correct answers.
+                    await _book_channel_close_round ( ctx,game)
+                elif phase=='publishing':
                     execute ( "UPDATE book_channel_games SET status='paused',phase='delivery_error',delivery_error=? WHERE id=?",
                             (f'Jarayon {phase} bosqichida uzildi',gid ) )
             except Exception as exc:
