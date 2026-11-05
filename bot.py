@@ -8876,6 +8876,24 @@ def book_channel_init_db (  ) :
               AND EXISTS ( SELECT 1 FROM book_channel_games g
                  WHERE g.id=book_channel_rounds.game_id AND g.channel_id<>0 ) """)
 
+        # Some very old builds accidentally created a global UNIQUE ( channel_id)
+        # index. It blocks all future games even when the previous game ended.
+        # Replace only a named standalone index with the intended partial index.
+        # A SQLite autoindex created by a table-level UNIQUE constraint must not
+        # be dropped here: rebuilding the table would risk existing results.
+        for idx in c.execute ( 'PRAGMA index_list ( book_channel_games ) ' ) .fetchall (  ) :
+            if not idx['unique'] or idx['partial']:
+                continue
+            idx_name=str ( idx['name'])
+            cols=[r['name'] for r in c.execute(
+                'PRAGMA index_info ( "'+idx_name.replace ( '"','""' ) +'" ) ' ) .fetchall (  ) ]
+            if cols==['channel_id']:
+                if idx['origin']=='c':
+                    c.execute ( 'DROP INDEX "'+idx_name.replace ( '"','""' ) +'"')
+                    log.warning ( 'BOOK_CHANNEL: obsolete full unique index %s converted to partial live rule',idx_name)
+                else:
+                    log.error ( 'BOOK_CHANNEL: table-level UNIQUE ( channel_id) requires manual schema migration')
+
         # Step 3: indexes are safe now, including old partial databases.
         # Do not destroy or silently rewrite existing games just to fit the
         # unique live-game rule. If there are legacy duplicates, log and keep
@@ -8903,6 +8921,66 @@ _book_channel_old_v11_init_db = v11_init_db
 def v11_init_db (  ) :
     _book_channel_old_v11_init_db ( )
     book_channel_init_db ( )
+
+
+def _book_channel_active_game ( channel_id ) :
+    """Return an actual unfinished game, not an assumption based on a SQL error."""
+    return one ( """SELECT id,status,phase,created_at,round_no,channel_message_id,delivery_error
+                  FROM book_channel_games
+                  WHERE channel_id=? AND status IN ('preparing','running','paused')
+                  ORDER BY id DESC LIMIT 1""", ( int ( channel_id ) , ) )
+
+
+def _book_channel_create_game ( bid,actor,channel_id,group_id,title ) :
+    """Atomic start; honor older Railway schemas without overwriting old games.
+
+    Some original installs have mandatory legacy group_id/answer_group_id
+    columns. CREATE TABLE IF NOT EXISTS does not remove them, so supply the
+    corresponding group id when inserting a new row.
+    """
+    with db ( ) as c:
+        c.execute ( 'BEGIN IMMEDIATE')
+        active=c.execute ( """SELECT id FROM book_channel_games
+            WHERE channel_id=? AND status IN ('preparing','running','paused')
+            ORDER BY id DESC LIMIT 1""", ( int ( channel_id ) , )  ) .fetchone ( )
+        if active:
+            return None,int ( active['id'])
+        vals={
+            'book_id':int ( bid ) ,'creator_id':int ( actor ) ,
+            'channel_id':int ( channel_id ) ,'discussion_group_id':int ( group_id ) ,
+            'title':str ( title ) [:250],'questions_json':'[]',
+            'status':'preparing','round_no':-1,'phase':'preparing',
+            'deadline':0,'created_at':now (  ) ,
+        }
+        old_aliases={'group_id','answer_group_id','linked_group_id',
+                     'discussion_id','chat_id'}
+        for col in c.execute ( 'PRAGMA table_info ( book_channel_games ) ' ) .fetchall (  ) :
+            name=col['name']
+            if name in old_aliases:
+                # Fill older group-reference columns even when they were optional.
+                vals[name]=int ( group_id)
+                continue
+            if name in vals or col['pk'] or not col['notnull'] or col['dflt_value'] is not None:
+                continue
+            raise RuntimeError ( 'Eski book_channel_games jadvalida majburiy '
+                               f'{name!r} ustuni mavjud. Log orqali migratsiya kerak.')
+        fields=list ( vals)
+        placeholders=','.join ( '?' for _ in fields)
+        cols=','.join ( '"'+name+'"' for name in fields)
+        game_id=c.execute ( f'INSERT INTO book_channel_games ({cols}) VALUES ({placeholders} ) ',
+                          tuple ( vals[name] for name in fields )  ) .lastrowid
+        return int ( game_id ) ,None
+
+
+def _book_channel_no_played_rounds ( game_id,game ) :
+    """Only unstarted sessions can be cancelled without publishing a result."""
+    if int ( game['channel_message_id'] or 0 ) :
+        return False
+    if one ( 'SELECT 1 FROM book_channel_answers WHERE game_id=? LIMIT 1', ( game_id, )  ) :
+        return False
+    if one ( 'SELECT 1 FROM book_channel_rounds WHERE game_id=? AND channel_message_id<>0 LIMIT 1', ( game_id, )  ) :
+        return False
+    return True
 
 
 def _book_channel_lock ( game_id ) :
@@ -9561,8 +9639,22 @@ async def _book_channel_control_callback ( update,ctx ) :
              await is_tg_admin ( ctx.bot,int ( game['discussion_group_id'] ) ,uid ) )
     if not allowed:return await q.answer ( 'Faqat tashkilotchi yoki Discussion admini.',show_alert=True)
     if d.startswith ( 'bcz:status:' ) :
-        diag=str ( game['delivery_error'] or '' ) [:300] or 'Xato yo‘q.'
-        return await q.answer ( f"#{gid} | {game['status']} / {game['phase']} | Savol {int ( game['round_no'] ) +1}/{BOOK_CHANNEL_QUESTION_COUNT}\n{diag}"[:190],show_alert=True)
+        diag=str ( game['delivery_error'] or '' ) [:1100] or 'Xato yozilmagan.'
+        created=int ( game['created_at'] or 0)
+        dt=datetime.fromtimestamp ( created,timezone.utc ) .strftime ( '%Y-%m-%d %H:%M UTC') if created else 'Noma’lum'
+        posted=one ( 'SELECT COUNT ( *) n FROM book_channel_rounds WHERE game_id=? AND channel_message_id<>0', ( gid, ) )
+        body= ( f"📊 KITOB ZAKOVAT #{gid} HOLATI\n\n"
+              f"📢 Kanal ID: {game['channel_id']}\n"
+              f"💬 Discussion ID: {game['discussion_group_id']}\n"
+              f"📌 {game['status']} / {game['phase']}\n"
+              f"🕒 Yaratilgan: {dt}\n"
+              f"📝 Joylangan savollar: {int ( posted['n'] if posted else 0 ) }\n"
+              f"❓ Joriy savol: {max ( 0,int ( game['round_no'] ) +1 ) }/{BOOK_CHANNEL_QUESTION_COUNT}\n\n"
+              f"⚠️ Sabab/holat: {diag}\n\n"
+              "Bu o‘yin haqiqatan davom etmayotgan bo‘lsa, 🛑 To‘xtatish ni bosing. "
+              "Natijalar va tarix bazadan o‘chirilmaydi.")
+        await q.answer ( 'O‘yin holati pastda ko‘rsatildi.')
+        return await q.message.reply_text ( body[:3800],reply_markup=_book_channel_control_markup ( gid ) )
     if d.startswith ( 'bcz:resume:' ) :
         if game['status']!='paused':
             return await q.answer ( 'Bu o‘yin pauzada emas.',show_alert=True)
@@ -9588,12 +9680,18 @@ async def _book_channel_control_callback ( update,ctx ) :
                     (now (  ) +3,gid ) )
         return await q.answer ( '▶️ Qayta boshlandi. Keyingi post avtomatik chiqadi.',show_alert=True)
     if d.startswith ( 'bcz:stop:' ) :
-        await q.answer ( '🛑 Yakunlanmoqda...')
-        if game['status']=='preparing':
-            execute ( "UPDATE book_channel_games SET status='cancelled',phase='cancelled' WHERE id=?", ( gid, ) )
-            return
         if game['status'] in ('finished','failed','cancelled' ) :
-            return await q.message.reply_text ( f'ℹ️ O‘yin #{gid} allaqachon {game["status"]}.')
+            return await q.answer ( f'O‘yin #{gid} allaqachon {game["status"]}.',show_alert=True)
+        if game['status']=='preparing' or _book_channel_no_played_rounds ( gid,game ) :
+            changed=execute ( """UPDATE book_channel_games
+                SET status='cancelled',phase='cancelled',finished_at=?,
+                    delivery_error='Tashkilotchi tugmasi orqali to‘xtatildi'
+                WHERE id=? AND status IN ('preparing','running','paused' ) """, ( now (  ) ,gid )  ) .rowcount
+            await q.answer ( '🛑 Sessiya bekor qilindi; kanal blokdan chiqarildi.' if changed else 'Holat allaqachon o‘zgargan.',show_alert=True)
+            if changed:
+                return await q.message.reply_text ( f'✅ Kitob Zakovat #{gid} bekor qilindi. Eski savollar va ballar bazadan o‘chirilmagan.')
+            return
+        await q.answer ( '🛑 O‘yin yakunlanmoqda...')
         return await _book_channel_finish ( ctx,game)
     return await q.answer ( 'Noma’lum tugma.',show_alert=True)
 
@@ -9713,22 +9811,41 @@ async def callback ( update,ctx ) :
             return await q.answer ( 'Job Queue o‘rnatilmagan. python-telegram-bot[job-queue] kerak.',show_alert=True)
         if v11_live ( group_id ) :
             return await q.answer ( 'Bu Discussion guruhida oddiy Zakovat davom etmoqda.',show_alert=True)
-        live=one ( "SELECT id FROM book_channel_games WHERE channel_id=? AND status IN ('preparing','running','paused' ) ", ( channel_id, ) )
+        live=_book_channel_active_game ( channel_id)
         if live:
+            gid_old=int ( live['id'])
+            await q.answer ( f"Avvalgi o‘yin #{gid_old} bazada {live['status']} holatida.")
             return await q.message.reply_text(
-                f"⚠️ Kanalda avvalgi Kitob Zakovat #{live['id']} bor. Holatini tekshiring yoki to‘xtating:",
-                reply_markup=_book_channel_control_markup ( int ( live['id'] )  ) )
+                f"⚠️ Kanalda Kitob Zakovat #{gid_old} bazada faol deb ko‘rsatilgan.\n"
+                f"Holat: {live['status']} / {live['phase']}.\n"
+                "Kanalda savollar ko‘rinmasa, 📊 Holati tugmasini tekshiring va "
+                "🛑 To‘xtatish orqali shu sessiyani bekor qiling. Keyin qayta boshlang.",
+                reply_markup=_book_channel_control_markup ( gid_old ) )
         book=one ( "SELECT title,pdf_file_id FROM library_books WHERE id=? AND status='approved'", ( bid, ) )
         if not book or not book['pdf_file_id']:
             return await q.answer ( 'Kitob PDF’i topilmadi.',show_alert=True)
         try:
-            with db ( ) as c:
-                gid=c.execute ( '''INSERT INTO book_channel_games
-                    (book_id,creator_id,channel_id,discussion_group_id,title,questions_json,status,round_no,phase,deadline,created_at)
-                    VALUES ( ?,?,?,?,?,'[]','preparing',-1,'preparing',0,? ) ''',
-                    (bid,u.id,channel_id,group_id,book['title'][:250],now (  )  )  ) .lastrowid
-        except sqlite3.IntegrityError:
-            return await q.answer ( 'Bu kanalda boshqa Kitob Zakovat faol.',show_alert=True)
+            gid,existing_id=_book_channel_create_game ( bid,u.id,channel_id,group_id,book['title'])
+        except sqlite3.IntegrityError as exc:
+            # Prior code disguised *every* constraint error as "active game".
+            # Only report an active game if a real active row exists.
+            log.exception ( 'BOOK_CHANNEL INSERT integrity failure for channel=%s, group=%s',channel_id,group_id)
+            live=_book_channel_active_game ( channel_id)
+            if live:
+                await q.answer ( f"Bazada #{live['id']} sessiyasi bor.")
+                return await q.message.reply_text(
+                    f"⚠️ Eski Kitob Zakovat #{live['id']} sessiyasi topildi. "
+                    f"Holati: {live['status']} / {live['phase']}",
+                    reply_markup=_book_channel_control_markup ( int ( live['id'] )  ) )
+            return await q.answer ( 'SQLite cheklovi: '+str ( exc ) [:165],show_alert=True)
+        except (sqlite3.Error,RuntimeError) as exc:
+            log.exception ( 'BOOK_CHANNEL cannot create game for channel=%s',channel_id)
+            return await q.answer ( 'Baza xatosi: '+str ( exc ) [:170],show_alert=True)
+        if existing_id is not None:
+            await q.answer ( f'Bazada avvalgi #{existing_id} o‘yin bor.')
+            return await q.message.reply_text(
+                f'⚠️ Kitob Zakovat #{existing_id} sessiyasi tugamagan. Davom ettiring yoki to‘xtating.',
+                reply_markup=_book_channel_control_markup ( existing_id ) )
         await q.answer ( '🧠 30 ta savol tayyorlanmoqda...')
         ctx.application.create_task ( _book_channel_prepare ( ctx,gid ) ,update=None)
         try:
