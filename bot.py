@@ -8753,7 +8753,8 @@ def book_channel_init_db (  ) :
           deadline INTEGER DEFAULT 0, round_started INTEGER DEFAULT 0,
           channel_message_id INTEGER DEFAULT 0,
           discussion_message_id INTEGER DEFAULT 0,
-          created_at INTEGER NOT NULL, finished_at INTEGER DEFAULT 0,
+          created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL DEFAULT 0,
+          finished_at INTEGER DEFAULT 0,
           report_message_id INTEGER DEFAULT 0, delivery_error TEXT DEFAULT '' ) ;
 
         CREATE TABLE IF NOT EXISTS book_channel_rounds(
@@ -8805,6 +8806,7 @@ def book_channel_init_db (  ) :
                 'channel_message_id': 'INTEGER DEFAULT 0',
                 'discussion_message_id': 'INTEGER DEFAULT 0',
                 'created_at': 'INTEGER DEFAULT 0',
+                'updated_at': 'INTEGER DEFAULT 0',
                 'finished_at': 'INTEGER DEFAULT 0',
                 'report_message_id': 'INTEGER DEFAULT 0',
                 'delivery_error': "TEXT DEFAULT ''",
@@ -8945,12 +8947,13 @@ def _book_channel_create_game ( bid,actor,channel_id,group_id,title ) :
             ORDER BY id DESC LIMIT 1""", ( int ( channel_id ) , )  ) .fetchone ( )
         if active:
             return None,int ( active['id'])
+        created_ts=now ( )
         vals={
             'book_id':int ( bid ) ,'creator_id':int ( actor ) ,
             'channel_id':int ( channel_id ) ,'discussion_group_id':int ( group_id ) ,
             'title':str ( title ) [:250],'questions_json':'[]',
             'status':'preparing','round_no':-1,'phase':'preparing',
-            'deadline':0,'created_at':now (  ) ,
+            'deadline':0,'created_at':created_ts,'updated_at':created_ts,
         }
         old_aliases={'group_id','answer_group_id','linked_group_id',
                      'discussion_id','chat_id'}
