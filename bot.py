@@ -4344,6 +4344,9 @@ async def group_ai_reply ( update,ctx ) :
         answer=await asyncio.to_thread ( _openai_response_sync,prompt)
         if not answer: answer="Hozir javob hosil bo‘lmadi. Qayta urinib ko‘ring."
         for i in range ( 0,len ( answer ) ,4000 ) : await msg.reply_text ( answer[i:i+4000])
+        await greenlezard_maybe_send ( ctx,chat.id,question,answer,
+                                     is_group=True,reply_to_message_id=msg.message_id,
+                                     thread_id=getattr ( msg,"message_thread_id",None ) )
     except urllib.error.HTTPError as e:
         detail=""
         try: detail=e.read (  ) .decode ( "utf-8" ) [:700]
@@ -4385,6 +4388,7 @@ async def private_ai_reply ( update,ctx ) :
         answer=await asyncio.to_thread ( _openai_response_sync,prompt )
         if not answer: answer="Hozir javob hosil bo‘lmadi. Qayta urinib ko‘ring."
         for i in range ( 0,len ( answer ),4000 ): await msg.reply_text ( answer[i:i+4000] )
+        await greenlezard_maybe_send ( ctx,chat.id,text,answer,is_group=False)
     except Exception:
         log.exception ( "Private Veritas AI error" )
         await msg.reply_text ( "⚠️ Veritas AI hozir javob bera olmadi." )
@@ -7213,6 +7217,8 @@ async def v11_social_reply ( ctx,chat_id,history,thread_id=None ) :
         if answer and answer.strip (  ) !='SKIP' and settings['natural_on'] and ai_group_active ( chat_id) and not v11_live ( chat_id ) :
             kwargs={'message_thread_id':thread_id} if thread_id else {}
             await ctx.bot.send_message ( chat_id,answer[:1200],**kwargs)
+            await greenlezard_maybe_send ( ctx,chat_id,history[-500:],answer,
+                                         is_group=True,thread_id=thread_id)
             v11_memory_add ( chat_id,ctx.bot.id,'assistant',answer)
     except Exception:log.warning ( 'V11 natural reply unavailable chat=%s',chat_id)
     finally:V11_CHAT_BUSY.discard ( chat_id)
@@ -8765,9 +8771,7 @@ def book_channel_init_db (  ) :
           discussion_message_id INTEGER DEFAULT 0,
           created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL DEFAULT 0,
           finished_at INTEGER DEFAULT 0,
-          report_message_id INTEGER DEFAULT 0,
-          winner_card_message_id INTEGER DEFAULT 0,
-          delivery_error TEXT DEFAULT '' ) ;
+          report_message_id INTEGER DEFAULT 0, delivery_error TEXT DEFAULT '' ) ;
 
         CREATE TABLE IF NOT EXISTS book_channel_rounds(
           game_id INTEGER NOT NULL, round_no INTEGER NOT NULL,
@@ -8823,7 +8827,6 @@ def book_channel_init_db (  ) :
                 'updated_at': 'INTEGER DEFAULT 0',
                 'finished_at': 'INTEGER DEFAULT 0',
                 'report_message_id': 'INTEGER DEFAULT 0',
-                'winner_card_message_id': 'INTEGER DEFAULT 0',
                 'delivery_error': "TEXT DEFAULT ''",
             },
             'book_channel_rounds': {
@@ -9050,101 +9053,10 @@ def _book_channel_tokens ( text ) :
     return out
 
 
-
-# Kitob Zakovat v16: questions may expect a quantity with the unit supplied in
-# the question.  "3", "uch", "3 ta" and "uchta savol" are then equivalent.
-# Only count questions get this relaxation: not dates, names or ambiguous facts.
-_BOOK_NUMBERS={
-    'nol':0,'bir':1,'ikki':2,'uch':3,'tort':4,'besh':5,'olti':6,
-    'yetti':7,'sakkiz':8,'toqqiz':9,'on':10,'yigirma':20,
-    'ottiz':30,'qirq':40,'ellik':50,'oltmish':60,'yetmish':70,
-    'sakson':80,'toqson':90,'yuz':100,'ming':1000,
-}
-_BOOK_QUANTITY_UNITS={'ta','dona','nafar','marta'}
-_BOOK_QUESTION_COUNT_WORDS={'necha','nechta','qanchta','qancha','nechtadan'}
-
-
-def _book_count_words ( text ) :
-    # Preserve numbers and remove Uzbek apostrophe differences; keep words.
-    import unicodedata
-    raw=unicodedata.normalize ( 'NFKC',str ( text or '' )  ) .casefold ( )
-    raw=re.sub ( r"[ʻ‘’`'ʼ]",'',raw)
-    return re.findall ( r'[0-9]+|[a-z\u0400-\u04ff]+',raw,flags=re.U)
-
-
-def _book_count_value ( words ) :
-    # A valid quantity expression may contain a numeral and grammatical suffix,
-    # but never a negation, extra number, or an unrelated modifier.
-    words=list ( words)
-    nums=[]; extras=[]
-    for raw in words:
-        word=raw
-        if word.isdigit (  ) :
-            nums.append ( int ( word )  ) ;continue
-        if word in _BOOK_QUANTITY_UNITS or word in ('atigi','bor','hammasi','jami' ) :
-            continue
-        if word in _BOOK_NUMBERS:
-            nums.append ( _BOOK_NUMBERS[word] ) ;continue
-        if word.endswith ( 'ta') and word[:-2] in _BOOK_NUMBERS:
-            nums.append ( _BOOK_NUMBERS[word[:-2]] ) ;continue
-        if word.endswith ( 'tasi') and word[:-4] in _BOOK_NUMBERS:
-            nums.append ( _BOOK_NUMBERS[word[:-4]] ) ;continue
-        if word.endswith ( 'ta') and word[:-2].isdigit (  ) :
-            nums.append ( int ( word[:-2] )  ) ;continue
-        extras.append ( word)
-    if not nums:return None,extras
-    # Support "yigirma uch" and "bir yuz" without accidentally accepting two
-    # independent quantities as one answer.
-    if len ( nums ) ==1:return nums[0],extras
-    if len ( nums ) ==2 and nums[0] in (10,20,30,40,50,60,70,80,90) and 0<nums[1]<10:
-        return nums[0]+nums[1],extras
-    if len ( nums ) ==2 and nums[1] in (100,1000) and 1<=nums[0]<=9:
-        return nums[0]*nums[1],extras
-    return None,extras
-
-
-def _book_channel_count_match ( answer, expected, question ) :
-    qwords=_book_count_words ( question)
-    if not any ( w in _BOOK_QUESTION_COUNT_WORDS for w in qwords ) :
-        return False
-    candidate,c_extras=_book_count_value ( _book_count_words ( answer ) )
-    if candidate is None:
-        return False
-    target,t_extras=_book_count_value ( _book_count_words ( expected ) )
-    if target is None or target!=candidate:
-        return False
-    # "3 ta savol" is also correct, but "3 yil" for "3 savol" is not.
-    c_core=set ( _book_channel_tokens ( ' '.join ( c_extras )  ) )
-    t_core=set ( _book_channel_tokens ( ' '.join ( t_extras )  ) )
-    q_core=set ( _book_channel_tokens ( question ) )
-    if c_core and not c_core.issubset ( t_core or q_core ) :
-        return False
-    # For "uchta savol" the non-number word "savol" is already in the question.
-    # Do not remove any distinguishing information absent from the question.
-    qtokens=set ( _book_channel_tokens ( question ) )
-    allowed={'son','soni','dona','nafar','kishi','odam','savol','marta'}
-    return all (  ( t in qwords or t in qtokens or t in allowed) for t in t_extras)
-
-
-def _book_channel_short_match ( answer,expected,question ) :
-    # Accept the requested noun without a phrase that merely restates the
-    # question: "Xonim" for "Mingboshining xonimi", when the question
-    # already identifies the mingboshi. Never drop unknown qualifiers.
-    c=_book_channel_tokens ( answer)
-    t=_book_channel_tokens ( expected)
-    if len ( c ) !=1 or len ( t ) <2:return False
-    if c[0]!=t[-1] or len ( c[0] ) <4:return False
-    if c[0] in {'kishi','odam','narsa','joy','vaqt','qiz','bola','shaxs','son','savol'}:
-        return False
-    q=set ( _book_channel_tokens ( question ) )
-    return all ( tok in q for tok in t[:-1])
-
-def _book_channel_answer_matches ( text, aliases,question="" ) :
+def _book_channel_answer_matches ( text, aliases ) :
     from difflib import SequenceMatcher
     got=v11_norm ( text)
-    if not got:
-        return False
-    if len ( got ) <2 and not (str ( text ) .strip (  ) .isdigit ( ) and question ) :
+    if not got or len ( got ) <2:
         return False
     norms=[v11_norm ( x) for x in (aliases or []) if v11_norm ( x ) ]
     if got in norms:
@@ -9158,10 +9070,6 @@ def _book_channel_answer_matches ( text, aliases,question="" ) :
                 return True
         target=_book_channel_tokens ( original)
         if not target:continue
-        if question and _book_channel_count_match ( text,original,question ) :
-            return True
-        if question and _book_channel_short_match ( text,original,question ) :
-            return True
         # A short personal name can be accepted with Uzbek case suffixes.
         if len ( candidate ) ==len ( target ) ==1:
             a,b=candidate[0],target[0]
@@ -9192,16 +9100,11 @@ def _book_channel_ai_recheck_sync ( question,aliases,why,candidates ) :
         'instructions':(
             'Siz Zakovat hakamisiz. Sizga savol, kitobdan olingan to‘g‘ri javoblar, '
             'izoh va ishtirokchi javoblari JSON orqali beriladi. '
-            'Savolning AYNIQSA NIMANI so‘rayotganiga qarab tekshiring. '
-            'Ishtirokchi javobi qisqa yoki boshqa so‘zlarda bo‘lsa ham, savolni '
-            'to‘liq va aniq qanoatlantirsa QABUL QILING. Masalan "uchta savol" '
-            'uchun "3", "3 ta", "uch"; "Mingboshining xonimi" uchun savol '
-            'mingboshini oldindan aniqlagan bo‘lsa "xonim"; "Zebining" uchun "Zebi". '
-            'Bir nechta ma’noga ega yoki chala javobni faqat yetishmayotgan qism '
-            'SAVOLNING O‘ZIDA aniq ko‘rsatilgan bo‘lsa qabul qiling. '
-            'Raqam, shaxs, inkor, joy va faktlar o‘zgargan javobni RAD ETING. '
-            'Savol, aniq to‘g‘ri javoblar va kitobdan izohga birga tayaning; '
-            'matnda aynan bir xil harflar bo‘lishini talab qilmang. '
+            'Faqat MA’NOSI AYNAN BIR XIL javobni qabul qiling. '
+            'Masalan "Zebi" va "Zebining", "ziyofat" va "bazm uyushtirish" '
+            'mos bo‘lishi mumkin. Noto‘g‘ri shaxs, joy, voqea, taxmin, javobning '
+            'juda umumiy qismi yoki qarama-qarshi ma’noni hech qachon qabul qilmang. '
+            'Javobni savoldagi fakt va IZOH bilan solishtiring. '
             'Faqat {"accepted_ids":[son,...]} ko‘rinishidagi JSON qaytaring. '
             'Ishonch yetarli bo‘lmasa IDni kiritmang.'
         ),
@@ -9595,7 +9498,7 @@ def _book_channel_record_answer ( game_id,user_id,name,text,message_id,received_
         if round_no<0 or round_no>=len ( questions ) :
             return 'closed'
         item=questions[round_no]
-        correct=_book_channel_answer_matches ( text,item.get ( 'answers') or [],item.get ( 'q') or '')
+        correct=_book_channel_answer_matches ( text,item.get ( 'answers') or [])
         rank=0; points=0
         if correct:
             rank=int ( c.execute ( 'SELECT COUNT ( *) n FROM book_channel_answers WHERE game_id=? AND round_no=? AND correct=1',
@@ -9787,12 +9690,8 @@ async def _book_channel_close_round ( ctx,game ) :
               LIMIT ?''', ( gid,round_no,BOOK_CHANNEL_AI_VERIFY_LIMIT ) )
         if pending:
             candidates=[{'id':int ( r['message_id'] ) ,'answer':r['answer']} for r in pending]
-            accepted=set ( )
-            # Several smaller requests are more reliable than one huge answer.
-            for i in range ( 0,len ( candidates ) ,18 ) :
-                batch=candidates[i:i+18]
-                accepted.update ( await asyncio.to_thread ( _book_channel_ai_recheck_sync,
-                    item['q'],item.get ( 'answers') or [],item.get ( 'why') or '',batch ) )
+            accepted=await asyncio.to_thread ( _book_channel_ai_recheck_sync,
+                item['q'],item.get ( 'answers') or [],item.get ( 'why') or '',candidates)
             if accepted:
                 changed=_book_channel_regrade_round ( gid,round_no,accepted)
                 for mid in changed:
@@ -9830,127 +9729,6 @@ async def _book_channel_close_round ( ctx,game ) :
     execute ( "UPDATE book_channel_games SET phase='between',deadline=? WHERE id=?", ( now (  ) +BOOK_CHANNEL_BETWEEN_SECONDS,gid ) )
 
 
-
-# ------------ Kanal Kitob Zakovat: g‘olibni vizual tabriklash -------------
-def _book_channel_winner_visual ( game,winner,avatar_bytes=None ) :
-    """Render photo card in memory. Never save Telegram profile photos to disk."""
-    from PIL import Image,ImageDraw,ImageFont,ImageOps
-    W=1080;H=1080
-    im=Image.new ( 'RGB', ( W,H ) )
-    # Soft navy gradient with subtle illuminated center; no external assets.
-    pix=im.load ( )
-    for y in range ( H ) :
-        glow=max ( 0,1-abs ( y-480 ) /750)
-        rgb= ( int ( 8+12*glow ) ,int ( 15+17*glow ) ,int ( 30+26*glow ) )
-        for x in range ( W ) :pix[x,y]=rgb
-    d=ImageDraw.Draw ( im)
-    gold='#f2c569';white='#fff8eb';muted='#bdc7d9';purple='#6f5cc5'
-    d.rounded_rectangle (  ( 28,28,W-28,H-28 ) ,radius=46,outline='#a37f3c',width=3)
-    d.rounded_rectangle (  ( 43,43,W-43,H-43 ) ,radius=36,outline='#3a4860',width=2)
-    for i in range ( 16 ) :
-        x=86+ ( i*73 ) %940;y=98+ ( i*137 ) %840
-        d.ellipse (  ( x,y,x+3,y+3 ) ,fill='#9a854b')
-    def f ( size,bold=False ) :
-        try:return v11_font ( size,bold)
-        except Exception:
-            path='/usr/share/fonts/truetype/dejavu/DejaVuSans'+ ( '-Bold' if bold else '' ) +'.ttf'
-            try:return ImageFont.truetype ( path,size)
-            except Exception:return ImageFont.load_default ( )
-    def center ( s,y,size,color=white,bold=False,max_width=930 ) :
-        s=str ( s or '' ) .replace ( '\n',' ' ) .strip ( )
-        font=f ( size,bold)
-        while d.textbbox (  ( 0,0 ) ,s,font=font ) [2]>max_width and size>20:
-            size-=2;font=f ( size,bold)
-        box=d.textbbox (  ( 0,0 ) ,s,font=font)
-        d.text (  (  ( W- ( box[2]-box[0] )  ) /2,y ) ,s,font=font,fill=color)
-    center ( 'VERITAS-X',85,42,gold,True)
-    center ( 'KITOB ZAKOVAT',150,58,white,True)
-    center ( 'G‘OLIB!',242,76,gold,True)
-    # Winner's Telegram avatar, or decorative monogram if no photo is public.
-    cx,cy=540,472;radius=156
-    d.ellipse (  ( cx-radius-13,cy-radius-13,cx+radius+13,cy+radius+13 ) ,fill='#c7a14b')
-    d.ellipse (  ( cx-radius-6,cy-radius-6,cx+radius+6,cy+radius+6 ) ,fill='#121e32')
-    avatar=None
-    if avatar_bytes:
-        try:
-            avatar=Image.open ( io.BytesIO ( avatar_bytes )  ) .convert ( 'RGB')
-            avatar=ImageOps.fit ( avatar, ( radius*2,radius*2 ) ,centering= ( .5,.45 ) )
-        except Exception: avatar=None
-    if avatar is not None:
-        mask=Image.new ( 'L', ( radius*2,radius*2 ) )
-        ImageDraw.Draw ( mask ) .ellipse (  ( 0,0,radius*2-1,radius*2-1 ) ,fill=255)
-        im.paste ( avatar, ( cx-radius,cy-radius ) ,mask)
-    else:
-        d.ellipse (  ( cx-radius,cy-radius,cx+radius,cy+radius ) ,fill='#25354b')
-        letter=str ( winner['name'] or '?' ) .strip (  ) [:1].upper ( )
-        font=f ( 140,True)
-        bx=d.textbbox (  ( 0,0 ) ,letter,font=font)
-        d.text (  ( cx- ( bx[2]-bx[0] ) /2,cy- ( bx[3]-bx[1] ) /2-28 ) ,letter,font=font,fill=gold)
-    name=str ( winner['name'] or 'Ishtirokchi')
-    center ( name,675,59,white,True)
-    center ( '1-O‘RIN • CHEMPION',758,40,gold,True)
-    score=f"{int ( winner['points'] ) } BALL    |    {int ( winner['correct'] ) } TO‘G‘RI JAVOB"
-    center ( score,831,31,white)
-    d.line (  ( 175,913,905,913 ) ,fill='#a37f3c',width=2)
-    center ( 'Bilimingiz va zakovatingizga olqish!',932,30,muted)
-    center ( f"VERITAS-X  •  ZAKOVAT #{int ( game['id'] ) }",987,22,gold)
-    out=io.BytesIO (  ) ;out.name=f"Veritas_Kitob_Zakovat_{game['id']}_golib.png"
-    im.save ( out,'PNG',optimize=True)
-    out.seek ( 0)
-    return out
-
-
-async def _book_channel_winner_photo ( ctx,user_id ) :
-    """Retrieve visible Telegram avatar through official Bot API; optional."""
-    try:
-        photos=await ctx.bot.get_user_profile_photos ( user_id=int ( user_id ) ,limit=1)
-        if not photos or not photos.photos:return None
-        photo=photos.photos[0][-1]
-        tg_file=await ctx.bot.get_file ( photo.file_id)
-        dest=io.BytesIO ( )
-        await tg_file.download_to_memory ( out=dest)
-        return dest.getvalue ( )
-    except Exception as exc:
-        log.info ( 'BOOK_CHANNEL winner photo unavailable uid=%s: %s',user_id,str ( exc ) [:160])
-        return None
-
-
-async def _book_channel_congratulate ( ctx,game,winner ) :
-    """Send a photo congratulations; avoid duplicates and keep score logic intact."""
-    from html import escape
-    gid=int ( game['id'])
-    if int ( game['winner_card_message_id'] or 0 ) :return
-    if int ( winner['points'] ) <=0:return
-    uid=int ( winner['user_id'])
-    caption=(
-        f"🏆 <b>VERITAS-X — KITOB ZAKOVAT #{gid} G‘OLIBI!</b>\n\n"
-        f"🥇 <a href=\"tg://user?id={uid}\">{escape ( str ( winner['name'] )  ) }</a> — 1-o‘rin!\n"
-        f"⭐ <b>{int ( winner['points'] ) } ball</b>  |  "
-        f"✅ {int ( winner['correct'] ) } ta to‘g‘ri javob\n\n"
-        "👏 Qoyil! Bilimingiz, ziyrakligingiz va faolligingiz uchun "
-        "samimiy tabriklaymiz! Sizga gulduros qarsaklar! 👏👏👏\n"
-        "🎉 Barakalla, haqiqiy chempion!"
-    )
-    try:
-        avatar=await _book_channel_winner_photo ( ctx,uid)
-        card=await asyncio.to_thread ( _book_channel_winner_visual,game,winner,avatar)
-        sent=await ctx.bot.send_photo ( chat_id=int ( game['channel_id'] ) ,photo=card,
-                                      caption=caption,parse_mode='HTML')
-        execute ( 'UPDATE book_channel_games SET winner_card_message_id=? WHERE id=?',
-                (sent.message_id,gid ) )
-    except Exception as exc:
-        log.exception ( 'BOOK_CHANNEL winner card failed game=%s',gid)
-        # Even if Pillow or Telegram photo delivery fails, acknowledge the
-        # winner by text so there is no silent broken finish.
-        try:
-            sent=await ctx.bot.send_message ( chat_id=int ( game['channel_id'] ) ,
-                text=caption,parse_mode='HTML')
-            execute ( 'UPDATE book_channel_games SET winner_card_message_id=? WHERE id=?',
-                    (sent.message_id,gid ) )
-        except TelegramError as msg_exc:
-            log.warning ( 'BOOK_CHANNEL winner congratulations failed game=%s: %s',gid,str ( msg_exc ) [:180])
-
-
 async def _book_channel_finish ( ctx,game ) :
     gid=int ( game['id'])
     await _book_channel_drain ( ctx,gid,timeout=12.0)
@@ -9978,12 +9756,6 @@ async def _book_channel_finish ( ctx,game ) :
             await ctx.bot.send_message ( int ( game['creator_id'] ) ,f"✅ Kanal Kitob Zakovat #{gid} yakunlandi.\n📖 {game['title']}")
         except TelegramError:
             pass
-    # A dedicated picture of the top scorer, with Telegram profile avatar.
-    # No card when nobody received points; no fabricated winner.
-    latest=one ( 'SELECT * FROM book_channel_games WHERE id=?', ( gid, ) )
-    scores=_book_channel_results ( gid)
-    if latest and scores and int ( scores[0]['points'] ) >0:
-        await _book_channel_congratulate ( ctx,latest,scores[0])
     feedback=list ( BOOK_CHANNEL_FEEDBACK_TASKS.get ( gid, (  )  ) )
     if feedback:
         await asyncio.wait ( feedback,timeout=15)
@@ -10359,6 +10131,150 @@ async def callback ( update,ctx ) :
 
 
 
+# =========================================================
+# GREENLEZARD — ISOLATED STICKER EXTENSION
+# Existing V8/V9/AI/Zakovat/Library handlers remain unchanged.
+# Telegram pack: https://t.me/addstickers/GreenLezard
+# =========================================================
+GREENLEZARD_PACK = os.getenv ( 'VERITAS_STICKER_PACK','GreenLezard' ) .strip ( ) or 'GreenLezard'
+GREENLEZARD_CACHE = {'at':0,'stickers': (  ) }
+GREENLEZARD_LOCK = asyncio.Lock ( )
+# screenshot-based fallback positions, used only if Telegram emoji labels don't match
+GREENLEZARD_MOODS = {
+    'funny':      {'emojis': ('😂','🤣','😆','😜','😹' ) , 'positions': (0,5,10,11,16 ) },
+    'tease':      {'emojis': ('😏','😎','😈','🙃','😉' ) , 'positions': (1,4,6,13 ) },
+    'surprise':   {'emojis': ('😱','😳','🤯','😮','😲' ) , 'positions': (0,5,10 ) },
+    'celebrate':  {'emojis': ('🎉','🥳','🎂','🏆','👏' ) , 'positions': (11,14,19 ) },
+    'greet':      {'emojis': ('👋','🤗','😊','❤️','💚' ) , 'positions': (17,18 ) },
+    'sad':        {'emojis': ('😔','😢','😞','🥺','💔' ) , 'positions': (7,9 ) },
+    'thinking':   {'emojis': ('🤔','🧐','😐' ) , 'positions': (2,6,8 ) },
+}
+GREENLEZARD_CUES = (
+    ('celebrate',r'\b ( ?:tabrik|muborak|g.olib|g.oliblik|barakalla|qoyil|yutdingiz|yutdi|tug.ilgan|g.alaba|zo.r ) \b|🎉|🥳|🏆' ) ,
+    ('funny',r'😂|🤣|😆|😹|\b ( ?:haha+|xaxa+|kulgi|kulgili|hazil|qahqaha ) \b' ) ,
+    ('tease',r'😏|😎|😈|\b ( ?:kinoya|mazax|shum|ayyor|bezbet ) \b' ) ,
+    ('surprise',r'😳|😮|😱|🤯|\b ( ?:voy|hayrat|ajab|nahotki|rostmi ) \b' ) ,
+    ('greet',r'👋|💚|❤️|\b ( ?:salom|assalom|rahmat|xush\s+kel|ko.rishguncha ) \b' ) ,
+    ('sad',r'😢|🥺|💔|\b ( ?:afsus|achinarli|xafa|qayg.u ) \b' ) ,
+    ('thinking',r'🤔|🧐|\b ( ?:o.ylab|qiziq|mantiq ) \b' ) ,
+)
+
+def greenlezard_init_db (  ) :
+    with db ( ) as c:
+        c.execute ( '''CREATE TABLE IF NOT EXISTS greenlezard_chat_settings(
+            chat_id INTEGER PRIMARY KEY,
+            enabled INTEGER NOT NULL DEFAULT 1,
+            last_sent_at INTEGER NOT NULL DEFAULT 0
+        )''')
+
+def greenlezard_setting ( chat_id ) :
+    r=one ( 'SELECT enabled,last_sent_at FROM greenlezard_chat_settings WHERE chat_id=?', ( chat_id, ) )
+    return (bool ( r['enabled'] ) ,int ( r['last_sent_at'] ) ) if r else (True,0)
+
+async def greenlezard_load ( bot,force=False ) :
+    ts=now ( )
+    if not force and GREENLEZARD_CACHE['stickers'] and ts-GREENLEZARD_CACHE['at']<6*3600:
+        return GREENLEZARD_CACHE['stickers']
+    async with GREENLEZARD_LOCK:
+        if not force and GREENLEZARD_CACHE['stickers'] and now (  ) -GREENLEZARD_CACHE['at']<6*3600:
+            return GREENLEZARD_CACHE['stickers']
+        pack=await bot.get_sticker_set ( GREENLEZARD_PACK)
+        stickers=tuple ( x for x in pack.stickers if getattr ( x,'file_id',None ) )
+        if not stickers:
+            raise ValueError ( 'GreenLezard to‘plamidan stiker olinmadi.')
+        GREENLEZARD_CACHE.update ( at=now (  ) ,stickers=stickers)
+        return stickers
+
+def greenlezard_mood ( question,answer ) :
+    # AI's text gives context. Do not make a separate paid AI request.
+    a= ( answer or '' ) .casefold ( )
+    q= ( question or '' ) .casefold ( )
+    for mood,pattern in GREENLEZARD_CUES:
+        if re.search ( pattern,a,re.I ) :return mood
+    # Avoid treating quoted/negative user text as the bot's actual mood.
+    for mood,pattern in GREENLEZARD_CUES:
+        if re.search ( pattern,q,re.I ) :return mood
+    return None
+
+def greenlezard_pick ( stickers,mood ) :
+    if not stickers:return None
+    rule=GREENLEZARD_MOODS.get ( mood,GREENLEZARD_MOODS['funny'])
+    emoji_matches=[s for s in stickers if any ( e in (getattr ( s,'emoji','') or '') for e in rule['emojis'] ) ]
+    if emoji_matches:return random.choice ( emoji_matches)
+    positions=[stickers[i] for i in rule['positions'] if i<len ( stickers ) ]
+    return random.choice ( positions or list ( stickers ) )
+
+async def greenlezard_maybe_send ( ctx,chat_id,question,answer,*,is_group,reply_to_message_id=None,thread_id=None ) :
+    # Noncritical enhancement: never interrupt an AI reply if stickers fail.
+    try:
+        enabled,last_sent=greenlezard_setting ( chat_id)
+        if not enabled or now (  ) -last_sent< ( 300 if is_group else 150 ) :return False
+        mood=greenlezard_mood ( question,answer)
+        if mood is None or random.random (  ) > ( 0.25 if is_group else 0.38 ) :return False
+        stickers=await greenlezard_load ( ctx.bot)
+        item=greenlezard_pick ( stickers,mood)
+        if not item:return False
+        kwargs={'disable_notification':True}
+        if reply_to_message_id:kwargs['reply_to_message_id']=reply_to_message_id
+        if thread_id:kwargs['message_thread_id']=thread_id
+        await ctx.bot.send_sticker ( chat_id=chat_id,sticker=item.file_id,**kwargs)
+        execute ( '''INSERT INTO greenlezard_chat_settings ( chat_id,enabled,last_sent_at)
+                   VALUES ( ?,1,?) ON CONFLICT ( chat_id) DO UPDATE SET last_sent_at=excluded.last_sent_at''', ( chat_id,now (  )  ) )
+        return True
+    except TelegramError as exc:
+        log.warning ( 'GreenLezard sticker send blocked (chat=%s ) : %s',chat_id,str ( exc ) [:250])
+    except Exception:
+        log.exception ( 'GreenLezard sticker unexpected error (chat=%s ) ',chat_id)
+    return False
+
+async def greenlezard_command ( update,ctx ) :
+    msg=update.effective_message;chat=update.effective_chat;user=update.effective_user
+    if not msg or not chat or not user:return
+    if chat.type in ('group','supergroup' ) :
+        allowed=is_super ( user.id) or await is_tg_admin ( ctx.bot,chat.id,user.id)
+    else:
+        allowed=True  # Users can configure/test only their own private chat.
+    if not allowed:return await msg.reply_text ( '🔒 Bu guruhda faqat admin stiker sozlamasini o‘zgartira oladi.')
+    cmd= ( msg.text or '' ) .split (  ) [0].split ( '@',1 ) [0].lower (  ) .lstrip ( '/')
+    if cmd=='sticker_on':
+        execute ( '''INSERT INTO greenlezard_chat_settings ( chat_id,enabled,last_sent_at) VALUES ( ?,1,0)
+                   ON CONFLICT ( chat_id) DO UPDATE SET enabled=1''', ( chat.id, ) )
+        return await msg.reply_text ( '✅ GreenLezard yoqildi. AI mos holatda va kamdan-kam stiker yuboradi.')
+    if cmd=='sticker_off':
+        execute ( '''INSERT INTO greenlezard_chat_settings ( chat_id,enabled,last_sent_at) VALUES ( ?,0,0)
+                   ON CONFLICT ( chat_id) DO UPDATE SET enabled=0''', ( chat.id, ) )
+        return await msg.reply_text ( '🛑 GreenLezard o‘chirildi. Boshqa Veritas funksiyalari o‘zgarishsiz.')
+    if cmd=='sticker_status':
+        enabled,_=greenlezard_setting ( chat.id)
+        return await msg.reply_text(
+            f'🦎 GreenLezard: {"✅ yoqilgan" if enabled else "🛑 o‘chirilgan"}\n'
+            f'To‘plam: https://t.me/addstickers/{GREENLEZARD_PACK}\n'
+            'Buyruqlar: /sticker_test [raqam], /sticker_on, /sticker_off.\n'
+            'Pullik stiker ruxsati sinovda tekshiriladi.')
+    if cmd=='sticker_test':
+        try:
+            stickers=await greenlezard_load ( ctx.bot)
+            args= ( msg.text or '' ) .split ( )
+            number=int ( args[1]) if len ( args ) >1 and args[1].isdigit ( ) else 1
+            if not 1<=number<=len ( stickers ) :
+                return await msg.reply_text ( f'Raqam 1 dan {len ( stickers ) } gacha bo‘lishi kerak.')
+            item=stickers[number-1]
+            await ctx.bot.send_sticker ( chat_id=chat.id,sticker=item.file_id,reply_to_message_id=msg.message_id)
+            return await msg.reply_text ( f'✅ GreenLezard #{number}/{len ( stickers ) } yuborildi. Bu stikerga botda ruxsat bor.')
+        except TelegramError as exc:
+            log.warning ( 'GreenLezard paid sticker test blocked: %s',exc)
+            return await msg.reply_text ( '⚠️ Telegram botga shu stikerni yuborishga ruxsat bermadi. '
+                                        'Bu Premium/pullik cheklov yoki chat ruxsati bo‘lishi mumkin. '
+                                        f'Xato: {str ( exc ) [:240]}')
+        except Exception as exc:
+            log.exception ( 'GreenLezard set test failed')
+            return await msg.reply_text ( '⚠️ Stiker to‘plamini olishda muammo. Railway logini tekshiring. '
+                                        f'Xato turi: {type ( exc ) .__name__}')
+# =========================================================
+# END GREENLEZARD EXTENSION
+# =========================================================
+
+
 def main (  ) :
     if not TOKEN: raise RuntimeError ( "BOT_TOKEN kiritilmagan.")
     init_db ( )
@@ -10374,6 +10290,7 @@ def main (  ) :
     ai_news_init_db ( )
     poster_init_db ( )
     i18n_init_db ( )
+    greenlezard_init_db ( )
     app=Application.builder (  ) .bot ( VeritasI18nBot ( token=TOKEN )  ) .build ( )
     app.add_handler ( MessageHandler ( filters.ChatType.GROUPS & ~filters.StatusUpdate.ALL, book_channel_group_router ) , group=-22)
     app.add_handler ( MessageHandler ( filters.ChatType.GROUPS & filters.TEXT, veritas_wake_handler ) , group=-19)
@@ -10391,6 +10308,9 @@ def main (  ) :
     app.add_handler ( CommandHandler ( "help",cmd_help ) )
     app.add_handler ( CommandHandler ( "id",cmd_id ) )
     app.add_handler ( CommandHandler ( "super",cmd_super ) )
+    # New commands are isolated; no existing callback or message router is replaced.
+    for _sticker_command in ('sticker_test','sticker_status','sticker_on','sticker_off' ) :
+        app.add_handler ( CommandHandler ( _sticker_command,greenlezard_command ) )
     app.add_handler ( PreCheckoutQueryHandler ( precheckout ) )
     app.add_handler ( MessageHandler ( filters.SUCCESSFUL_PAYMENT,paid ) )
     # V9.5: news/poster/broadcast are routed inside the generic callback handler (group=0 ) .
