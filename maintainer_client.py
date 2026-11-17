@@ -43,7 +43,7 @@ def signature(secret, timestamp, nonce, body, path='/'):
 
 
 async def request(path, value):
-    if path not in ('/jobs', '/status', '/heartbeat'): raise ValueError('Invalid maintainer route')
+    if path not in ('/jobs', '/status', '/heartbeat', '/budget'): raise ValueError('Invalid maintainer route')
     url = os.getenv('VERITAS_MAINTAINER_URL', '').rstrip('/')
     parsed = urlparse(url)
     if parsed.scheme != 'http' or not (parsed.hostname or '').endswith('.railway.internal') or parsed.path:

@@ -18,7 +18,9 @@ import time
 from types import SimpleNamespace
 import httpx
 
-from astra_proposer import Proposer
+from codex_proposer import CodexProposer
+from astra_support import AIUnavailable
+from ai_spending import Spending, MeteredAPI, BudgetError
 from github_release import GitHub, GitHubError, configured, oid
 from maintainer_client import signature
 from repair_jobs import SOURCE_FILES, source_bundle
@@ -47,6 +49,7 @@ class Store(Reports):
                 CREATE TABLE IF NOT EXISTS maintenance_nonces (nonce TEXT PRIMARY KEY, stamp INTEGER NOT NULL);
                 CREATE TABLE IF NOT EXISTS maintenance_heartbeats (sha TEXT PRIMARY KEY, stamp INTEGER NOT NULL);
             ''')
+        self.spending = Spending(self)
 
     def authenticate(self, headers, body, secret, now, path='/'):
         stamp, nonce, digest = (headers.get(k, '') for k in ('X-Timestamp','X-Nonce','X-Signature'))
@@ -72,9 +75,8 @@ class Store(Reports):
             if row:
                 if row['owner'] != owner or row['report'] != report: raise JobRejected('job_conflict', 409)
                 return
-            recent = db.execute('SELECT created FROM maintenance_jobs WHERE created>? ORDER BY created', (now-86400,)).fetchall()
-            if len(recent) >= 3:
-                raise JobRejected('daily_limit', 429, max(1, recent[len(recent)-3]['created']+86400-now))
+            # Number of past jobs is not a spending limit. Every model call is
+            # metered by the shared durable ledger before it can be submitted.
             db.execute('INSERT INTO maintenance_jobs(id,owner,report,created,updated) VALUES(?,?,?,?,?)',
                        (ident,owner,report,now,now))
 
@@ -108,9 +110,10 @@ class Store(Reports):
 
 
 class Controller:
-    def __init__(self, store, root, owners, *, github=None, proposer=Proposer, clock=time.time, notify=None):
+    def __init__(self, store, root, owners, *, github=None, proposer=None, clock=time.time, notify=None):
         self.store, self.root, self.owners = store, Path(root), frozenset(owners)
         self.github, self.proposer, self.clock = github or GitHub(), proposer, clock
+        self.store.spending.clock = clock
         self.notify = notify or self.telegram
         self.lock = asyncio.Lock()
 
@@ -122,15 +125,17 @@ class Controller:
         if result.status_code != 200: raise RuntimeError('Telegram delivery unavailable')
 
     @staticmethod
-    def describe(row):
-        labels = {'queued':'Navbatda','drafting':'Astra kodni tekshiryapti','publishing':'Tuzatish tayyorlanmoqda',
+    def describe(row, spending=None):
+        labels = {'queued':'Navbatda','drafting':'Codex · Astra kodni tekshiryapti','publishing':'Tuzatish tayyorlanmoqda',
                   'opening':'GitHub tekshiruvi ochilmoqda','ci':'Mustaqil testlar ishlayapti',
                   'promoting':'Sinovdan o‘tgan kod joylanmoqda','deploying':'Railway ishga tushishi tekshirilmoqda',
                   'rollback_prepare':'Oldingi kod qaytarilmoqda','rollback_push':'Oldingi kod joylanmoqda',
                   'rollback_wait':'Qaytarilgan bot tekshirilmoqda','verified':'Yangi kod ishga tushdi',
                   'rolled_back':'Yangi versiya ishlamadi; oldingi kod qaytarildi',
                   'failed':'Avtomatik ish to‘xtadi','no_change':'Asoslangan tuzatish topilmadi'}
-        return (f"🛠 Astra · murojaat #{row['id']}\n{labels[row['phase']]}\n\n{row['summary']}\n"
+        cost = spending.snapshot('repair:'+str(row['id'])) if spending else None
+        return (f"🛠 Codex · Astra · murojaat #{row['id']}\n{labels[row['phase']]}\n\n{row['summary']}\n"
+                + (f"\nAI sarfi (ehtiyotkor hisob): ${cost['task_usd']:.4f}. Oylik qoldiq: ${cost['remaining_usd']:.2f}.\n" if cost else '')
                 + (f"\nGitHub: https://github.com/diyorclash2-prog/veritas-bot/pull/{row['pr']}" if row['pr'] else ''))
 
     async def step(self, row):
@@ -149,9 +154,11 @@ class Controller:
                 (root/name).write_bytes(await gh.file(name,base))
             source_bundle(root)
             save(phase='drafting',base=base)
-            result = await asyncio.wait_for(self.proposer(root).propose(row['report']),timeout=600)
+            agent = self.proposer(root) if self.proposer else CodexProposer(root,
+                api=MeteredAPI(self.store.spending,'repair:'+str(ident)))
+            result = await asyncio.wait_for(agent.propose(row['report']),timeout=600)
             save(phase='publishing' if result['files'] else 'no_change',
-                 files=json.dumps(result['files']),summary=redact(result['summary'])[:1500])
+                 files=json.dumps(result['files']),summary=redact(result['summary'])[:1400])
         elif phase == 'drafting':
             # The controller restarted during an AI call. Do not duplicate paid work.
             if now-row['updated'] > 660: save(phase='failed',summary='Astra vazifasi restartda uzildi; takror pullik so‘rov yuborilmadi.')
@@ -210,6 +217,10 @@ class Controller:
                     # Unknown network outcomes are reconciled by reading the same commit/branch next time.
                     if exc.status not in ('network',429,500,502,503,504) or self.clock()-row['updated'] > 1200:
                         self.store.update(row['id'],int(self.clock()),phase='failed',summary=str(exc))
+                except BudgetError as exc:
+                    self.store.update(row['id'],int(self.clock()),phase='failed',summary=exc.user_message)
+                except AIUnavailable as exc:
+                    self.store.update(row['id'],int(self.clock()),phase='failed',summary=exc.user_message)
                 except Exception as exc:
                     logging.warning('Maintainer step failed: %s',type(exc).__name__)
                     self.store.update(row['id'],int(self.clock()),phase='failed',summary='Tekshiruv to‘xtadi: '+type(exc).__name__)
@@ -218,7 +229,7 @@ class Controller:
                 if notice:
                     db.execute('UPDATE maintenance_jobs SET notified=1 WHERE id=?',(notice['id'],))
             if notice and notice['owner'] in self.owners:
-                try: await self.notify(notice['owner'],self.describe(dict(notice)))
+                try: await self.notify(notice['owner'],self.describe(dict(notice),self.store.spending))
                 except Exception: logging.warning('Maintainer notification delivery unconfirmed')
 
 
@@ -245,14 +256,21 @@ def handler(store, owners, secret):
                 if self.path == '/heartbeat':
                     store.heartbeat(value['sha'],now); self.reply(200,{'ok':True}); return
                 if value.get('owner') not in owners: raise ValueError('owner')
-                if self.path == '/jobs':
+                if self.path == '/budget':
+                    budget = store.spending.snapshot()
+                    with store.db() as db:
+                        jobs = db.execute('SELECT id FROM maintenance_jobs WHERE owner=? ORDER BY id DESC LIMIT 5',
+                                          (value['owner'],)).fetchall()
+                    self.reply(200,{'ok':True,'budget':budget,'tasks':[
+                        {'id':r['id'],'usd':store.spending.snapshot('repair:'+str(r['id']))['task_usd']} for r in jobs]})
+                elif self.path == '/jobs':
                     if not configured(): self.reply(503,{'error':'GitHub App not configured'}); return
                     store.enqueue(value,owners,now)
                     self.reply(200,{'ok':True,'id':value['id']})
                 elif self.path == '/status':
                     row = store.get(value['id'])
                     if not row or row['owner'] != value['owner']: self.reply(404,{'error':'job'}); return
-                    self.reply(200,{'ok':True,'status':row['phase'],'message':Controller.describe(row)})
+                    self.reply(200,{'ok':True,'status':row['phase'],'message':Controller.describe(row,store.spending)})
                 else: self.reply(404,{'error':'route'})
             except JobRejected as exc:
                 self.reply(exc.status,{'ok':False,'code':exc.code,'retry_after':exc.retry_after})
@@ -278,7 +296,10 @@ def main():
                 logging.warning('Maintainer loop retry: %s',type(exc).__name__)
             await asyncio.sleep(15)
     threading.Thread(target=lambda: asyncio.run(work()),daemon=True).start()
-    print('VERITAS_MAINTAINER_READY github_configured='+str(configured()),flush=True)
+    import shutil
+    if not shutil.which(os.getenv('VERITAS_CODEX_BIN','codex')):
+        raise RuntimeError('Codex runtime missing')
+    print('VERITAS_MAINTAINER_READY github_configured='+str(configured())+' codex=True monthly_budget_usd=60',flush=True)
     class PrivateServer(ThreadingHTTPServer):
         address_family = socket.AF_INET6
         daemon_threads = True

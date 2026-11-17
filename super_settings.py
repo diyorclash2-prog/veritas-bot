@@ -26,6 +26,7 @@ from telegram.ext import ApplicationHandlerStop, CallbackQueryHandler, CommandHa
 STATE_KEY = 'veritas_super_settings_v1'
 JOB_NAME = 'veritas-super-diagnostics-v1'
 BUTTON = '⚙️ Super sozlama'
+API_BILLING_URL = 'https://platform.openai.com/settings/organization/billing/overview'
 LABELS = {'queued': 'Navbatda', 'processing': 'Tekshirilmoqda',
           'reviewed': 'Tahlil tayyor; tuzatish kutilmoqda', 'failed': 'Tekshiruv bajarilmadi',
           'repairing': 'Avtomatik kod tekshiruviga yuborilmoqda'}
@@ -45,17 +46,19 @@ def owner_repair_command(text):
     text = ' '.join(text.split())
     if '?' in text or re.search(
             r"\b(?:qilma\w*|qlma\w*|tuzatma\w*|to'g'ri?lama\w*|joylama\w*|tushirma\w*|to'xtat\w*|"
+            r"qo'shma\w*|o'zgartirma\w*|almashtirma\w*|yangilama\w*|yaxshilama\w*|"
             r"kut|kuting|shoshma\w*|qanday|qachon|nima|nimaga|nega|mumkin\w*|"
             r"misol\w*|namuna\w*|degani|demadim|emas|without|don't)\b|\bdo not\b", text):
         return False
-    repair = r"(?:tuzat(?:ing)?|tuzatib\s+ber(?:ing)?|to'g'ri?la(?:ng)?|to'g'ri?lab\s+ber(?:ing)?)"
+    repair = r"(?:tuzat(?:ing)?|tuzatib\s*ber(?:ing)?|to'g'ri?la(?:ng)?|to'g'ri?lab\s*ber(?:ing)?|qo'sh(?:ing)?|qo'shib\s*ber(?:ing)?|o'zgartir(?:ing)?|almashtir(?:ing)?|yangila(?:ng)?|yaxshila(?:ng)?|qil(?:ing)?|ql(?:ing)?)"
     deploy = r"(?:deploy\s+(?:qil|qiling|ql|qling)|ishga\s+tushir(?:ing)?|joyla(?:ng)?)"
     # Requiring an imperative ending avoids '... deploy qil deb yozdim' reports.
     if not re.search(r'\b(?:'+repair+'|'+deploy+r')(?:,?\s+iltimos)?[.!]*$', text):
         return False
     return bool(re.search(r'\bdeploy\s+(?:qil|qiling|ql|qling)\b', text) or
-                re.search(r'\b(?:bot(?:ni|ning|da)?|kod(?:ni|dagi|da)?|dastur(?:ni|dagi)?|'
-                          r'server(?:ni|dagi|ga)?|railway|repo(?:ni|dagi)?|main)\b', text))
+                re.search(r'\b(?:bot(?:ni|ning|da|ga|dagi)?|kod(?:ni|dagi|da)?|dastur(?:ni|dagi)?|'
+                          r'server(?:ni|dagi|ga)?|railway|repo(?:ni|dagi)?|main|'
+                          r'(?:zakovat|tugma|menyu|reklama|kitob|tanga|reyting|dars|sudoku|mafia|test)\w*)\b', text))
 
 
 def redact(text):
@@ -157,7 +160,7 @@ class Reports:
                 return previous['id']
             count = db.execute('SELECT COUNT(*) FROM super_incidents WHERE owner_id=? AND created_at>?',
                                (owner, stamp-86400)).fetchone()[0]
-            if count >= 5:
+            if count >= 5 and not maintainer_client.enabled():
                 raise ValueError('24 soat ichida 5 ta murojaat yuborish mumkin. Oldingi murojaatlar holatini ko‘ring.')
             clean = redact(text)
             if not 10 <= len(clean) <= 2000:
@@ -220,6 +223,8 @@ def menu():
     return InlineKeyboardMarkup([
         [InlineKeyboardButton('💬 Astra bilan suhbat', callback_data='supercfg:chat')],
         [InlineKeyboardButton('🛠 Buyruq / tuzatish', callback_data='supercfg:report')],
+        [InlineKeyboardButton('💰 Codex xarajatlari', callback_data='supercfg:budget')],
+        [InlineKeyboardButton('💳 OpenAI balansini to‘ldirish', url=API_BILLING_URL)],
         [InlineKeyboardButton('📖 Suhbat tarixi', callback_data='supercfg:chat_history'),
          InlineKeyboardButton('🧹 Suhbatni tozalash', callback_data='supercfg:chat_clear')],
         [InlineKeyboardButton('📋 Murojaatlarim', callback_data='supercfg:reports'),
@@ -348,6 +353,25 @@ class SuperSettings:
                     if repair['patch']:
                         buttons = [[InlineKeyboardButton('📎 Tuzatish fayli', callback_data=f"supercfg:repair_file:{row['id']}")]]
                     await query.message.reply_text(self.repairs.describe(repair), reply_markup=InlineKeyboardMarkup(buttons), parse_mode=None)
+        elif action == 'budget':
+            try:
+                data = await maintainer_client.request('/budget',{'owner':owner})
+                if not data.get('ok'): raise ValueError('Budget unavailable')
+                budget = data['budget']
+                from datetime import datetime
+                from zoneinfo import ZoneInfo
+                started = datetime.fromtimestamp(budget['started'],ZoneInfo('America/New_York')).strftime('%Y-%m-%d')
+                text = (f"💰 Codex · Astra sarfi · {budget['period']}\n"
+                        f"Oylik chegara: $60.00\nHisoblangan: ${budget['accounted_usd']:.4f}\n"
+                        f"Band qilingan: ${budget['reserved_usd']:.4f}\nQolgan: ${budget['remaining_usd']:.2f}\n"
+                        + ('\nHisob aniqlashguncha yangi AI so‘rovlari to‘xtatilgan.\n' if budget['blocked'] else '')
+                        + '\nOxirgi vazifalar:\n'
+                        + '\n'.join(f"#{r['id']}: ${r['usd']:.4f}" for r in data.get('tasks',[]))
+                        + f'\n\nNazorat {started} dan boshlandi. Bu ehtiyotkor AI sarf hisobi, rasmiy hisob-faktura yoki API balansi emas. '
+                        'Avvalgi sarf, boshqa bot AI chaqiruvlari va Railway to‘lovi bunga kirmaydi.')
+            except Exception:
+                text = 'Sarf ma’lumoti hozir olinmadi. To‘lov va haqiqiy balansni rasmiy OpenAI sahifasida ko‘ring.'
+            await query.message.reply_text(text,parse_mode=None,reply_markup=menu())
         elif action == 'health':
             self.reports.cancel(owner)
             try:

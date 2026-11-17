@@ -119,15 +119,14 @@ class ProtocolTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(error.code,code)
                 self.assertNotIn('SECRET',str(error)+error.user_message)
 
-    def test_store_preserves_limit_idempotency_and_expiry(self):
+    def test_store_replaces_job_count_quota_preserving_idempotency(self):
         with tempfile.TemporaryDirectory() as tmp:
             store = Store(Path(tmp)/'queue.db')
             for ident in (1,2,3):
                 store.enqueue({'id':ident,'owner':123,'report':'Tugma ishlamayapti'},{123},1000+ident)
             job = {'id':4,'owner':123,'report':'Tugma ishlamayapti'}
-            with self.assertRaises(JobRejected) as caught: store.enqueue(job,{123},1004)
-            self.assertEqual((caught.exception.code,caught.exception.status,caught.exception.retry_after),('daily_limit',429,86397))
-            self.assertIsNone(store.get(4))
+            store.enqueue(job,{123},1004)
+            self.assertIsNotNone(store.get(4))
             store.enqueue({**job,'id':1},{123},1004)
             with self.assertRaises(JobRejected) as conflict:
                 store.enqueue({**job,'id':1,'report':'Boshqa tugma ishlamayapti'},{123},1004)
@@ -135,7 +134,7 @@ class ProtocolTests(unittest.IsolatedAsyncioTestCase):
             store.enqueue(job,{123},87401)
             self.assertIsNotNone(store.get(4))
 
-    def test_http_handler_explains_limit_without_leaking_report(self):
+    def test_http_handler_accepts_fourth_job_without_leaking_report(self):
         import io
         with tempfile.TemporaryDirectory() as tmp:
             store = Store(Path(tmp)/'queue.db')
@@ -150,9 +149,9 @@ class ProtocolTests(unittest.IsolatedAsyncioTestCase):
             replies = []
             with patch('maintainer_service.time.time',return_value=1001),patch('maintainer_service.configured',return_value=True):
                 handler(store,{123},secret).do_POST(request)
-            self.assertEqual(replies,[(429,{'ok':False,'code':'daily_limit','retry_after':86399})])
+            self.assertEqual(replies,[(200,{'ok':True,'id':4})])
             self.assertNotIn('PRIVATE',json.dumps(replies))
-            self.assertIsNone(store.get(4))
+            self.assertIsNotNone(store.get(4))
 
 
 if __name__ == '__main__': unittest.main()

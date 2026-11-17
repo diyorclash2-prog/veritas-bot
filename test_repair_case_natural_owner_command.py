@@ -123,12 +123,28 @@ class NaturalOwnerCommandTests(unittest.IsolatedAsyncioTestCase):
         with self.bridge.reports.db() as db:
             self.assertEqual(db.execute('SELECT COUNT(*) FROM super_remote_outbox').fetchone()[0], 1)
 
-    async def test_daily_report_limit_also_applies_to_plain_commands(self):
+    async def test_monthly_spending_replaces_daily_report_count_for_remote_repairs(self):
         for n in range(5):
             await self.receive_task(message_id=n+1)
-        rejected = await self.receive_task(message_id=6)
-        self.assertIn('5 ta murojaat', rejected.effective_message.reply_text.call_args.args[0])
-        self.assertEqual(len(self.bridge.reports.recent(123)), 5)
+        accepted = await self.receive_task(message_id=6)
+        self.assertIn('Murojaat #6 saqlandi', accepted.effective_message.reply_text.call_args.args[0])
+        with self.bridge.reports.db() as db:
+            self.assertEqual(db.execute('SELECT COUNT(*) FROM super_incidents').fetchone()[0],6)
+
+    async def test_feature_commands_reach_repair_worker(self):
+        for n,text in enumerate(('Zakovatda javoblarni qabul qilishni yaxshila',
+                                 'Menyuga yordam tugmasini qo‘sh',
+                                 'Reklama matnini o‘zgartir',
+                                 'Botga xarajatlar hisobini qo‘shib ber')):
+            await self.receive_task(text,message_id=n+1)
+        self.assertEqual(len(self.bridge.reports.recent(123)),4)
+        self.bridge.chat.ai.assert_not_awaited()
+
+    async def test_negated_feature_edits_are_not_authorization(self):
+        for text in ('Tugmani o‘zgartirma, deploy qil', 'Reklamani qo‘shmang, botni tekshirib tuzat',
+                     'Menyuni almashtirma, botni tuzat'):
+            await self.bridge.receive(update(text=text),self.ctx)
+        self.assertEqual(self.bridge.reports.recent(123),[])
 
     async def test_plain_command_redacts_secrets_before_persistence(self):
         await self.receive_task('token=synthetic-secret Botni tuzat va deploy qil')

@@ -82,7 +82,7 @@ class StoreTests(Fixture):
         self.assertTrue(store.authenticate(headers,body,secret,1000))
         self.assertFalse(store.authenticate(headers,body,secret,1000))
 
-    def test_job_is_private_durable_idempotent_and_limited(self):
+    def test_job_is_private_durable_idempotent_without_daily_quota(self):
         store = Store(self.root/'queue.db')
         job = {'id':1,'owner':123,'report':'Tugma ishlamayapti token=hidden'}
         store.enqueue(job,{123},1000); store.enqueue(job,{123},1000)
@@ -90,7 +90,8 @@ class StoreTests(Fixture):
         self.assertNotIn('hidden',reopened.get(1)['report'])
         with self.assertRaises(ValueError): store.enqueue({**job,'owner':999},{123,999},1000)
         for i in (2,3): store.enqueue({**job,'id':i},{123},1000)
-        with self.assertRaises(ValueError): store.enqueue({**job,'id':4},{123},1000)
+        store.enqueue({**job,'id':4},{123},1000)
+        self.assertIsNotNone(store.get(4))
 
     def test_heartbeat_must_be_fresh_and_match_exact_commit(self):
         store = Store(self.root/'queue.db'); store.heartbeat(A,1000)

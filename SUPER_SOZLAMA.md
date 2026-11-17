@@ -1,3 +1,10 @@
+# Joriy avtomatik tuzatish
+
+Codex · Astra, avtomatik test/deploy, $60 oylik sarf nazorati va OpenAI to‘lov
+tugmasining amaldagi tartibi [AUTOMATIC_REPAIR.md](AUTOMATIC_REPAIR.md) da.
+Quyidagi yozuvlar oldingi integratsiya bosqichlarini ham saqlaydi; 3 ta ish
+limiti faqat eski, o‘chirilgan proposal yo‘liga tegishli.
+
 # Guruh reklamasi va Super sozlama
 
 2026-11-17. Avvalgi kanal reklamasi guruh va superguruhlarga kengaytirildi.
