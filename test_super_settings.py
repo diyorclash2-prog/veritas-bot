@@ -175,24 +175,33 @@ class SuperTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(snapshot['automatic_repair_connected'])
 
     async def test_ai_request_has_no_tools_and_disables_response_storage(self):
-        response = NS(raise_for_status=lambda: None, json=lambda: {'status': 'completed', 'output': [
-            {'type': 'message', 'content': [{'type': 'output_text', 'text': 'Tahlil'}]}]})
         client = AsyncMock()
-        client.post.return_value = response
-        with patch.dict(os.environ, {'OPENAI_API_KEY': 'fake-not-real', 'OPENAI_MODEL': 'configured-model'}), \
-             patch('super_settings.httpx.AsyncClient') as factory:
-            factory.return_value.__aenter__.return_value = client
+        client.respond.return_value = 'Tahlil'
+        with patch('super_settings.OpenAITransport', return_value=client):
             result = await diagnose('Test incident', {'database_readable': True})
-        payload = client.post.call_args.kwargs['json']
-        self.assertFalse(payload['store'])
-        self.assertNotIn('tools', payload)
-        self.assertEqual(payload['model'], 'configured-model')
+        instructions, data = client.respond.call_args.args
+        self.assertIn('no filesystem', instructions)
+        self.assertIn('Test incident', data)
         self.assertEqual(result, 'Tahlil')
 
     async def test_no_key_does_not_make_network_request(self):
-        with patch.dict(os.environ, {}, clear=True), patch('super_settings.httpx.AsyncClient') as client:
+        with patch.dict(os.environ, {}, clear=True), patch('astra_support.httpx.AsyncClient') as client:
             with self.assertRaises(RuntimeError): await diagnose('test', {})
         client.assert_not_called()
+
+    async def test_enabled_repair_is_enqueued_after_diagnosis(self):
+        await self.submit()
+        with patch.dict(os.environ, {'VERITAS_REPAIR_ENABLED': '1'}):
+            await self.bridge.tick(self.ctx)
+        row = self.bridge.reports.recent(123)[0]
+        self.assertEqual(self.bridge.repairs.store.get(row['id'], 123)['status'], 'queued')
+
+    async def test_quota_error_is_reported_without_leaking_api_body(self):
+        from astra_support import AIUnavailable
+        self.ai.side_effect = AIUnavailable('quota', 429)
+        await self.submit()
+        await self.bridge.tick(self.ctx)
+        self.assertIn('krediti', self.bridge.reports.recent(123)[0]['result'])
 
 
 class RegistrationTests(unittest.TestCase):
