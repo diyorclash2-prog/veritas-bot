@@ -27,6 +27,12 @@ from super_settings import Reports, redact
 TERMINAL = {'verified', 'rolled_back', 'failed', 'no_change'}
 
 
+class JobRejected(ValueError):
+    def __init__(self, code, status, retry_after=0):
+        self.code, self.status, self.retry_after = code, status, retry_after
+        super().__init__(code)
+
+
 class Store(Reports):
     def __init__(self, path):
         super().__init__(path)
@@ -64,10 +70,11 @@ class Store(Reports):
             db.execute('BEGIN IMMEDIATE')
             row = db.execute('SELECT owner,report FROM maintenance_jobs WHERE id=?',(ident,)).fetchone()
             if row:
-                if row['owner'] != owner or row['report'] != report: raise ValueError('Job identity conflict')
+                if row['owner'] != owner or row['report'] != report: raise JobRejected('job_conflict', 409)
                 return
-            if db.execute('SELECT COUNT(*) FROM maintenance_jobs WHERE created>?',(now-86400,)).fetchone()[0] >= 3:
-                raise ValueError('Kunlik 3 ta avtomatik tuzatish limiti tugagan.')
+            recent = db.execute('SELECT created FROM maintenance_jobs WHERE created>? ORDER BY created', (now-86400,)).fetchall()
+            if len(recent) >= 3:
+                raise JobRejected('daily_limit', 429, max(1, recent[len(recent)-3]['created']+86400-now))
             db.execute('INSERT INTO maintenance_jobs(id,owner,report,created,updated) VALUES(?,?,?,?,?)',
                        (ident,owner,report,now,now))
 
@@ -247,8 +254,10 @@ def handler(store, owners, secret):
                     if not row or row['owner'] != value['owner']: self.reply(404,{'error':'job'}); return
                     self.reply(200,{'ok':True,'status':row['phase'],'message':Controller.describe(row)})
                 else: self.reply(404,{'error':'route'})
+            except JobRejected as exc:
+                self.reply(exc.status,{'ok':False,'code':exc.code,'retry_after':exc.retry_after})
             except Exception:
-                self.reply(400,{'error':'invalid request'})
+                self.reply(400,{'ok':False,'code':'invalid_request'})
     return Handler
 
 
