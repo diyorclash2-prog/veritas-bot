@@ -283,6 +283,8 @@ class LinguaBridge:
         return chat
 
     async def launcher(self, update, context):
+        if getattr(self, 'learning', None) and update.effective_chat.type == 'private':
+            return await self.learning.launcher(update, context)
         message = update.effective_message
         if message and self.config.url:
             await message.reply_text(ad_text(), reply_markup=keyboard(self.config.url),

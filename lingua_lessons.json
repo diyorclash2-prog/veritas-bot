@@ -1,0 +1,622 @@
+{
+  "rows": [
+    {
+      "id": "name",
+      "tier": 0,
+      "goal": "conversation",
+      "prompt": {
+        "uz": "Ismingiz nima? (Diyor deb javob bering.)",
+        "en": "What is your name? (Answer as Diyor.)",
+        "ru": "Как вас зовут? (Ответьте от имени Диёр.)",
+        "ar": "ما اسمك؟ (أجب باسم ديار.)",
+        "tr": "Adınız ne? (Diyor olarak cevaplayın.)",
+        "es": "¿Cómo te llamas? (Responde como Diyor.)",
+        "fr": "Comment vous appelez-vous ? (Répondez comme Diyor.)",
+        "de": "Wie heißen Sie? (Antworten Sie als Diyor.)",
+        "zh": "你叫什么名字？（回答：迪约尔。）",
+        "ja": "お名前は何ですか。（ディヨルとして答えてください。）",
+        "ko": "이름이 무엇인가요? (디요르라고 답하세요.)"
+      },
+      "answer": {
+        "uz": "Mening ismim Diyor",
+        "en": "I am Diyor",
+        "ru": "Меня зовут Диёр",
+        "ar": "أنا اسمي ديار",
+        "tr": "Benim adım Diyor",
+        "es": "Me llamo Diyor",
+        "fr": "Je suis Diyor",
+        "de": "Ich heiße Diyor",
+        "zh": "我的 名字 是 迪约尔",
+        "ja": "私の 名前は ディヨルです",
+        "ko": "제 이름은 디요르입니다"
+      }
+    },
+    {
+      "id": "drink",
+      "tier": 0,
+      "goal": "conversation",
+      "prompt": {
+        "uz": "Nima ichasiz? (Choy.)",
+        "en": "What do you drink? (Tea.)",
+        "ru": "Что вы пьёте? (Чай.)",
+        "ar": "ماذا تشرب؟ (الشاي.)",
+        "tr": "Ne içersiniz? (Çay.)",
+        "es": "¿Qué bebes? (Té.)",
+        "fr": "Que buvez-vous ? (Du thé.)",
+        "de": "Was trinken Sie? (Tee.)",
+        "zh": "你喝什么？（茶。）",
+        "ja": "何を飲みますか。（お茶。）",
+        "ko": "무엇을 마시나요? (차.)"
+      },
+      "answer": {
+        "uz": "Men choy ichaman",
+        "en": "I drink tea",
+        "ru": "Я пью чай",
+        "ar": "أنا أشرب الشاي",
+        "tr": "Ben çay içerim",
+        "es": "Yo bebo té",
+        "fr": "Je bois du thé",
+        "de": "Ich trinke Tee",
+        "zh": "我 喝 茶",
+        "ja": "私は お茶を 飲みます",
+        "ko": "저는 차를 마십니다"
+      }
+    },
+    {
+      "id": "read",
+      "tier": 0,
+      "goal": "study",
+      "prompt": {
+        "uz": "Nima o‘qiysiz? (Kitoblar.)",
+        "en": "What do you read? (Books.)",
+        "ru": "Что вы читаете? (Книги.)",
+        "ar": "ماذا تقرأ؟ (الكتب.)",
+        "tr": "Ne okursunuz? (Kitaplar.)",
+        "es": "¿Qué lees? (Libros.)",
+        "fr": "Que lisez-vous ? (Des livres.)",
+        "de": "Was lesen Sie? (Bücher.)",
+        "zh": "你读什么？（书。）",
+        "ja": "何を読みますか。（本。）",
+        "ko": "무엇을 읽나요? (책.)"
+      },
+      "answer": {
+        "uz": "Men kitob o‘qiyman",
+        "en": "I read books",
+        "ru": "Я читаю книги",
+        "ar": "أنا أقرأ الكتب",
+        "tr": "Ben kitap okurum",
+        "es": "Yo leo libros",
+        "fr": "Je lis des livres",
+        "de": "Ich lese Bücher",
+        "zh": "我 读 书",
+        "ja": "私は 本を 読みます",
+        "ko": "저는 책을 읽습니다"
+      }
+    },
+    {
+      "id": "where",
+      "tier": 1,
+      "goal": "travel",
+      "prompt": {
+        "uz": "Qayerda yashaysiz? (Londonda.)",
+        "en": "Where do you live? (In London.)",
+        "ru": "Где вы живёте? (В Лондоне.)",
+        "ar": "أين تسكن؟ (في لندن.)",
+        "tr": "Nerede yaşıyorsunuz? (Londra’da.)",
+        "es": "¿Dónde vives? (En Londres.)",
+        "fr": "Où habitez-vous ? (À Londres.)",
+        "de": "Wo wohnen Sie? (In London.)",
+        "zh": "你住在哪里？（伦敦。）",
+        "ja": "どこに住んでいますか。（ロンドン。）",
+        "ko": "어디에 사나요? (런던.)"
+      },
+      "answer": {
+        "uz": "Men Londonda yashayman",
+        "en": "I live in London",
+        "ru": "Я живу в Лондоне",
+        "ar": "أنا أسكن في لندن",
+        "tr": "Ben Londra’da yaşıyorum",
+        "es": "Yo vivo en Londres",
+        "fr": "J’habite à Londres",
+        "de": "Ich wohne in London",
+        "zh": "我 住 在 伦敦",
+        "ja": "私は ロンドンに 住んでいます",
+        "ko": "저는 런던에 살고 있습니다"
+      }
+    },
+    {
+      "id": "morning",
+      "tier": 1,
+      "goal": "work",
+      "prompt": {
+        "uz": "Qachon ishlaysiz? (Har kuni ertalab.)",
+        "en": "When do you work? (Every morning.)",
+        "ru": "Когда вы работаете? (Каждое утро.)",
+        "ar": "متى تعمل؟ (كل صباح.)",
+        "tr": "Ne zaman çalışırsınız? (Her sabah.)",
+        "es": "¿Cuándo trabajas? (Cada mañana.)",
+        "fr": "Quand travaillez-vous ? (Chaque matin.)",
+        "de": "Wann arbeiten Sie? (Jeden Morgen.)",
+        "zh": "你什么时候工作？（每天早上。）",
+        "ja": "いつ働きますか。（毎朝。）",
+        "ko": "언제 일하나요? (매일 아침.)"
+      },
+      "answer": {
+        "uz": "Men har kuni ertalab ishlayman",
+        "en": "I work every morning",
+        "ru": "Я работаю каждое утро",
+        "ar": "أنا أعمل كل صباح",
+        "tr": "Ben her sabah çalışırım",
+        "es": "Yo trabajo cada mañana",
+        "fr": "Je travaille chaque matin",
+        "de": "Ich arbeite jeden Morgen",
+        "zh": "我 每天 早上 工作",
+        "ja": "私は 毎朝 働きます",
+        "ko": "저는 매일 아침 일합니다"
+      }
+    },
+    {
+      "id": "learn",
+      "tier": 1,
+      "goal": "study",
+      "prompt": {
+        "uz": "Qaysi tilni o‘rganyapsiz? (Ingliz tilini.)",
+        "en": "Which language are you learning? (English.)",
+        "ru": "Какой язык вы изучаете? (Английский.)",
+        "ar": "أي لغة تتعلم؟ (الإنجليزية.)",
+        "tr": "Hangi dili öğreniyorsunuz? (İngilizce.)",
+        "es": "¿Qué idioma aprendes? (Inglés.)",
+        "fr": "Quelle langue apprenez-vous ? (L’anglais.)",
+        "de": "Welche Sprache lernen Sie? (Englisch.)",
+        "zh": "你在学什么语言？（英语。）",
+        "ja": "何語を学んでいますか。（英語。）",
+        "ko": "어떤 언어를 배우나요? (영어.)"
+      },
+      "answer": {
+        "uz": "Men ingliz tilini o‘rganyapman",
+        "en": "I am learning English",
+        "ru": "Я изучаю английский язык",
+        "ar": "أنا أتعلم اللغة الإنجليزية",
+        "tr": "Ben İngilizce öğreniyorum",
+        "es": "Estoy aprendiendo inglés",
+        "fr": "Je suis en train d’apprendre l’anglais",
+        "de": "Ich lerne gerade Englisch",
+        "zh": "我 正在 学习 英语",
+        "ja": "私は 英語を 学んでいます",
+        "ko": "저는 영어를 배우고 있습니다"
+      }
+    },
+    {
+      "id": "phrase-p0",
+      "tier": 2,
+      "goal": "conversation",
+      "prompt": {
+        "uz": "Qiziqishlaringiz haqida aytib bering.",
+        "en": "Tell me about your interests.",
+        "ru": "Расскажите о своих интересах.",
+        "ar": "حدثني عن اهتماماتك.",
+        "tr": "Bana ilgi alanlarınızdan bahsedin.",
+        "es": "Hábleme de sus intereses.",
+        "fr": "Parlez-moi de vos centres d’intérêt.",
+        "de": "Erzählen Sie mir von Ihren Interessen.",
+        "zh": "请告诉我你的兴趣爱好。",
+        "ja": "あなたの興味について教えてください。",
+        "ko": "관심사에 대해 말씀해 주세요."
+      },
+      "answer": {
+        "uz": "Qiziqishlaringiz haqida aytib bering",
+        "en": "Tell me about your interests",
+        "ru": "Расскажите о своих интересах",
+        "ar": "حدثني عن اهتماماتك",
+        "tr": "Bana ilgi alanlarınızdan bahsedin",
+        "es": "Hábleme de sus intereses",
+        "fr": "Parlez-moi de vos centres d’intérêt",
+        "de": "Erzählen Sie mir von Ihren Interessen",
+        "zh": "请 告诉 我 你的 兴趣爱好",
+        "ja": "あなたの 興味について 教えて ください",
+        "ko": "관심사에 대해 말씀해 주세요"
+      },
+      "translation": true
+    },
+    {
+      "id": "phrase-p1",
+      "tier": 2,
+      "goal": "conversation",
+      "prompt": {
+        "uz": "Men har kuni yangi narsa o‘rganaman.",
+        "en": "I learn something new every day.",
+        "ru": "Я каждый день узнаю что-то новое.",
+        "ar": "أتعلم شيئًا جديدًا كل يوم.",
+        "tr": "Her gün yeni bir şey öğreniyorum.",
+        "es": "Aprendo algo nuevo cada día.",
+        "fr": "J’apprends quelque chose de nouveau chaque jour.",
+        "de": "Ich lerne jeden Tag etwas Neues.",
+        "zh": "我每天都学到新东西。",
+        "ja": "毎日新しいことを学んでいます。",
+        "ko": "저는 매일 새로운 것을 배웁니다."
+      },
+      "answer": {
+        "uz": "Men har kuni yangi narsa o‘rganaman",
+        "en": "I learn something new every day",
+        "ru": "Я каждый день узнаю что-то новое",
+        "ar": "أتعلم شيئًا جديدًا كل يوم",
+        "tr": "Her gün yeni bir şey öğreniyorum",
+        "es": "Aprendo algo nuevo cada día",
+        "fr": "J’apprends quelque chose de nouveau chaque jour",
+        "de": "Ich lerne jeden Tag etwas Neues",
+        "zh": "我 每天 都 学到 新东西",
+        "ja": "毎日 新しいことを 学んで います",
+        "ko": "저는 매일 새로운 것을 배웁니다"
+      },
+      "translation": true
+    },
+    {
+      "id": "phrase-p2",
+      "tier": 2,
+      "goal": "travel",
+      "prompt": {
+        "uz": "Bekatga qanday borsam bo‘ladi?",
+        "en": "How can I get to the station?",
+        "ru": "Как мне добраться до станции?",
+        "ar": "كيف يمكنني الوصول إلى المحطة؟",
+        "tr": "İstasyona nasıl gidebilirim?",
+        "es": "¿Cómo puedo llegar a la estación?",
+        "fr": "Comment puis-je aller à la gare ?",
+        "de": "Wie komme ich zum Bahnhof?",
+        "zh": "请问去车站怎么走？",
+        "ja": "駅にはどう行けばいいですか。",
+        "ko": "역에 어떻게 가면 되나요?"
+      },
+      "answer": {
+        "uz": "Bekatga qanday borsam bo‘ladi",
+        "en": "How can I get to the station",
+        "ru": "Как мне добраться до станции",
+        "ar": "كيف يمكنني الوصول إلى المحطة",
+        "tr": "İstasyona nasıl gidebilirim",
+        "es": "¿Cómo puedo llegar a la estación",
+        "fr": "Comment puis-je aller à la gare ",
+        "de": "Wie komme ich zum Bahnhof",
+        "zh": "请问 去 车站 怎么 走",
+        "ja": "駅には どう 行けば いいですか",
+        "ko": "역에 어떻게 가면 되나요"
+      },
+      "translation": true
+    },
+    {
+      "id": "phrase-p3",
+      "tier": 3,
+      "goal": "travel",
+      "prompt": {
+        "uz": "Ikki kechaga xona band qilmoqchiman.",
+        "en": "I would like to book a room for two nights.",
+        "ru": "Я хочу забронировать номер на две ночи.",
+        "ar": "أود حجز غرفة لليلتين.",
+        "tr": "İki gecelik bir oda ayırtmak istiyorum.",
+        "es": "Quisiera reservar una habitación para dos noches.",
+        "fr": "Je voudrais réserver une chambre pour deux nuits.",
+        "de": "Ich möchte ein Zimmer für zwei Nächte buchen.",
+        "zh": "我想预订一个房间，住两晚。",
+        "ja": "部屋を二泊予約したいです。",
+        "ko": "이틀 밤 묵을 방을 예약하고 싶습니다."
+      },
+      "answer": {
+        "uz": "Ikki kechaga xona band qilmoqchiman",
+        "en": "I would like to book a room for two nights",
+        "ru": "Я хочу забронировать номер на две ночи",
+        "ar": "أود حجز غرفة لليلتين",
+        "tr": "İki gecelik bir oda ayırtmak istiyorum",
+        "es": "Quisiera reservar una habitación para dos noches",
+        "fr": "Je voudrais réserver une chambre pour deux nuits",
+        "de": "Ich möchte ein Zimmer für zwei Nächte buchen",
+        "zh": "我 想 预订 一个 房间 住 两晚",
+        "ja": "部屋を 二泊 予約したい です",
+        "ko": "이틀 밤 묵을 방을 예약하고 싶습니다"
+      },
+      "translation": true
+    },
+    {
+      "id": "phrase-p4",
+      "tier": 2,
+      "goal": "work",
+      "prompt": {
+        "uz": "Bu sohada tajribam bor.",
+        "en": "I have experience in this field.",
+        "ru": "У меня есть опыт в этой области.",
+        "ar": "لدي خبرة في هذا المجال.",
+        "tr": "Bu alanda deneyimim var.",
+        "es": "Tengo experiencia en este campo.",
+        "fr": "J’ai de l’expérience dans ce domaine.",
+        "de": "Ich habe Erfahrung in diesem Bereich.",
+        "zh": "我有这方面的经验。",
+        "ja": "この分野での経験があります。",
+        "ko": "저는 이 분야의 경험이 있습니다."
+      },
+      "answer": {
+        "uz": "Bu sohada tajribam bor",
+        "en": "I have experience in this field",
+        "ru": "У меня есть опыт в этой области",
+        "ar": "لدي خبرة في هذا المجال",
+        "tr": "Bu alanda deneyimim var",
+        "es": "Tengo experiencia en este campo",
+        "fr": "J’ai de l’expérience dans ce domaine",
+        "de": "Ich habe Erfahrung in diesem Bereich",
+        "zh": "我 有 这方面的 经验",
+        "ja": "この分野での 経験が あります",
+        "ko": "저는 이 분야의 경험이 있습니다"
+      },
+      "translation": true
+    },
+    {
+      "id": "phrase-p5",
+      "tier": 3,
+      "goal": "work",
+      "prompt": {
+        "uz": "Bu taklifni birga muhokama qilsak bo‘ladimi?",
+        "en": "Could we discuss this proposal together?",
+        "ru": "Можем ли мы вместе обсудить это предложение?",
+        "ar": "هل يمكننا مناقشة هذا الاقتراح معًا؟",
+        "tr": "Bu öneriyi birlikte tartışabilir miyiz?",
+        "es": "¿Podríamos discutir esta propuesta juntos?",
+        "fr": "Pourrions-nous discuter de cette proposition ensemble ?",
+        "de": "Könnten wir diesen Vorschlag gemeinsam besprechen?",
+        "zh": "我们可以一起讨论这个建议吗？",
+        "ja": "この提案について一緒に話し合えますか。",
+        "ko": "이 제안을 함께 논의할 수 있을까요?"
+      },
+      "answer": {
+        "uz": "Bu taklifni birga muhokama qilsak bo‘ladimi",
+        "en": "Could we discuss this proposal together",
+        "ru": "Можем ли мы вместе обсудить это предложение",
+        "ar": "هل يمكننا مناقشة هذا الاقتراح معًا",
+        "tr": "Bu öneriyi birlikte tartışabilir miyiz",
+        "es": "¿Podríamos discutir esta propuesta juntos",
+        "fr": "Pourrions-nous discuter de cette proposition ensemble ",
+        "de": "Könnten wir diesen Vorschlag gemeinsam besprechen",
+        "zh": "我们 可以 一起 讨论 这个 建议 吗",
+        "ja": "この提案について 一緒に 話し合えますか",
+        "ko": "이 제안을 함께 논의할 수 있을까요"
+      },
+      "translation": true
+    },
+    {
+      "id": "phrase-p6",
+      "tier": 3,
+      "goal": "study",
+      "prompt": {
+        "uz": "Bu savolni tushuntirib bera olasizmi?",
+        "en": "Could you explain this question?",
+        "ru": "Не могли бы вы объяснить этот вопрос?",
+        "ar": "هل يمكنك توضيح هذا السؤال؟",
+        "tr": "Bu soruyu açıklayabilir misiniz?",
+        "es": "¿Podría explicar esta pregunta?",
+        "fr": "Pourriez-vous expliquer cette question ?",
+        "de": "Könnten Sie diese Frage erklären?",
+        "zh": "你能解释一下这个问题吗？",
+        "ja": "この質問を説明していただけますか。",
+        "ko": "이 질문을 설명해 주시겠어요?"
+      },
+      "answer": {
+        "uz": "Bu savolni tushuntirib bera olasizmi",
+        "en": "Could you explain this question",
+        "ru": "Не могли бы вы объяснить этот вопрос",
+        "ar": "هل يمكنك توضيح هذا السؤال",
+        "tr": "Bu soruyu açıklayabilir misiniz",
+        "es": "¿Podría explicar esta pregunta",
+        "fr": "Pourriez-vous expliquer cette question ",
+        "de": "Könnten Sie diese Frage erklären",
+        "zh": "你 能 解释 一下 这个 问题 吗",
+        "ja": "この質問を 説明して いただけますか",
+        "ko": "이 질문을 설명해 주시겠어요"
+      },
+      "translation": true
+    },
+    {
+      "id": "phrase-p7",
+      "tier": 3,
+      "goal": "study",
+      "prompt": {
+        "uz": "Men har kuni kutubxonada o‘qiyman.",
+        "en": "I study in the library every day.",
+        "ru": "Я каждый день занимаюсь в библиотеке.",
+        "ar": "أدرس في المكتبة كل يوم.",
+        "tr": "Her gün kütüphanede çalışıyorum.",
+        "es": "Estudio en la biblioteca todos los días.",
+        "fr": "J’étudie à la bibliothèque tous les jours.",
+        "de": "Ich lerne jeden Tag in der Bibliothek.",
+        "zh": "我每天在图书馆学习。",
+        "ja": "毎日図書館で勉強しています。",
+        "ko": "저는 매일 도서관에서 공부합니다."
+      },
+      "answer": {
+        "uz": "Men har kuni kutubxonada o‘qiyman",
+        "en": "I study in the library every day",
+        "ru": "Я каждый день занимаюсь в библиотеке",
+        "ar": "أدرس في المكتبة كل يوم",
+        "tr": "Her gün kütüphanede çalışıyorum",
+        "es": "Estudio en la biblioteca todos los días",
+        "fr": "J’étudie à la bibliothèque tous les jours",
+        "de": "Ich lerne jeden Tag in der Bibliothek",
+        "zh": "我 每天 在 图书馆 学习",
+        "ja": "毎日 図書館で 勉強して います",
+        "ko": "저는 매일 도서관에서 공부합니다"
+      },
+      "translation": true
+    },
+    {
+      "id": "phrase-p8",
+      "tier": 4,
+      "goal": "exam",
+      "prompt": {
+        "uz": "Menimcha, har ikki fikrni hisobga olish kerak.",
+        "en": "In my opinion, both views should be considered.",
+        "ru": "По моему мнению, нужно учитывать обе точки зрения.",
+        "ar": "في رأيي، ينبغي النظر في كلا الرأيين.",
+        "tr": "Bence her iki görüş de dikkate alınmalıdır.",
+        "es": "En mi opinión, se deben considerar ambas perspectivas.",
+        "fr": "À mon avis, les deux points de vue doivent être pris en compte.",
+        "de": "Meiner Meinung nach sollten beide Ansichten berücksichtigt werden.",
+        "zh": "我认为两种观点都应该考虑。",
+        "ja": "私の意見では、両方の見方を考慮すべきです。",
+        "ko": "제 생각에는 두 관점을 모두 고려해야 합니다."
+      },
+      "answer": {
+        "uz": "Menimcha, har ikki fikrni hisobga olish kerak",
+        "en": "In my opinion, both views should be considered",
+        "ru": "По моему мнению, нужно учитывать обе точки зрения",
+        "ar": "في رأيي، ينبغي النظر في كلا الرأيين",
+        "tr": "Bence her iki görüş de dikkate alınmalıdır",
+        "es": "En mi opinión, se deben considerar ambas perspectivas",
+        "fr": "À mon avis, les deux points de vue doivent être pris en compte",
+        "de": "Meiner Meinung nach sollten beide Ansichten berücksichtigt werden",
+        "zh": "我 认为 两种 观点 都 应该 考虑",
+        "ja": "私の意見では 両方の見方を 考慮すべき です",
+        "ko": "제 생각에는 두 관점을 모두 고려해야 합니다"
+      },
+      "translation": true
+    },
+    {
+      "id": "phrase-p9",
+      "tier": 5,
+      "goal": "exam",
+      "prompt": {
+        "uz": "Biroq, bu dalil barcha holatlarni tushuntirmaydi.",
+        "en": "However, this evidence does not explain every case.",
+        "ru": "Однако эти данные не объясняют все случаи.",
+        "ar": "ومع ذلك، لا تفسر هذه الأدلة جميع الحالات.",
+        "tr": "Ancak bu kanıtlar her durumu açıklamıyor.",
+        "es": "Sin embargo, estas pruebas no explican todos los casos.",
+        "fr": "Cependant, ces éléments ne permettent pas d’expliquer tous les cas.",
+        "de": "Diese Belege erklären jedoch nicht jeden Fall.",
+        "zh": "然而，这些证据并不能解释所有情况。",
+        "ja": "しかし、この証拠ですべての事例を説明できるわけではありません。",
+        "ko": "하지만 이 증거가 모든 경우를 설명하지는 못합니다."
+      },
+      "answer": {
+        "uz": "Biroq, bu dalil barcha holatlarni tushuntirmaydi",
+        "en": "However, this evidence does not explain every case",
+        "ru": "Однако эти данные не объясняют все случаи",
+        "ar": "ومع ذلك، لا تفسر هذه الأدلة جميع الحالات",
+        "tr": "Ancak bu kanıtlar her durumu açıklamıyor",
+        "es": "Sin embargo, estas pruebas no explican todos los casos",
+        "fr": "Cependant, ces éléments ne permettent pas d’expliquer tous les cas",
+        "de": "Diese Belege erklären jedoch nicht jeden Fall",
+        "zh": "然而 这些 证据 并不能 解释 所有 情况",
+        "ja": "しかし この証拠で すべての事例を 説明できる わけではありません",
+        "ko": "하지만 이 증거가 모든 경우를 설명하지는 못합니다"
+      },
+      "translation": true
+    }
+  ],
+  "wrong": {
+    "uz": [
+      "kecha",
+      "daraxt",
+      "deraza",
+      "tez",
+      "sovuq",
+      "osmon",
+      "qizil",
+      "yugurmoq"
+    ],
+    "en": [
+      "yesterday",
+      "tree",
+      "window",
+      "quickly",
+      "cold",
+      "sky",
+      "red",
+      "running"
+    ],
+    "ru": [
+      "вчера",
+      "дерево",
+      "окно",
+      "быстро",
+      "холодный",
+      "небо",
+      "красный",
+      "бегать"
+    ],
+    "ar": [
+      "أمس",
+      "شجرة",
+      "نافذة",
+      "بسرعة",
+      "بارد",
+      "سماء",
+      "أحمر",
+      "يركض"
+    ],
+    "tr": [
+      "dün",
+      "ağaç",
+      "pencere",
+      "hızlı",
+      "soğuk",
+      "gökyüzü",
+      "kırmızı",
+      "koşmak"
+    ],
+    "es": [
+      "ayer",
+      "árbol",
+      "ventana",
+      "rápido",
+      "frío",
+      "cielo",
+      "rojo",
+      "correr"
+    ],
+    "fr": [
+      "hier",
+      "arbre",
+      "fenêtre",
+      "vite",
+      "froid",
+      "ciel",
+      "rouge",
+      "courir"
+    ],
+    "de": [
+      "gestern",
+      "Baum",
+      "Fenster",
+      "schnell",
+      "kalt",
+      "Himmel",
+      "rot",
+      "laufen"
+    ],
+    "zh": [
+      "昨天",
+      "树",
+      "窗户",
+      "快",
+      "冷",
+      "天空",
+      "红色",
+      "跑步"
+    ],
+    "ja": [
+      "昨日",
+      "木",
+      "窓",
+      "速く",
+      "寒い",
+      "空",
+      "赤い",
+      "走る"
+    ],
+    "ko": [
+      "어제",
+      "나무",
+      "창문",
+      "빨리",
+      "추운",
+      "하늘",
+      "빨간",
+      "달리다"
+    ]
+  }
+}
