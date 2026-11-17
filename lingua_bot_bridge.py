@@ -98,6 +98,8 @@ class Store:
                     attempts INTEGER NOT NULL DEFAULT 1, claimed_at INTEGER NOT NULL,
                     retry_at INTEGER NOT NULL DEFAULT 0, message_id INTEGER,
                     PRIMARY KEY(chat_id, day));
+                CREATE TABLE IF NOT EXISTS lingua_ad_migrations (
+                    old_id INTEGER PRIMARY KEY, new_id INTEGER NOT NULL);
                 CREATE TABLE IF NOT EXISTS lingua_ad_cooldown (
                     id INTEGER PRIMARY KEY CHECK(id=1), until_stamp INTEGER NOT NULL DEFAULT 0);
                 INSERT OR IGNORE INTO lingua_ad_cooldown VALUES(1,0);
@@ -182,6 +184,8 @@ class Store:
             return
         with self.db() as db:
             db.execute('BEGIN IMMEDIATE')
+            if db.execute('SELECT 1 FROM lingua_ad_migrations WHERE old_id=?', (old_id,)).fetchone():
+                return
             old = db.execute('SELECT * FROM lingua_ad_channels WHERE chat_id=?', (old_id,)).fetchone()
             if not old:
                 return
@@ -189,9 +193,14 @@ class Store:
                           VALUES(?,?,?,?, 'supergroup') ON CONFLICT(chat_id) DO UPDATE
                           SET enabled=MIN(enabled,excluded.enabled)""",
                        (new_id, old['title'], old['enabled'], 1))
-            db.execute("""INSERT OR IGNORE INTO lingua_ad_deliveries
+            db.execute("""INSERT INTO lingua_ad_deliveries
                           SELECT ?,day,state,attempts,claimed_at,retry_at,message_id
-                          FROM lingua_ad_deliveries WHERE chat_id=?""", (new_id, old_id))
+                          FROM lingua_ad_deliveries WHERE chat_id=?
+                          ON CONFLICT(chat_id,day) DO UPDATE SET
+                          state=CASE WHEN state='retry' THEN excluded.state ELSE state END,
+                          attempts=MAX(attempts,excluded.attempts),
+                          retry_at=MAX(retry_at,excluded.retry_at)""", (new_id, old_id))
+            db.execute('INSERT INTO lingua_ad_migrations VALUES(?,?)', (old_id, new_id))
             db.execute('UPDATE lingua_ad_channels SET active=0,enabled=0 WHERE chat_id=?', (old_id,))
 
     def available(self, chat_id, day, stamp):

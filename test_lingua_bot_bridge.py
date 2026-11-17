@@ -322,6 +322,21 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
         self.bridge.store.observe(-1009, enable=True)
         self.assertFalse(self.bridge.store.claim(-1009, '2026-11-16', 2))
 
+    async def test_repeated_migration_does_not_disable_enabled_destination(self):
+        self.bridge.store.migrate_chat(-1001, -1009)
+        self.bridge.store.migrate_chat(-1001, -1009)
+        rows = {r['chat_id']: r for r in self.bridge.store.channels()}
+        self.assertEqual(rows[-1009]['enabled'], 1)
+
+    async def test_migration_merges_old_sent_with_new_retry_without_duplicate(self):
+        self.bridge.store.observe(-1009)
+        for chat in (-1001, -1009):
+            self.bridge.store.claim(chat, '2026-11-16', 1)
+        self.bridge.store.outcome(-1001, '2026-11-16', 'sent')
+        self.bridge.store.outcome(-1009, '2026-11-16', 'retry', retry_at=2)
+        self.bridge.store.migrate_chat(-1001, -1009)
+        self.assertFalse(self.bridge.store.claim(-1009, '2026-11-16', 5))
+
     async def test_legacy_schema_migration_keeps_delivery_history(self):
         legacy = Path(self.tmp.name) / 'old.sqlite3'
         with sqlite3.connect(legacy) as db:

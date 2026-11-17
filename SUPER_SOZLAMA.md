@@ -58,7 +58,7 @@ Worker ulanmaguncha `reviewed` holati faqat “tahlil tayyor; tuzatish kutilmoqd
 
 `python -m unittest -q test_lingua_bot_bridge test_super_settings`
 
-71 test o‘tdi: kanal/guruh ruxsatlari, kunlik takrorni bostirish, migratsiya,
+73 test o‘tdi: kanal/guruh ruxsatlari, kunlik takrorni bostirish, migratsiya,
 restart, eski jadvalni saqlash, private chatga reklama yubormaslik, Super Ega
 chegarasi, kiritish sessiyasi, limit/dedup, credential niqoblash, navbat claimi,
 AI xatosi, Telegram timeout, muallifga qayta xabar, begona murojaatlarni bermaslik.
