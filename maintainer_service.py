@@ -21,6 +21,7 @@ import httpx
 from codex_proposer import CodexProposer
 from astra_support import AIUnavailable
 from ai_spending import Spending, MeteredAPI, BudgetError
+from lingua_ai import GenerationQueue, run_worker
 from github_release import GitHub, GitHubError, configured, oid
 from maintainer_client import signature
 from repair_jobs import SOURCE_FILES, source_bundle
@@ -234,6 +235,7 @@ class Controller:
 
 
 def handler(store, owners, secret):
+    lingua = GenerationQueue(store)
     class Handler(BaseHTTPRequestHandler):
         def log_message(self,*args): pass
         def reply(self, code, value):
@@ -241,7 +243,7 @@ def handler(store, owners, secret):
             self.send_response(code); self.send_header('Content-Type','application/json')
             self.send_header('Content-Length',str(len(body))); self.end_headers(); self.wfile.write(body)
         def do_GET(self):
-            if self.path == '/health': self.reply(200,{'ok':True,'github_configured':configured()})
+            if self.path == '/health': self.reply(200,{'ok':True,'github_configured':configured(),'lingua_ai':True})
             else: self.reply(404,{'error':'route'})
         def do_POST(self):
             try:
@@ -256,7 +258,9 @@ def handler(store, owners, secret):
                 if self.path == '/heartbeat':
                     store.heartbeat(value['sha'],now); self.reply(200,{'ok':True}); return
                 if value.get('owner') not in owners: raise ValueError('owner')
-                if self.path == '/budget':
+                if self.path == '/lingua/questions':
+                    self.reply(200, lingua.submit(value['id'], value['payload']))
+                elif self.path == '/budget':
                     budget = store.spending.snapshot()
                     with store.db() as db:
                         jobs = db.execute('SELECT id FROM maintenance_jobs WHERE owner=? ORDER BY id DESC LIMIT 5',
@@ -296,10 +300,12 @@ def main():
                 logging.warning('Maintainer loop retry: %s',type(exc).__name__)
             await asyncio.sleep(15)
     threading.Thread(target=lambda: asyncio.run(work()),daemon=True).start()
+    lingua = GenerationQueue(store)
+    threading.Thread(target=lambda: asyncio.run(run_worker(lingua)),daemon=True).start()
     import shutil
     if not shutil.which(os.getenv('VERITAS_CODEX_BIN','codex')):
         raise RuntimeError('Codex runtime missing')
-    print('VERITAS_MAINTAINER_READY github_configured='+str(configured())+' codex=True monthly_budget_usd=60',flush=True)
+    print('VERITAS_MAINTAINER_READY github_configured='+str(configured())+' codex=True lingua_ai=True monthly_budget_usd=60',flush=True)
     class PrivateServer(ThreadingHTTPServer):
         address_family = socket.AF_INET6
         daemon_threads = True
