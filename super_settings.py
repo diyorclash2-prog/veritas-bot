@@ -32,6 +32,10 @@ LABELS = {'queued': 'Navbatda', 'processing': 'Tekshirilmoqda',
 
 def redact(text):
     text = str(text)
+    # Mask complete PEM blocks before other replacements can alter their delimiters.
+    text = re.sub(
+        r'-----BEGIN ((?:RSA |EC |OPENSSH |ENCRYPTED )?PRIVATE KEY)-----\r?\n'
+        r'.*?-----END \1-----', '[YASHIRILDI]', text, flags=re.S)
     # Never pass any known credential through, including unusual token formats.
     for name, value in os.environ.items():
         if len(value) >= 8 and re.search(r'TOKEN|SECRET|KEY|PASSWORD|SESSION|HASH', name, re.I):
