@@ -81,8 +81,8 @@ class OwnerChatTests(unittest.IsolatedAsyncioTestCase):
             for value in ('hidden','secret-value-for-chat-test','555','other'):
                 self.assertNotIn(value,rendered)
 
-    async def test_chat_does_not_enqueue_repairs_even_when_enabled(self):
-        await self.callback('chat'); await self.send('Botni tuzat va main ga joyla')
+    async def test_chat_question_does_not_enqueue_repairs_even_when_enabled(self):
+        await self.callback('chat'); await self.send('Botni qanday tuzatish va main ga joylash mumkin?')
         with patch.dict(os.environ,{'VERITAS_AUTOREPAIR_ENABLED':'1'}):
             await self.bridge.chat_tick(self.ctx)
         self.assertEqual(self.bridge.reports.recent(123),[])
