@@ -18,6 +18,7 @@ import time
 
 import io
 from astra_support import AIUnavailable, OpenAITransport, configured_model
+import maintainer_client
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.error import TelegramError
 from telegram.ext import ApplicationHandlerStop, CallbackQueryHandler, CommandHandler, MessageHandler, filters
@@ -74,6 +75,8 @@ class Reports:
                     UNIQUE(owner_id,message_id));
                 CREATE TABLE IF NOT EXISTS super_report_sessions (
                     owner_id INTEGER PRIMARY KEY, expires_at INTEGER NOT NULL);
+                CREATE TABLE IF NOT EXISTS super_remote_outbox (
+                    id INTEGER PRIMARY KEY, status TEXT NOT NULL DEFAULT 'pending', created INTEGER NOT NULL);
             ''')
 
     @contextmanager
@@ -198,7 +201,7 @@ class SuperSettings:
         bridge = self.application.bot_data.get(LINGUA_KEY)
         result = {'database_readable': True, 'lingua_loaded': bridge is not None,
                   'lingua_job_registered': bool(self.application.job_queue and self.application.job_queue.get_jobs_by_name(LINGUA_JOB)),
-                  'recent_errors': list(self.errors.events), 'automatic_repair_connected': False,
+                  'recent_errors': list(self.errors.events), 'automatic_repair_connected': maintainer_client.enabled(),
                   'ai_model': configured_model(), 'sandbox_repair_enabled': self.repair_enabled()}
         if bridge:
             result['advertisements'] = bridge.store.settings()
@@ -219,7 +222,7 @@ class SuperSettings:
                 '⚙️ Super sozlama\n\nXatoni yuboring: bot holati tekshiriladi va AI tahlili qaytadi. '
                 f'AI modeli: {configured_model()}. '
                 f'Ajratilgan kod tekshiruvi: {"yoqilgan" if self.repair_enabled() else "o‘chirilgan"}. '
-                'GitHub orqali avtomatik joylash hali ulanmagan.', reply_markup=menu())
+                f'Avtomatik tuzatish: {"yoqilgan" if maintainer_client.enabled() else "o‘chirilgan"}.', reply_markup=menu())
         raise ApplicationHandlerStop
 
     async def callback(self, update, context):
@@ -244,6 +247,14 @@ class SuperSettings:
                 await query.message.reply_text('Hali murojaat yo‘q.', reply_markup=menu())
             for row in rows:
                 await query.message.reply_text(self.result_text(row), parse_mode=None)
+                with self.reports.db() as db:
+                    remote = db.execute('SELECT status FROM super_remote_outbox WHERE id=?',(row['id'],)).fetchone()
+                if remote:
+                    try:
+                        state = await asyncio.wait_for(maintainer_client.request('/status',{'id':row['id'],'owner':owner}),timeout=4)
+                        await query.message.reply_text(state['message'],parse_mode=None)
+                    except Exception:
+                        await query.message.reply_text('Avtomatik tekshiruv holati: '+remote['status'])
                 repair = self.repairs.store.get(row['id'], owner)
                 if repair:
                     buttons = [[InlineKeyboardButton('🛑 Kod tekshiruvini to‘xtatish', callback_data=f"supercfg:repair_cancel:{row['id']}")]]
@@ -259,7 +270,7 @@ class SuperSettings:
                         f"Yaqinda qayd etilgan xatolar: {len(snap['recent_errors'])}\n"
                         f"AI modeli: {snap['ai_model']}\n"
                         f"Ajratilgan kod tekshiruvi: {'yoqilgan' if snap['sandbox_repair_enabled'] else 'o‘chirilgan'}\n"
-                        'GitHub/deploy: ulanmagan')
+                        f"Avtomatik tuzatish: {'yoqilgan' if snap['automatic_repair_connected'] else 'o‘chirilgan'}")
             except sqlite3.Error:
                 text = 'Bazani o‘qishda xato. Maxfiy ma’lumotlar ko‘rsatilmaydi.'
             await query.message.reply_text(text, reply_markup=menu())
@@ -306,8 +317,9 @@ class SuperSettings:
             return  # Existing commands and non-text flows remain available.
         try:
             report_id = self.reports.submit(owner, msg.message_id, msg.text, int(self.clock()))
-            await msg.reply_text(f'📨 Murojaat #{report_id} saqlandi. Tahlil javobi shu chatga keladi. '
-                                 'Kod tekshiruvi yoqilgan bo‘lsa, tuzatish taklifi alohida keladi. Ishlayotgan bot avtomatik o‘zgarmaydi.', reply_markup=menu())
+            await msg.reply_text(f'📨 Murojaat #{report_id} saqlandi. Tahlil javobi shu chatga keladi. '+
+                                 ('Avtomatik tuzatish yoqilgan: testdan o‘tgan kod joylanadi va natijasi qaytadi.'
+                                  if maintainer_client.enabled() else 'Kod tekshiruvi yoqilgan bo‘lsa, tuzatish taklifi alohida keladi.'), reply_markup=menu())
         except ValueError as exc:
             await msg.reply_text(str(exc), parse_mode=None)
         raise ApplicationHandlerStop
@@ -315,7 +327,27 @@ class SuperSettings:
     @staticmethod
     def result_text(row):
         return (f"🛠 Murojaat #{row['id']}\n{LABELS[row['status']]}\n\n{row['result']}\n\n"
-                'Kod o‘zgartirilmadi. Alohida kod tekshiruvining holati Murojaatlarim bo‘limida ko‘rinadi.')
+                'Bu AI tahlili. Kod tuzatish va joylash holati Murojaatlarim bo‘limida alohida ko‘rinadi.')
+
+    async def remote_tick(self, context):
+        if not os.getenv('VERITAS_MAINTAINER_URL'): return
+        try:
+            snap = self.snapshot()
+            sha = os.getenv('RAILWAY_GIT_COMMIT_SHA','')
+            if self.application.running and snap['lingua_loaded'] and snap['lingua_job_registered'] and re.fullmatch('[a-f0-9]{40}',sha):
+                await maintainer_client.request('/heartbeat',{'sha':sha})
+            with self.reports.db() as db:
+                row = db.execute("SELECT i.*,o.created AS outbox_created FROM super_remote_outbox o JOIN super_incidents i ON i.id=o.id WHERE o.status='pending' ORDER BY i.id LIMIT 1").fetchone()
+            if row:
+                if row['owner_id'] not in self.owners or self.clock()-row['outbox_created']>3600:
+                    with self.reports.db() as db: db.execute("UPDATE super_remote_outbox SET status='failed' WHERE id=?",(row['id'],))
+                    return
+                if not maintainer_client.enabled(): return
+                result = await maintainer_client.request('/jobs',{'id':row['id'],'owner':row['owner_id'],'report':row['report']})
+                if result.get('ok') and result.get('id') == row['id']:
+                    with self.reports.db() as db: db.execute("UPDATE super_remote_outbox SET status='accepted' WHERE id=?",(row['id'],))
+        except Exception as exc:
+            logging.getLogger(__name__).warning('Maintainer connection unavailable: %s',type(exc).__name__)
 
     async def tick(self, context):
         if self.lock.locked():
@@ -328,7 +360,10 @@ class SuperSettings:
                 else:
                     try:
                         answer = await asyncio.wait_for(self.ai(row['report'], self.snapshot()), timeout=100)
-                        if self.repair_enabled():
+                        if maintainer_client.enabled():
+                            with self.reports.db() as db:
+                                db.execute('INSERT OR IGNORE INTO super_remote_outbox(id,created) VALUES(?,?)',(row['id'],int(self.clock())))
+                        elif self.repair_enabled():
                             try:
                                 self.repairs.store.enqueue(row['id'], row['owner_id'], int(self.clock()))
                             except ValueError:
@@ -361,14 +396,16 @@ def register_super_settings(application, *, db_path, super_owner_ids):
         logging.getLogger(__name__).error('Super settings database unavailable')
         return None
     application.bot_data[STATE_KEY] = bridge
-    logging.getLogger(__name__).info('VERITAS_SUPPORT_READY model=%s isolated_repair=%s auto_deploy=false',
-                                     configured_model(), bridge.repair_enabled())
+    logging.getLogger(__name__).info('VERITAS_SUPPORT_READY model=%s isolated_repair=%s auto_deploy=%s',
+                                     configured_model(), bridge.repair_enabled(), maintainer_client.enabled())
     logging.getLogger().addHandler(bridge.errors)
     application.add_handler(CommandHandler('super_settings', bridge.show), group=-31)
     application.add_handler(CallbackQueryHandler(bridge.callback, pattern=r'^supercfg:'), group=-31)
     application.add_handler(MessageHandler(filters.ChatType.PRIVATE & filters.Regex(r'^⚙️ Super sozlama$'), bridge.show), group=-31)
     application.add_handler(MessageHandler(filters.ChatType.PRIVATE, bridge.receive), group=-29)
     if application.job_queue:
+        application.job_queue.run_repeating(bridge.remote_tick,interval=20,first=12,name='veritas-maintainer-link-v1',
+                                           job_kwargs={'max_instances':1,'coalesce':True})
         from repair_jobs import JOB_NAME as REPAIR_JOB
         application.job_queue.run_repeating(bridge.repairs.tick, interval=15, first=20, name=REPAIR_JOB,
                                            job_kwargs={'max_instances': 1, 'coalesce': True})
