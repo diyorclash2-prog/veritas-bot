@@ -391,6 +391,9 @@ async def v9_callback ( update,ctx ) :
     if not q or not q.data:return
     d=q.data; u=q.from_user
     await q.answer (  ) ; ensure_user ( u)
+    if d in {"root:choose","root:v8","root:v9","v9:home","v9:teacher:home","v9:student:home"}:
+        if str ( (STATE.get ( u.id) or {}).get ( "mode","") ).startswith ( "v9_" ):
+            STATE.pop ( u.id,None)
     if d=="root:choose": return await q.edit_message_text ( "🪶 VERITAS\n\nQaysi bo‘limga kirishni xohlaysiz?",reply_markup=root_choice_markup (  ) )
     if d=="root:v8": return await q.edit_message_text ( "🛡 VERITAS\n\nAsosiy bo‘lim:",reply_markup=main_menu_markup ( u.id ) )
     if d in ("root:v9","v9:home" ) : return await q.edit_message_text ( "🎓 VERITAS V9 — O‘QUV • TALABA\n\nTa’lim turini tanlang:",reply_markup=v9_entry_markup (  ) )
@@ -430,6 +433,8 @@ async def v9_callback ( update,ctx ) :
         if not g:return await q.answer ( "Guruh topilmadi.",show_alert=True)
         teacher=int ( g["teacher_id"] ) ==u.id; member=one ( "SELECT 1 FROM v9_group_members WHERE group_id=? AND user_id=? AND is_active=1", ( gid,u.id ) )
         if not teacher and not member:return await q.answer ( "Bu guruhga kirish huquqingiz yo‘q.",show_alert=True)
+        if str ( (STATE.get ( u.id) or {}).get ( "mode","") ).startswith ( "v9_" ):
+            STATE.pop ( u.id,None)
         count=one ( "SELECT COUNT ( *) n FROM v9_group_members WHERE group_id=? AND is_active=1", ( gid, )  ) ["n"]
         kb=InlineKeyboardMarkup ( [[InlineKeyboardButton ( "➕ Yangi dars",callback_data=f"v9:lesson:new:{gid}" ) ],[InlineKeyboardButton ( "📚 Darslar",callback_data=f"v9:lessons:{gid}" ) ,InlineKeyboardButton ( "📊 Natijalar",callback_data=f"v9:results:{gid}" ) ],[InlineKeyboardButton ( "⬅️ Guruhlarim",callback_data="v9:teacher:groups" ) ]]) if teacher else InlineKeyboardMarkup ( [[InlineKeyboardButton ( "📚 Darslar",callback_data=f"v9:lessons:{gid}" ) ],[InlineKeyboardButton ( "🏆 Guruh reytingi",callback_data=f"v9:ranking:{gid}" ) ],[InlineKeyboardButton ( "⬅️ Guruhlarim",callback_data="v9:student:groups" ) ]])
         return await q.edit_message_text ( f"📚 {g['title']}\n📖 Fan: {g['subject'] or 'Kiritilmagan'}\n👥 Talabalar: {count}\n🔑 Guruh kodi: {g['join_code']}",reply_markup=kb)
@@ -487,6 +492,8 @@ async def v9_callback ( update,ctx ) :
         teacher=int ( l["group_teacher"] ) ==u.id
         member=one ( "SELECT 1 FROM v9_group_members WHERE group_id=? AND user_id=? AND is_active=1", ( l["group_id"],u.id ) )
         if not teacher and not member:return await q.answer ( "Ruxsat yo‘q.",show_alert=True)
+        if str ( (STATE.get ( u.id) or {}).get ( "mode","") ).startswith ( "v9_" ):
+            STATE.pop ( u.id,None)
         mode="🔒 Faqat darslikdan" if l["ai_mode"]=="material_only" else "🧠 Darslik + AI tushuntirishi"
         if teacher:
             kb=InlineKeyboardMarkup ( [
