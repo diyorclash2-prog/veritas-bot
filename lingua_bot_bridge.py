@@ -41,7 +41,7 @@ def validate_url(value):
 
 
 def schedule(hour, tz):
-    if not re.fullmatch(r'(?:[01][0-9]|2[0-3]):[0-5][0-9]', hour):
+    if not re.fullmatch(r'(?:[01]\d|2[0-3]):[0-5]\d', hour):
         raise ValueError('Vaqt HH:MM shaklida bo‘lsin, masalan 19:00')
     try:
         ZoneInfo(tz)
