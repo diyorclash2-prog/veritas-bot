@@ -1,0 +1,43 @@
+VERITAS BOT — LINGUA INTEGRATSIYA TEKSHIRUVI
+
+Holat: mahalliy ishchi versiya. GitHub main o‘zgarmadi, Railway deploy qilinmadi.
+GitHub asosi: diyorclash2-prog/veritas-bot
+Commit: f649c596448e4ae790fdd7e85e5034cf5cd93243
+bot.py asl blob: c50ee0d6e2f9024a3b8174f028cb9bdbcf1e349c
+Ishchi tarmoq nomi: work/lingua-daily-promo
+
+Muhit: Python 3.12, python-telegram-bot 22.8.
+Buyruq: python -m unittest -q test_lingua_bot_bridge
+Natija: Ran 44 tests — OK.
+
+Tekshirilgan holatlar:
+- HTTPS sayt manzili, oddiy URL tugmasi, sinov versiyasi ekanini bildiruvchi matn.
+- /lingua hamda boshqa routerlarni to‘xtatish; eski handlerlar saqlanishi.
+- Super Ega va shaxsiy chat talabi; begona foydalanuvchilarga rad javobi.
+- Reklamani yoqish/o‘chirish, vaqt zonasi, vaqt, kanal qo‘shish/chiqarish, namuna.
+- Kanallarning aniqlanishi, ruxsatlar o‘zgarganda holatning yangilanishi.
+- Guruhlar va shaxsiy chatlarga avtomatik reklama yubormaslik.
+- Mavjud jadval ma’lumotlarini saqlash, ro‘yxatni takrorlamasdan to‘ldirish.
+- Belgilangan vaqtgacha yubormaslik; bir kunlik takrorni bostirish; yangi kun.
+- Restart, parallel ishchilar, DST takroriy soati va yarim tundan o‘tish.
+- Bir necha kun o‘chib turishdan keyin eski reklamalarni yig‘ib yubormaslik.
+- Noma’lum natijali timeout yoki yuborish oldidagi uzilishdan keyin takrorlamaslik.
+- Telegram RetryAfter muddati: butun reklama navbatini kutish, restartda saqlanish.
+- RetryAfter uchun bir kunda uch urinish chegarasi.
+- Post huquqi yo‘qolgan kanalni to‘xtatib, qolgan kanallarni davom ettirish.
+- Kanal chiqarib tashlanayotganda yuborish poygasiga qarshi qayta tekshirish.
+- Kanal nomlarida uzun emoji satrlari: xabar chegarasidan oshirmaslik.
+- Noto‘g‘ri konfiguratsiyada asosiy botni to‘xtatmaslik.
+
+Qo‘shimcha tekshiruv:
+- bot.py, veritas_games_bridge.py, lingua_bot_bridge.py va test fayli sintaksisi: OK.
+- Asl bot.py bilan taqqoslash: faqat ikki ulash satri qo‘shilgan.
+- git diff --check: OK.
+
+Chegaralar:
+Haqiqiy Telegramga hech qanday so‘rov yoki reklama yuborilmadi. Testlar sintetik
+vaqtinchalik bazalar va Telegram javoblari bilan bajarildi. Bu eski botning barcha
+funksiyalari uchun to‘liq regressiya testi yoki jonli tizim sinovi degani emas.
+Bazaga doimiy disk talab qilinadi. Aloqa noma’lum uzilganda aynan bir marta
+yuborish kafolati yo‘q: takrorlash o‘rniga o‘sha kunlik post tushib qolishi mumkin.
+

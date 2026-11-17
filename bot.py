@@ -10518,6 +10518,8 @@ def main (  ) :
             app.job_queue.run_repeating ( autobook_job,AUTOBOOK_INTERVAL,first=90)
     from veritas_games_bridge import register_games_handlers
     register_games_handlers(app)
+    from lingua_bot_bridge import register_lingua_handlers
+    register_lingua_handlers(app, db_path=DB_PATH, super_owner_ids=SUPER_OWNERS)
     
     app.add_error_handler ( error_handler)
     log.info ( "VERITAS v9.4 UNIFIED NEWS ROUTER starting")
