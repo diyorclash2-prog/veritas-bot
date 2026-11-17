@@ -25,7 +25,7 @@ from astra_support import ASTRA, AIUnavailable, CodingSessions
 JOB_NAME = 'veritas-astra-repairs-v1'
 SOURCE_FILES = ('bot.py', 'lingua_bot_bridge.py', 'super_settings.py', 'astra_support.py',
                 'repair_jobs.py', 'test_lingua_bot_bridge.py', 'test_super_settings.py',
-                'test_astra_support.py', 'test_repair_jobs.py')
+                'test_astra_support.py', 'test_repair_jobs.py', 'maintainer_client.py')
 EDITABLE = frozenset(('bot.py', 'lingua_bot_bridge.py', 'super_settings.py'))
 MAX_SECONDS = 600
 MAX_DAILY = 3

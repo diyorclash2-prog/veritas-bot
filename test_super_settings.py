@@ -114,7 +114,8 @@ class SuperTests(unittest.IsolatedAsyncioTestCase):
         self.ai.assert_awaited_once()
         self.ctx.bot.send_message.assert_awaited_once()
         self.assertEqual(self.ctx.bot.send_message.call_args.kwargs['chat_id'], 123)
-        self.assertIn('Kod o‘zgartirilmadi', self.ctx.bot.send_message.call_args.kwargs['text'])
+        self.assertIn('Bu AI tahlili', self.ctx.bot.send_message.call_args.kwargs['text'])
+        self.assertNotIn('Yangi kod ishga tushdi', self.ctx.bot.send_message.call_args.kwargs['text'])
         self.assertEqual(self.bridge.reports.recent(123)[0]['status'], 'reviewed')
 
     async def test_ai_failure_does_not_lose_report_or_leak_error(self):
