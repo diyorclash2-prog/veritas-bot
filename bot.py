@@ -1534,6 +1534,7 @@ def super_menu_markup ( uid=None ) :
         [InlineKeyboardButton ( "🏘 Bot ishlayotgan guruhlar",callback_data="botgroups:0" ) ],
     ]
     if uid in SUPER_OWNERS:
+        kb.append([InlineKeyboardButton("⚙️ Super sozlama", callback_data="supercfg:menu")])
         kb.append ( [InlineKeyboardButton ( "📸 Chat rasmlari",callback_data="chatshot:list" ) ])
         kb.append ( [InlineKeyboardButton ( "📢 AI Yangilik",callback_data="news:menu" ) ])
     kb.append ( [InlineKeyboardButton ( "⬅️ Orqaga",callback_data="home" ) ,InlineKeyboardButton ( "🏠 Bosh menyu",callback_data="home" ) ])
@@ -2840,7 +2841,8 @@ async def cmd_super ( update,ctx ) :
     except Exception: real="API orqali olinmadi"
     await update.effective_message.reply_text(
         f"👑 VERITAS SUPER EGA\n\nFoydalanuvchilar: {uc}\nGuruhlar: {gc}\nBot real Stars: {real}\n"
-        f"Super Egalar: {', '.join ( map ( str,SUPER_OWNERS )  ) }"
+        f"Super Egalar: {', '.join ( map ( str,SUPER_OWNERS )  ) }",
+        reply_markup=super_menu_markup(update.effective_user.id)
     )
 
 async def topup ( update,ctx,amount ) :
@@ -10520,6 +10522,8 @@ def main (  ) :
     register_games_handlers(app)
     from lingua_bot_bridge import register_lingua_handlers
     register_lingua_handlers(app, db_path=DB_PATH, super_owner_ids=SUPER_OWNERS)
+    from super_settings import register_super_settings
+    register_super_settings(app, db_path=DB_PATH, super_owner_ids=SUPER_OWNERS)
     
     app.add_error_handler ( error_handler)
     log.info ( "VERITAS v9.4 UNIFIED NEWS ROUTER starting")
