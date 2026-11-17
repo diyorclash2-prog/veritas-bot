@@ -3,10 +3,12 @@ import ast
 import os
 from pathlib import Path
 import re
+import shutil
 import subprocess
 import sys
+import tempfile
 
-candidate, baseline = map(Path,sys.argv[1:3]) if len(sys.argv)==3 else (Path('/candidate'),Path('/trusted'))
+candidate, baseline = (p.resolve() for p in map(Path,sys.argv[1:3])) if len(sys.argv)==3 else (Path('/candidate'),Path('/trusted'))
 auto = os.getenv('AUTOREPAIR') == 'true'
 editable = {'bot.py','lingua_bot_bridge.py','super_settings.py'}
 
@@ -45,10 +47,24 @@ result=unittest.TextTestRunner(verbosity=1).run(suite)
 sys.exit(0 if result.testsRun and result.wasSuccessful() else 1)
 '''
 if tests:
-    prior = subprocess.run([sys.executable,'-I','-c',runner,str(baseline),
-                            *[str(candidate/t) for t in sorted(tests)]],timeout=120)
+    # __file__-relative AST tests must inspect OLD source too. Merely changing
+    # sys.path leaves the test located beside candidate/bot.py and tests the
+    # candidate twice. Overlay only the new tests onto a disposable baseline.
+    # Both checkouts stay untouched; this still runs inside the isolated CI container.
+    with tempfile.TemporaryDirectory(prefix='veritas-baseline-') as tmp:
+        prior_root = Path(tmp)
+        for name, path in before.items():
+            assert not path.is_symlink(), 'Symlink in baseline'
+            target = prior_root/name
+            target.parent.mkdir(parents=True,exist_ok=True)
+            shutil.copyfile(path,target)
+        for name in tests:
+            shutil.copyfile(candidate/name,prior_root/name)
+        prior = subprocess.run([sys.executable,'-I','-c',runner,str(prior_root),
+                                *[str(prior_root/t) for t in sorted(tests)]],
+                               cwd=prior_root,timeout=120)
     assert prior.returncode == 1, 'Regression must fail on the old code'
 all_tests = sorted(str(p) for p in candidate.glob('test_*.py'))
 assert all_tests, 'No tests found'
-result = subprocess.run([sys.executable,'-I','-c',runner,str(candidate),*all_tests],timeout=180)
+result = subprocess.run([sys.executable,'-I','-c',runner,str(candidate),*all_tests],cwd=candidate,timeout=180)
 sys.exit(result.returncode)
