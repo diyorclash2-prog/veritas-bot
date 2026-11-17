@@ -25,7 +25,8 @@ from astra_support import ASTRA, AIUnavailable, CodingSessions
 JOB_NAME = 'veritas-astra-repairs-v1'
 SOURCE_FILES = ('bot.py', 'lingua_bot_bridge.py', 'super_settings.py', 'astra_support.py',
                 'repair_jobs.py', 'test_lingua_bot_bridge.py', 'test_super_settings.py',
-                'test_astra_support.py', 'test_repair_jobs.py', 'maintainer_client.py')
+                'test_astra_support.py', 'test_repair_jobs.py', 'maintainer_client.py',
+                'owner_conversation.py', 'test_owner_conversation.py')
 EDITABLE = frozenset(('bot.py', 'lingua_bot_bridge.py', 'super_settings.py'))
 MAX_SECONDS = 600
 MAX_DAILY = 3
@@ -182,13 +183,19 @@ class RepairStore:
             # A crash before the session id was saved must not start a second paid job.
             db.execute("UPDATE super_repairs SET status='failed',summary=? WHERE status='starting' AND started_at<?",
                        ('Agent yaratish uzilib qoldi; takror so‘rov yuborilmadi.', stamp-120))
-            row = db.execute("SELECT r.*,i.report FROM super_repairs r JOIN super_incidents i ON i.id=r.report_id WHERE r.status IN ('starting','prepared','running') ORDER BY r.created_at LIMIT 1").fetchone()
+            db.execute("UPDATE super_repairs SET status='failed',summary=? WHERE status='drafting' AND started_at<?",
+                       ('Astra taklifi restartda uzildi; pullik so‘rov takrorlanmadi.',stamp-660))
+            row = db.execute("SELECT r.*,i.report FROM super_repairs r JOIN super_incidents i ON i.id=r.report_id WHERE r.status IN ('starting','prepared','running','drafting') ORDER BY r.created_at LIMIT 1").fetchone()
             if row:
                 return dict(row)
             row = db.execute("SELECT r.*,i.report FROM super_repairs r JOIN super_incidents i ON i.id=r.report_id WHERE r.status='queued' ORDER BY r.created_at LIMIT 1").fetchone()
             if row:
                 db.execute("UPDATE super_repairs SET status='starting',started_at=? WHERE report_id=?", (stamp, row['report_id']))
                 return {**dict(row), 'claimed_now': True, 'started_at': stamp}
+
+    def drafting(self, report_id):
+        with self.reports.db() as db:
+            db.execute("UPDATE super_repairs SET status='drafting' WHERE report_id=? AND status='starting'",(report_id,))
 
     def started(self, report_id, session_id, manifest):
         with self.reports.db() as db:
@@ -206,7 +213,7 @@ class RepairStore:
             raise ValueError('Not a repair proposal state')
         from super_settings import redact
         with self.reports.db() as db:
-            db.execute("UPDATE super_repairs SET status=?,summary=?,patch=?,test_evidence=? WHERE report_id=? AND status IN ('queued','starting','prepared','running')",
+            db.execute("UPDATE super_repairs SET status=?,summary=?,patch=?,test_evidence=? WHERE report_id=? AND status IN ('queued','starting','prepared','running','drafting')",
                        (status, redact(summary)[:1700], patch, json.dumps(tests, ensure_ascii=False), report_id))
 
     def notice(self):
@@ -228,23 +235,25 @@ class RepairStore:
 
 
 class RepairWorker:
-    def __init__(self, reports, owners, *, root=None, api=None, clock=time.time):
+    def __init__(self, reports, owners, *, root=None, api=None, clock=time.time, proposer=None):
         self.store = RepairStore(reports)
         self.owners = frozenset(owners)
         self.root = Path(root or __file__).resolve().parent if root is None else Path(root)
         self.api, self.clock = api or CodingSessions(), clock
+        self.proposer = proposer
         self.lock = asyncio.Lock()
 
     @staticmethod
     def describe(row):
         labels = {'queued': 'Navbatda', 'starting': 'Agent ochilmoqda', 'prepared': 'Agent tayyor', 'running': 'Kod tekshirilmoqda',
+                  'drafting': 'Astra kod taklifini tayyorlamoqda',
                   'candidate': 'Tuzatish taklifi tayyor', 'no_change': 'Kod o‘zgarmadi',
                   'failed': 'Kod tekshiruvi bajarilmadi', 'cancelled': 'Bekor qilindi'}
         evidence = json.loads(row.get('test_evidence', '[]'))
         tests = '\n'.join(f"• {t['command']} → exit {t['exit_code']}" for t in evidence[:5])
         test_text = '\n\nAgent qayd etgan sinovlar:\n' + tests if tests else ''
         return (f"🧑‍💻 Astra · murojaat #{row['report_id']}\n{labels[row['status']]}\n\n{row['summary']}{test_text}\n\n"
-                'Bu ajratilgan muhitdagi taklif. Ishlayotgan bot o‘zgarmadi; GitHub/deploy ulanishi hali yo‘q.')
+                'Bu kod taklifi. Mustaqil CI va avtomatik joylash hali bajarilmagan. Ishlayotgan bot o‘zgarmadi.')
 
     async def cancel(self, report_id, owner_id):
         row = self.store.get(report_id, owner_id)
@@ -267,9 +276,16 @@ class RepairWorker:
                             await self.api.cancel(row['session_id'])
                         self.store.finish(row['report_id'], 'cancelled', 'Super Ega ruxsati bekor qilingan.')
                     elif row.get('claimed_now'):
-                        files, manifest = source_bundle(self.root)
-                        sid = await self.api.create(repair_payload(row['report'], files))
-                        self.store.started(row['report_id'], sid, manifest)
+                        if os.getenv('VERITAS_REPAIR_PROVIDER') == 'responses':
+                            from astra_proposer import Proposer
+                            self.store.drafting(row['report_id'])
+                            factory = self.proposer or Proposer
+                            result = await asyncio.wait_for(factory(self.root).propose(row['report']),timeout=MAX_SECONDS)
+                            self.store.finish(row['report_id'],result['status'],result['summary'],patch=result['patch'])
+                        else:
+                            files, manifest = source_bundle(self.root)
+                            sid = await self.api.create(repair_payload(row['report'], files))
+                            self.store.started(row['report_id'], sid, manifest)
                     elif row['status'] == 'prepared':
                         if self.clock() - row['started_at'] > MAX_SECONDS:
                             await self.api.cancel(row['session_id'])
@@ -296,7 +312,7 @@ class RepairWorker:
                                                       patch=result['patch'], tests=result['tests'])
                                 elif turn and turn.get('status') in {'failed', 'cancelled'}:
                                     self.store.finish(row['report_id'], 'failed', 'Agent vazifani yakunlay olmadi; asl kod saqlandi.')
-                except (AIUnavailable, ValueError, OSError) as exc:
+                except (AIUnavailable, ValueError, OSError, TimeoutError) as exc:
                     logging.getLogger(__name__).warning('Repair step unavailable: %s', type(exc).__name__)
                     # Read failures can recover on the next tick; no second session is created.
                     if not row['session_id'] or self.clock() - row['started_at'] > MAX_SECONDS or isinstance(exc, (ValueError, OSError)):

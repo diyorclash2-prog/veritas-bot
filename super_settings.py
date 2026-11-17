@@ -159,7 +159,10 @@ class Reports:
 
 def menu():
     return InlineKeyboardMarkup([
-        [InlineKeyboardButton('🛠 Xatoni yuborish', callback_data='supercfg:report')],
+        [InlineKeyboardButton('💬 Astra bilan suhbat', callback_data='supercfg:chat')],
+        [InlineKeyboardButton('🛠 Buyruq / tuzatish', callback_data='supercfg:report')],
+        [InlineKeyboardButton('📖 Suhbat tarixi', callback_data='supercfg:chat_history'),
+         InlineKeyboardButton('🧹 Suhbatni tozalash', callback_data='supercfg:chat_clear')],
         [InlineKeyboardButton('📋 Murojaatlarim', callback_data='supercfg:reports'),
          InlineKeyboardButton('🩺 Bot holati', callback_data='supercfg:health')],
         [InlineKeyboardButton('📣 Reklama holati', callback_data='supercfg:ads:status')],
@@ -189,6 +192,8 @@ class SuperSettings:
         self.lock = asyncio.Lock()
         from repair_jobs import RepairWorker
         self.repairs = RepairWorker(self.reports, self.owners)
+        from owner_conversation import OwnerConversation
+        self.chat = OwnerConversation(self.reports,lambda:self.owners,self.snapshot,clock=clock)
 
     def allowed(self, update):
         user, chat = update.effective_user, update.effective_chat
@@ -218,10 +223,11 @@ class SuperSettings:
             await update.effective_message.reply_text('Bu bo‘lim faqat Super Ega bilan shaxsiy chatda ishlaydi.')
         else:
             self.reports.cancel(update.effective_user.id)
+            self.chat.close(update.effective_user.id)
             await update.effective_message.reply_text(
-                '⚙️ Super sozlama\n\nXatoni yuboring: bot holati tekshiriladi va AI tahlili qaytadi. '
+                '⚙️ Super sozlama\n\nAstra bilan suhbatlashing yoki Buyruq / tuzatish orqali vazifa yuboring. '
                 f'AI modeli: {configured_model()}. '
-                f'Ajratilgan kod tekshiruvi: {"yoqilgan" if self.repair_enabled() else "o‘chirilgan"}. '
+                f'AI kod taklifi: {"yoqilgan" if self.repair_enabled() else "o‘chirilgan"}. '
                 f'Avtomatik tuzatish: {"yoqilgan" if maintainer_client.enabled() else "o‘chirilgan"}.', reply_markup=menu())
         raise ApplicationHandlerStop
 
@@ -232,12 +238,31 @@ class SuperSettings:
             raise ApplicationHandlerStop
         await query.answer()
         owner, action = update.effective_user.id, query.data.removeprefix('supercfg:')
+        if action not in {'chat','chat_history'}: self.chat.close(owner)
         if action == 'menu':
             await self.show(update, context)
+        elif action == 'chat':
+            self.reports.cancel(owner)
+            self.chat.open(owner)
+            await query.message.reply_text('💬 Astra bilan suhbat ochildi. Savolingizni yozing; ketma-ket gaplashishingiz mumkin. '
+                'Suhbat 30 daqiqa faol turadi. Kod vazifasi uchun Buyruq / tuzatish tugmasini bosing. '
+                'Maxfiy kalit yubormang. Chiqish: Bekor qilish yoki /super_settings.',reply_markup=menu())
+        elif action == 'chat_history':
+            history = self.chat.history(owner)
+            await query.message.reply_text('📖 Oxirgi suhbat' if history else 'Suhbat tarixi bo‘sh.',reply_markup=menu())
+            for entry in history[-6:]:
+                label = 'Siz' if entry['role']=='user' else 'Astra'
+                await query.message.reply_text(label+': '+entry['content'],parse_mode=None)
+        elif action == 'chat_clear':
+            self.reports.cancel(owner)
+            self.chat.close(owner,forget=True)
+            await query.message.reply_text('Sizning Astra suhbat tarixingiz tozalandi.',reply_markup=menu())
         elif action == 'report':
             self.reports.arm(owner, int(self.clock()))
             await query.message.reply_text(
-                'Qaysi joy ishlamayapti? Buyruq/tugma, kutilgan natija va kuzatilgan xatoni yozing. '
+                'Qanday vazifa bajarilsin yoki qaysi joy ishlamayapti? Tugma/buyruq, kutilgan natija va xatoni aniq yozing. '
+                + ('Sinovlardan o‘tgan tuzatish avtomatik joylanadi. ' if maintainer_client.enabled() else
+                   'Hozir vazifa saqlanadi va Astra tahlil qiladi; AI kod taklifi yoqilgan bo‘lsa, tuzatish fayli qaytadi. Avtomatik joylash hali ulanmagan. ')+
                 'Token, parol va telefon raqamini yubormang. Matn AI tahliliga yuboriladi. '
                 '10 daqiqa ichida yozing; bekor qilish: /super_settings.', reply_markup=menu())
         elif action == 'reports':
@@ -269,7 +294,7 @@ class SuperSettings:
                         f"Reklama vazifasi: {'bor' if snap['lingua_job_registered'] else 'yo‘q'}\n"
                         f"Yaqinda qayd etilgan xatolar: {len(snap['recent_errors'])}\n"
                         f"AI modeli: {snap['ai_model']}\n"
-                        f"Ajratilgan kod tekshiruvi: {'yoqilgan' if snap['sandbox_repair_enabled'] else 'o‘chirilgan'}\n"
+                        f"AI kod taklifi: {'yoqilgan' if snap['sandbox_repair_enabled'] else 'o‘chirilgan'}\n"
                         f"Avtomatik tuzatish: {'yoqilgan' if snap['automatic_repair_connected'] else 'o‘chirilgan'}")
             except sqlite3.Error:
                 text = 'Bazani o‘qishda xato. Maxfiy ma’lumotlar ko‘rsatilmaydi.'
@@ -303,13 +328,23 @@ class SuperSettings:
                 await query.message.reply_text('Lingua moduli yuklanmagan.')
         elif action == 'cancel':
             self.reports.cancel(owner)
-            await query.message.reply_text('Murojaat yozish bekor qilindi.', reply_markup=menu())
+            await query.message.reply_text('Astra suhbatidan chiqildi; murojaat yozish bekor qilindi.', reply_markup=menu())
         raise ApplicationHandlerStop
 
     async def receive(self, update, context):
         if not self.allowed(update):
             return
         owner, msg = update.effective_user.id, update.effective_message
+        if self.chat.awaiting(owner):
+            if not msg.text or msg.text.startswith(('/', '*')):
+                self.chat.close(owner)
+                return
+            try:
+                self.chat.submit(owner,msg.message_id,msg.text)
+                await msg.reply_text('💬 Astra javob tayyorlayapti…',reply_markup=menu())
+            except ValueError as exc:
+                await msg.reply_text(str(exc),parse_mode=None)
+            raise ApplicationHandlerStop
         if not self.reports.awaiting(owner, int(self.clock())):
             return
         if not msg.text or msg.text.startswith(('/', '*')):
@@ -348,6 +383,9 @@ class SuperSettings:
                     with self.reports.db() as db: db.execute("UPDATE super_remote_outbox SET status='accepted' WHERE id=?",(row['id'],))
         except Exception as exc:
             logging.getLogger(__name__).warning('Maintainer connection unavailable: %s',type(exc).__name__)
+
+    async def chat_tick(self, context):
+        await self.chat.tick(context,menu())
 
     async def tick(self, context):
         if self.lock.locked():
@@ -396,7 +434,7 @@ def register_super_settings(application, *, db_path, super_owner_ids):
         logging.getLogger(__name__).error('Super settings database unavailable')
         return None
     application.bot_data[STATE_KEY] = bridge
-    logging.getLogger(__name__).info('VERITAS_SUPPORT_READY model=%s isolated_repair=%s auto_deploy=%s',
+    logging.getLogger(__name__).info('VERITAS_SUPPORT_READY owner_chat=True model=%s isolated_repair=%s auto_deploy=%s',
                                      configured_model(), bridge.repair_enabled(), maintainer_client.enabled())
     logging.getLogger().addHandler(bridge.errors)
     application.add_handler(CommandHandler('super_settings', bridge.show), group=-31)
@@ -404,6 +442,9 @@ def register_super_settings(application, *, db_path, super_owner_ids):
     application.add_handler(MessageHandler(filters.ChatType.PRIVATE & filters.Regex(r'^⚙️ Super sozlama$'), bridge.show), group=-31)
     application.add_handler(MessageHandler(filters.ChatType.PRIVATE, bridge.receive), group=-29)
     if application.job_queue:
+        from owner_conversation import JOB_NAME as CHAT_JOB
+        application.job_queue.run_repeating(bridge.chat_tick,interval=5,first=8,name=CHAT_JOB,
+                                           job_kwargs={'max_instances':1,'coalesce':True})
         application.job_queue.run_repeating(bridge.remote_tick,interval=20,first=12,name='veritas-maintainer-link-v1',
                                            job_kwargs={'max_instances':1,'coalesce':True})
         from repair_jobs import JOB_NAME as REPAIR_JOB

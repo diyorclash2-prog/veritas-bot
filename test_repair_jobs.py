@@ -218,6 +218,52 @@ class WorkerTests(unittest.IsolatedAsyncioTestCase):
             await self.worker.tick(self.ctx)
         self.assertEqual(self.api.delete.await_count, 3)
 
+    async def test_responses_proposal_returns_patch_without_hosted_session_or_source_write(self):
+        from astra_proposer import Proposer
+        proposed=Proposer(self.root).apply('Taklif',[
+            {'path':'bot.py','search':'value = 1','replace':'value = 2'},
+            {'path':'test_repair_case_value.py','search':'','replace':'import unittest\nfrom bot import value\nclass T(unittest.TestCase):\n def test_value(self): self.assertEqual(value,2)\n'}])
+        proposer=NS(propose=AsyncMock(return_value=proposed))
+        self.worker.proposer=lambda root:proposer
+        with patch.dict(os.environ,{'VERITAS_REPAIR_PROVIDER':'responses'}):
+            await self.worker.tick(self.ctx); await self.worker.tick(self.ctx)
+        proposer.propose.assert_awaited_once()
+        self.api.create.assert_not_awaited()
+        self.assertEqual((self.root/'bot.py').read_text(),'value = 1\n')
+        self.ctx.bot.send_document.assert_awaited_once()
+        self.assertIn('CI',self.ctx.bot.send_message.call_args.kwargs['text'])
+        self.assertEqual(self.worker.store.get(self.report_id,123)['test_evidence'],'[]')
+
+    async def test_responses_timeout_has_no_second_paid_job(self):
+        proposer=NS(propose=AsyncMock(side_effect=TimeoutError()))
+        self.worker.proposer=lambda root:proposer
+        with patch.dict(os.environ,{'VERITAS_REPAIR_PROVIDER':'responses'}):
+            await self.worker.tick(self.ctx); await self.worker.tick(self.ctx)
+        proposer.propose.assert_awaited_once()
+        self.assertEqual(self.worker.store.get(self.report_id,123)['status'],'failed')
+
+    async def test_responses_cancel_during_generation_is_not_overwritten(self):
+        async def propose(report):
+            await self.worker.cancel(self.report_id,123)
+            return {'status':'candidate','summary':'Taklif','patch':b'example'}
+        self.worker.proposer=lambda root:NS(propose=propose)
+        with patch.dict(os.environ,{'VERITAS_REPAIR_PROVIDER':'responses'}): await self.worker.tick(self.ctx)
+        self.assertEqual(self.worker.store.get(self.report_id,123)['status'],'cancelled')
+        self.ctx.bot.send_document.assert_not_awaited()
+
+    async def test_responses_restart_waits_then_fails_without_resubmission(self):
+        self.worker.store.active_or_claim(self.stamp)
+        self.worker.store.drafting(self.report_id)
+        proposer=NS(propose=AsyncMock())
+        self.worker.proposer=lambda root:proposer
+        with patch.dict(os.environ,{'VERITAS_REPAIR_PROVIDER':'responses'}):
+            await self.worker.tick(self.ctx)
+            self.assertEqual(self.worker.store.get(self.report_id,123)['status'],'drafting')
+            self.stamp+=661
+            await self.worker.tick(self.ctx)
+        proposer.propose.assert_not_awaited()
+        self.assertEqual(self.worker.store.get(self.report_id,123)['status'],'failed')
+
 
 if __name__ == '__main__':
     unittest.main()
