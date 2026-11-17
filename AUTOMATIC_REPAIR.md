@@ -45,6 +45,11 @@ lingua_bot_bridge.py, super_settings.py va yangi test_repair_case_*.py bilan
 ishlaydi; o‘z ijrochisi, CI, dependency yoki credential sozlamalarini o‘zgartira olmaydi.
 
 Codex model chaqiruvlari mahalliy gateway orqali Responses APIga yuboriladi.
+Gateway Codex qo‘shgan `additional_tools` va ichki native-tool ko‘rsatmalarini
+olib tashlaydi: model faqat to‘rtta manba vositasini ko‘radi. `exec` va boshqa
+ruxsat etilmagan javoblar hech qachon bajarilmaydi. Bunday javobdan keyin bir
+marta to‘g‘ri vositaga yo‘naltirib qayta urinadi; bu urinish ham $60 hisobiga
+va jami 24 so‘rov chegarasiga kiradi. Takroriy xato aniq sabab bilan yakunlanadi.
 Testlarni Codex ichida emas, mustaqil GitHub CI bajaradi. Eski hosted proposal
 moduli saqlangan, lekin `VERITAS_REPAIR_ENABLED=0` bo‘lib qoladi.
 
