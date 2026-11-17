@@ -15,6 +15,7 @@ import urllib.request
 import urllib.error
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
+from bot_runtime import OrderedUpdates, FastTranslations, PrivateAnswers
 
 try:
     from telethon import TelegramClient
@@ -706,7 +707,10 @@ async def v9_callback ( update,ctx ) :
 
 def veritas_global_keyboard (  ) :
     return ReplyKeyboardMarkup(
-        [[KeyboardButton ( "🛡 Veritas" ) , KeyboardButton ( "🎓 O‘quv • Talaba" ) ]],
+        [[KeyboardButton ( "🛡 Veritas" ) , KeyboardButton ( "🎓 O‘quv • Talaba" ) ],
+         [KeyboardButton ( "🌍 Til o‘rganish" )],
+         [KeyboardButton ( "📝 Test" ), KeyboardButton ( "❓ Savol-javob" ), KeyboardButton ( "🧩 Rebus" )],
+         [KeyboardButton ( "📣 Avtopost" ), KeyboardButton ( "❓ V10 Yordam" )]],
         resize_keyboard=True,
         is_persistent=True
     )
@@ -1093,9 +1097,18 @@ TEXT:
         log.exception ( "i18n translation failed")
         return text
 
+_fast_translations = FastTranslations()
+
+def i18n_cached(text, lang):
+    try:
+        row = one('SELECT translated FROM i18n_cache WHERE lang=? AND source=?', (lang,text))
+        return row['translated'] if row else None
+    except sqlite3.Error:
+        return None
+
 async def i18n_text ( text,lang ) :
     if not text or lang=="uz":return text
-    return await asyncio.to_thread ( _i18n_translate_sync,text,lang)
+    return await _fast_translations.text(text,lang,i18n_cached,_i18n_translate_sync)
 
 async def i18n_markup ( markup,lang,bot ) :
     if not markup or lang=="uz":return markup
@@ -1104,18 +1117,24 @@ async def i18n_markup ( markup,lang,bot ) :
         if "inline_keyboard" in data:
             for row in data["inline_keyboard"]:
                 for b in row:
-                    if b.get ( "text" ) :b["text"]=await i18n_text ( b["text"],lang)
+                    if b.get ( "text" ) :b["text"]=i18n_cached(b["text"],lang) or b["text"]
             return InlineKeyboardMarkup.de_json ( data,bot)
         if "keyboard" in data:
-            for row in data["keyboard"]:
-                for b in row:
-                    if isinstance ( b,dict) and b.get ( "text" ) :b["text"]=await i18n_text ( b["text"],lang)
-            return ReplyKeyboardMarkup.de_json ( data,bot)
+            # Reply buttons send their label as text. Keep stable command labels.
+            return markup
     except Exception:
         log.exception ( "i18n markup failed")
     return markup
 
 class VeritasI18nBot ( ExtBot ) :
+    async def answer_callback_query(self, callback_query_id, *args, **kwargs):
+        try:
+            return await super().answer_callback_query(callback_query_id, *args, **kwargs)
+        except BadRequest as exc:
+            if any(x in str(exc).lower() for x in ('query is too old', 'query id is invalid', 'query_id_invalid')):
+                return True  # Expired spinner must not abort the requested menu.
+            raise
+
     async def send_message ( self,chat_id,text,*args,**kwargs ) :
         if kwargs.pop ( "_skip_i18n", False ) :
             return await super (  ) .send_message ( chat_id,text,*args,**kwargs)
@@ -1126,14 +1145,21 @@ class VeritasI18nBot ( ExtBot ) :
         return await super (  ) .send_message ( chat_id,text,*args,**kwargs)
 
     async def edit_message_text ( self,text,*args,**kwargs ) :
-        if kwargs.pop ( "_skip_i18n", False ) :
-            return await super (  ) .edit_message_text ( text,*args,**kwargs)
+        skip_i18n = kwargs.pop ( "_skip_i18n", False )
         chat_id=kwargs.get ( "chat_id")
-        lang=chat_lang ( chat_id) if chat_id is not None else "uz"
+        lang=chat_lang ( chat_id) if chat_id is not None and not skip_i18n else "uz"
         text=await i18n_text ( text,lang)
         if kwargs.get ( "reply_markup" ) :
             kwargs["reply_markup"]=await i18n_markup ( kwargs["reply_markup"],lang,self)
-        return await super (  ) .edit_message_text ( text,*args,**kwargs)
+        try:
+            return await super (  ) .edit_message_text ( text,*args,**kwargs)
+        except BadRequest as exc:
+            detail = str(exc).lower()
+            if 'message is not modified' in detail:
+                return True
+            if chat_id is not None and any(x in detail for x in ("message can't be edited", 'message to edit not found', 'no text in the message')):
+                return await super().send_message(chat_id, text, reply_markup=kwargs.get('reply_markup'), parse_mode=kwargs.get('parse_mode'))
+            raise
 
     async def send_photo ( self,chat_id,photo,*args,**kwargs ) :
         if kwargs.pop ( "_skip_i18n", False ) :
@@ -1518,6 +1544,8 @@ def main_menu_markup ( uid ) :
       [InlineKeyboardButton ( "🌐 Global aktiv",callback_data="globalactive" ) ],
       [InlineKeyboardButton ( "🔎 A’zo profili",callback_data="profilefind" ) ,InlineKeyboardButton ( "💠 Qadr TOP",callback_data="qadrtop" ) ],
       [InlineKeyboardButton ( "🤖 Veritas AI",callback_data="ai_private" ) ],
+      [InlineKeyboardButton ( "🌍 Til o‘rganish — VERITAS LINGUA",callback_data="lingua:home" ) ],
+      [InlineKeyboardButton ( "📝 Test",callback_data="nav:tests" ),InlineKeyboardButton ( "❓ Savol-javob",callback_data="nav:qa" ) ],
       [InlineKeyboardButton ( "🧩 AI Rebus",callback_data="rebus:start" ) ],
       [InlineKeyboardButton ( "📚 Vasatiya kutubxonasi",callback_data="library" ) ,InlineKeyboardButton ( "📜 Sahih Hadislar",callback_data="hadith" ) ],
       [InlineKeyboardButton ( "📨 Egaga xabar qoldirish",callback_data="owner:message" ) ],
@@ -5227,6 +5255,7 @@ async def callback ( update,ctx ) :
               f"🎖 Unvon: {title_for ( uid,custom ) }\n⭐ Kredit: {r['wallet']}\n✨ XP: {xp}\n💬 Xabarlar: {msgs}\n📈 Level: {level ( xp ) }")
         kb=InlineKeyboardMarkup ( [[InlineKeyboardButton ( "⬅️ Kabinetlar",callback_data=f"cabs:{page}" ) ,InlineKeyboardButton ( "🏠 Bosh menyu",callback_data="home" ) ]])
         return await q.edit_message_text ( text,reply_markup=kb)
+    return await q.answer('Bu tugma eskirgan. /start orqali yangilang.', show_alert=True)
 
 async def giveaway_job ( ctx ) :
     rows=all_ ( "SELECT * FROM giveaways WHERE status='open' AND end_at<=?", ( now (  ) , ) )
@@ -5257,6 +5286,14 @@ async def giveaway_job ( ctx ) :
 
 async def error_handler ( update,ctx ) :
     log.exception ( "Handler error",exc_info=ctx.error)
+    # Never leave an interactive request silently spinning after an exception.
+    if update and getattr(update, 'callback_query', None):
+        try:
+            await update.callback_query.answer('Amal bajarilmadi. /start orqali qayta oching.',show_alert=True)
+            if update.effective_chat and update.effective_chat.type == 'private':
+                await ctx.bot.send_message(update.effective_chat.id, '⚠️ Amal bajarilmadi. /start orqali menyuni qayta oching. Hisobingiz saqlangan.', _skip_i18n=True)
+        except TelegramError:
+            pass
 
 
 # =========================================================
@@ -10458,6 +10495,22 @@ async def greenlezard_command ( update,ctx ) :
 # =========================================================
 
 
+# A chat answer runs in a bounded task so navigation does not wait for the model.
+_interactive_private_answer = private_ai_reply
+_private_answers = PrivateAnswers()
+async def private_ai_reply(update, ctx):
+    msg, user, chat = update.effective_message, update.effective_user, update.effective_chat
+    if not msg or not user or not chat or chat.type != 'private' or user.is_bot or not msg.text:
+        return
+    if msg.text.startswith(('/', '*')) or STATE.get(user.id):
+        return
+    if any(ctx.user_data.get(key) == msg.message_id for key in (
+        'news_consumed_message_id', 'bayram_consumed_message_id', 'v9_consumed_message_id',
+        'owner_consumed_message_id', 'workflow_message_id')):
+        return
+    await _private_answers.submit(update, ctx, _interactive_private_answer)
+
+
 def main (  ) :
     if not TOKEN: raise RuntimeError ( "BOT_TOKEN kiritilmagan.")
     init_db ( )
@@ -10474,7 +10527,7 @@ def main (  ) :
     poster_init_db ( )
     i18n_init_db ( )
     greenlezard_init_db ( )
-    app=Application.builder (  ) .bot ( VeritasI18nBot ( token=TOKEN )  ) .build ( )
+    app=Application.builder().bot(VeritasI18nBot(token=TOKEN)).concurrent_updates(OrderedUpdates()).build()
     app.add_handler ( MessageHandler ( filters.ChatType.GROUPS & ~filters.StatusUpdate.ALL, book_channel_group_router ) , group=-22)
     app.add_handler ( MessageHandler ( filters.ChatType.GROUPS & filters.TEXT, veritas_wake_handler ) , group=-19)
     app.add_handler ( CallbackQueryHandler ( v12_help, pattern=r'^v12:help$' ) , group=-18)
@@ -10538,6 +10591,10 @@ def main (  ) :
     from super_settings import register_super_settings
     register_super_settings(app, db_path=DB_PATH, super_owner_ids=SUPER_OWNERS)
     
+    from lingua_learning import register_learning
+    register_learning(app, DB_PATH, globals())
+    from bot_navigation import register_navigation
+    register_navigation(app, globals())
     app.add_error_handler ( error_handler)
     log.info ( "VERITAS v9.4 UNIFIED NEWS ROUTER starting")
     app.run_polling ( allowed_updates=Update.ALL_TYPES)
