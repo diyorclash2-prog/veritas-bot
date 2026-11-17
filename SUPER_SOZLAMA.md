@@ -29,40 +29,75 @@ bu barcha mumkin bo‘lgan shaxsiy ma’lumotlarni aniqlash kafolati emas — ul
 murojaatga yozmang. Murojaatlar faqat Railway doimiy SQLite bazasida saqlanadi,
 ochiq GitHub issue yoki repozitoriyga yuborilmaydi.
 
-## Ishlaydigan AI tahlili
+## Astra ulanishi — 2026-11-17
 
-Bot mavjud `OPENAI_API_KEY` bilan OpenAI Responses API ga murojaat matni va
-cheklangan diagnostikani yuboradi. `VERITAS_SUPPORT_MODEL` → `OPENAI_MODEL` →
-botdagi mavjud standart model tartibi ishlatiladi. API uchun yangi kalit kodda yo‘q.
-`store=false`; hech qanday shell, fayl yoki deploy vositasi modelga berilmaydi.
-Diagnostika foydalanuvchilar jadvallari, xabarlar tarixi, `.env` yoki to‘liq
-loglarni o‘qimaydi. Xato loglaridan faqat xato turi, modul/funksiya/satr olinadi.
-Natija murojaat muallifiga Telegramda qaytadi. Yetkazish natijasi noma’lum bo‘lsa,
-takror yuborilmaydi; saqlangan javobni **Murojaatlarim** dan ko‘rish mumkin.
-Kalit/model/ulanish ishlamasa, murojaat saqlanib, tahlil bajarilmagani ochiq aytiladi.
+Railway ichidagi mavjud OPENAI_API_KEY bilan haqiqiy sinov bajarildi:
+- Responses: gpt-6-astra, HTTP 200, completed, ASTRA_CONNECTION_OK.
+- 26 input + 8 output = 34 token.
+- Agents API: hosted sandbox yaratish HTTP 201; kichik Python xatosi va
+  assert tekshiruvlari bilan vazifa completed; proof.txt tekshirildi.
+- Sinov sessiyasi tozalandi (HTTP 200). Kalit chiqarilmadi va nusxalanmadi.
 
-## Hali ulanmagan: avtomatik kod tuzatish va deploy
+VERITAS_SUPPORT_MODEL=gpt-6-astra faqat Super sozlama tahliliga ta’sir qiladi.
+Oddiy bot chatining modeli o‘zgarmaydi. Tahlil Responses API bilan store=false,
+medium reasoning, 4096 output token chegarasi va 100 soniyalik kutish chegarasida.
+API kaliti/ruxsat/model/kredit/limit/ulanish xatolari maxfiy javob tanasisiz
+foydalanuvchiga aniq aytiladi. Hech qanday yashirin boshqa modelga o‘tish yo‘q.
 
-Bu modul ChatGPT suhbatiga xabar yubormaydi va o‘zini tuzatadigan agent emas.
-AI javobi diagnostik taxmin; kod o‘zgargani yoki xato tuzalgani haqida dalil emas.
-UI har natijada kod o‘zgartirilmaganini ko‘rsatadi.
+## Ajratilgan kod tekshiruvi
 
-To‘liq avtomatik ta’mirlash uchun alohida izolyatsiyalangan worker zarur: shaxsiy
-murojaat navbatiga kirish, GitHub App orqali shu repozitoriyga yozish, test muhiti,
-Railway deploy/rollback ruxsati, tekshirilgan commit/deploy natijasini navbatga
-qaytarish. ChatGPT’da ulangan interaktiv plaginlar botga avtomatik credential bermaydi.
-GitHub/Railway tokenlarini bot xabariga yoki ochiq repozitoriyga joylamang.
-Worker ulanmaguncha `reviewed` holati faqat “tahlil tayyor; tuzatish kutilmoqda”.
+VERITAS_REPAIR_ENABLED=1 bo‘lsa, yangi muvaffaqiyatli AI tahlilidan keyin kod
+tekshiruvi navbatga qo‘yiladi. Eski murojaatlar qayta ishga tushirilmaydi.
+Kuniga jami 3 ta, bir vaqtda 1 ta, vazifaga 10 daqiqalik kuzatuv chegarasi.
+Bu xarajatning qat’iy dollar limiti emas; API model/container haqi alohida.
+
+repair_jobs.py faqat belgilangan 9 ta kod/test faylini OpenAI-hosted sandboxga
+jo‘natadi. .env, ma’lumotlar bazasi, to‘liq loglar, katalogni umumiy arxivlash
+va runtime kalitlari yuborilmaydi. Symlink va kod ichida topilgan kalit eksportni
+bekor qiladi. Sandbox tarmog‘i o‘chirilgan, maxfiy env yoki GitHub/Railway
+credential berilmagan. Mahalliy kodni bot jarayonida exec/import/subprocess
+orqali bajarish yo‘q.
+
+Agentga tegishli kodni tekshirish, tor tuzatish, mavjud offline testlar va yangi
+regressiya testini bajarish vazifasi beriladi. Javobdagi o‘zgarishlar faqat bot.py,
+lingua_bot_bridge.py, super_settings.py va yangi test_repair_case_*.py fayllarida
+qabul qilinadi. Eski testlar va repair modullarini almashtirish rad qilinadi.
+Natija JSON shakli, fayl yo‘llari, hajmi, Python sintaksisi va asl fayllarning
+SHA-256 qiymatlari tekshiriladi. Asl fayllar o‘zgargan bo‘lsa taklif rad qilinadi.
+
+Kod/takliflar doimiy SQLite bazasida saqlanadi. Restart saqlangan sessiyani davom
+ettiradi. Sessiya IDsi vazifa yuborilishidan oldin saqlanadi; vazifa yuborishdagi
+noaniq javoblar bir xil idempotency key bilan takrorlanadi. Yaratish natijasi
+noma’lum bo‘lsa ikkinchi pullik vazifa boshlanmaydi. Remote cancellation/cleanup
+cheklangan urinishlar bilan bajariladi; ulanish uzilishi uni kafolatlamaydi.
+
+Tuzatish .patch fayli faqat murojaat yuborgan Super Egaga keladi. Murojaatlarim
+bo‘limidan qayta olish yoki ishlayotgan tekshiruvni bekor qilish mumkin. Telegram
+yetkazilishi noma’lum bo‘lsa avtomatik qayta yuborilmaydi.
+
+Agentning test hisoboti mustaqil CI tekshiruvi emas. candidate — faqat taklif;
+hech qachon ishlab turgan botdagi xato tuzatildi degani emas.
+
+## Hali ulanmagan: avtomatik GitHub yozuvi va deploy
+
+Bu modul shu ChatGPT suhbatiga xabar yubormaydi. Astra — alohida API agenti.
+Botda GitHub yoki Railway avtomatik ijrochi credentiali yo‘q. ChatGPT ichidagi
+interaktiv plagin ruxsatlari bot jarayoniga berilmaydi.
+
+Keyingi ulanish: faqat diyorclash2-prog/veritas-bot uchun GitHub App, tekshirilgan
+commitga bog‘langan mustaqil CI, Railway deployment natijasini tekshirish va
+qaytarish mexanizmi. Hozir patch avtomatik main’ga yozilmaydi va deploy qilmaydi.
+GitHub/Railway tokenlarini Telegram xabariga yoki repozitoriyga joylamang.
 
 ## Tekshiruv
 
-`python -m unittest -q test_lingua_bot_bridge test_super_settings`
+python -m unittest -q test_lingua_bot_bridge test_super_settings test_astra_support test_repair_jobs
 
-73 test o‘tdi: kanal/guruh ruxsatlari, kunlik takrorni bostirish, migratsiya,
-restart, eski jadvalni saqlash, private chatga reklama yubormaslik, Super Ega
-chegarasi, kiritish sessiyasi, limit/dedup, credential niqoblash, navbat claimi,
-AI xatosi, Telegram timeout, muallifga qayta xabar, begona murojaatlarni bermaslik.
-Testlar sintetik bazalar va soxta API javoblari bilan; jonli AI yoki barcha
-eski bot funksiyalari uchun to‘liq regressiya testi emas.
+113 offline test o‘tdi. Jonli Astra Responses va kichik hosted sandbox vazifasi
+alohida tasdiqlandi. Haqiqiy foydalanuvchi murojaatidan to botdagi ishlab turgan
+xatoni avtomatik tuzatishgacha bo‘lgan yo‘l hali to‘liq yoqilmagan.
 
-OpenAI API manbasi: https://developers.openai.com/api/reference/resources/responses/methods/create
+Rasmiy API manbalari:
+https://developers.openai.com/api/docs/models/gpt-6-astra
+https://developers.openai.com/api/docs/guides/agents-api/environments/openai-hosted
+https://developers.openai.com/api/docs/guides/agents-api/sessions
