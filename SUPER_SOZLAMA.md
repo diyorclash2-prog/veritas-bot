@@ -101,3 +101,15 @@ Rasmiy API manbalari:
 https://developers.openai.com/api/docs/models/gpt-6-astra
 https://developers.openai.com/api/docs/guides/agents-api/environments/openai-hosted
 https://developers.openai.com/api/docs/guides/agents-api/sessions
+# Astra suhbat va buyruqlar
+
+Botning shaxsiy chatida `/super_settings` yoki **⚙️ Super sozlama** orqali:
+
+- **💬 Astra bilan suhbat** — ketma-ket savol-javob; oxirgi 6 almashinuv kontekstga kiradi. Har bir Super Eganing tarixi alohida. Faol suhbat 30 daqiqada tugaydi.
+- **🛠 Buyruq / tuzatish** — aniq vazifa yoki xatoni saqlaydi, Astra tahlilini qaytaradi. Avtomatik joylash faqat GitHub App ulanishi tekshirilgach yoqiladi.
+- **📖 Suhbat tarixi** — o‘zingizning oxirgi javoblaringiz; **🧹 Suhbatni tozalash** — o‘zingizning tarixingizni o‘chiradi.
+- **✖️ Bekor qilish** yoki `/super_settings` suhbatdan chiqaradi. Eski `/` va `*` buyruqlar o‘z handlerlariga uzatiladi.
+
+Suhbatda kod yoki server buyruqlari bajarilmaydi. Kod vazifasi alohida tugma orqali yuboriladi; haqiqiy natija **Murojaatlarim**da ko‘rinadi. Suhbat navbati restartdan saqlanadi, noaniq API/Telegram natijasi avtomatik takrorlanmaydi. Maxfiy qiymatlar tozalanadi. Tarix 24 soat bilan cheklangan; bir egaga 20 xabar/soat, jami 100 xabar/kun.
+
+Amaldagi avtomatik tuzatish arxitekturasi: [AUTOMATIC_REPAIR.md](AUTOMATIC_REPAIR.md). Quyidagi eski hosted-proposal yo‘li hozir o‘chirilgan.
