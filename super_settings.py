@@ -1,7 +1,7 @@
-"""Private Super Owner incident inbox and AI diagnostics; not an autonomous deployer.
+"""Private Super Owner inbox, conversations and authenticated repair dispatch.
 
-Reports stay in the runtime database, never in public GitHub issues. Diagnostics
-are advisory. A separate hosted sandbox can prepare proposals without live access.
+Reports stay in the runtime database. Actual repairs run in the separate
+maintainer with independent tests and release verification, never in chat AI.
 """
 from __future__ import annotations
 
@@ -29,6 +29,33 @@ BUTTON = '⚙️ Super sozlama'
 LABELS = {'queued': 'Navbatda', 'processing': 'Tekshirilmoqda',
           'reviewed': 'Tahlil tayyor; tuzatish kutilmoqda', 'failed': 'Tekshiruv bajarilmadi',
           'repairing': 'Avtomatik kod tekshiruviga yuborilmoqda'}
+
+
+def owner_repair_command(text):
+    """Recognize explicit Uzbek maintenance imperatives, not questions/examples.
+
+    This is only a routing hint after the private-owner permission check. Unknown
+    wording still has the explicit Buyruq / tuzatish button as a fallback.
+    """
+    if not isinstance(text, str) or text.lstrip().startswith(('/', '*')):
+        return False
+    text = text.lower().translate(str.maketrans({'‘': "'", '’': "'", 'ʻ': "'", 'ʼ': "'"}))
+    # A quoted command or forwarded example is data, not a new owner instruction.
+    text = re.sub(r'```.*?```|`[^`]*`|"[^"]*"|«[^»]*»|“[^”]*”', ' ', text, flags=re.S)
+    text = ' '.join(text.split())
+    if '?' in text or re.search(
+            r"\b(?:qilma\w*|qlma\w*|tuzatma\w*|to'g'ri?lama\w*|joylama\w*|tushirma\w*|to'xtat\w*|"
+            r"kut|kuting|shoshma\w*|qanday|qachon|nima|nimaga|nega|mumkin\w*|"
+            r"misol\w*|namuna\w*|degani|demadim|emas|without|don't)\b|\bdo not\b", text):
+        return False
+    repair = r"(?:tuzat(?:ing)?|tuzatib\s+ber(?:ing)?|to'g'ri?la(?:ng)?|to'g'ri?lab\s+ber(?:ing)?)"
+    deploy = r"(?:deploy\s+(?:qil|qiling|ql|qling)|ishga\s+tushir(?:ing)?|joyla(?:ng)?)"
+    # Requiring an imperative ending avoids '... deploy qil deb yozdim' reports.
+    if not re.search(r'\b(?:'+repair+'|'+deploy+r')(?:,?\s+iltimos)?[.!]*$', text):
+        return False
+    return bool(re.search(r'\bdeploy\s+(?:qil|qiling|ql|qling)\b', text) or
+                re.search(r'\b(?:bot(?:ni|ning|da)?|kod(?:ni|dagi|da)?|dastur(?:ni|dagi)?|'
+                          r'server(?:ni|dagi|ga)?|railway|repo(?:ni|dagi)?|main)\b', text))
 
 
 def redact(text):
@@ -258,6 +285,7 @@ class SuperSettings:
             self.chat.close(update.effective_user.id)
             await update.effective_message.reply_text(
                 '⚙️ Super sozlama\n\nAstra bilan suhbatlashing yoki Buyruq / tuzatish orqali vazifa yuboring. '
+                '«Botni tekshir, tuzat va deploy qil» deb shu chatga yozishingiz ham mumkin. '
                 f'AI modeli: {configured_model()}. '
                 f'AI kod taklifi: {"yoqilgan" if self.repair_enabled() else "o‘chirilgan"}. '
                 f'Avtomatik tuzatish: {"yoqilgan" if maintainer_client.enabled() else "o‘chirilgan"}.', reply_markup=menu())
@@ -277,7 +305,8 @@ class SuperSettings:
             self.reports.cancel(owner)
             self.chat.open(owner)
             await query.message.reply_text('💬 Astra bilan suhbat ochildi. Savolingizni yozing; ketma-ket gaplashishingiz mumkin. '
-                'Suhbat 30 daqiqa faol turadi. Kod vazifasi uchun Buyruq / tuzatish tugmasini bosing. '
+                'Suhbat 30 daqiqa faol turadi. Kod vazifasi uchun Buyruq / tuzatish tugmasini bosing '
+                'yoki «Botni tekshir, tuzat va deploy qil» deb yozing. '
                 'Maxfiy kalit yubormang. Chiqish: Bekor qilish yoki /super_settings.',reply_markup=menu())
         elif action == 'chat_history':
             history = self.chat.history(owner)
@@ -368,6 +397,11 @@ class SuperSettings:
         if not self.allowed(update):
             return
         owner, msg = update.effective_user.id, update.effective_message
+        # Check before conversational mode: the chat model has no execution tools.
+        # Forwarded/quoted messages must not create tasks without the report button.
+        if (not getattr(msg, 'forward_origin', None) and not getattr(msg, 'quote', None)
+                and owner_repair_command(msg.text)):
+            await self.submit_report(owner, msg)
         if self.chat.awaiting(owner):
             if not msg.text or msg.text.startswith(('/', '*')):
                 self.chat.close(owner)
@@ -383,14 +417,26 @@ class SuperSettings:
         if not msg.text or msg.text.startswith(('/', '*')):
             self.reports.cancel(owner)
             return  # Existing commands and non-text flows remain available.
+        await self.submit_report(owner, msg)
+
+    async def submit_report(self, owner, msg):
         try:
             report_id = self.reports.submit(owner, msg.message_id, msg.text, int(self.clock()))
-            await msg.reply_text(f'📨 Murojaat #{report_id} saqlandi. '+
-                                 ('Astra kodni o‘zi tekshiradi, asoslangan tuzatishni tayyorlaydi va mustaqil testlarga yuboradi. '
-                                  'Testdan o‘tgan kod joylanadi; yakuniy natija shu chatga keladi.'
-                                  if maintainer_client.enabled() else 'Tahlil javobi shu chatga keladi. Kod tekshiruvi yoqilgan bo‘lsa, tuzatish taklifi alohida keladi.'), reply_markup=menu())
+            self.chat.close(owner)
+            self.reports.cancel(owner)
+            answer = f'📨 Murojaat #{report_id} saqlandi. '+(
+                'Astra kodni o‘zi tekshiradi, asoslangan tuzatishni tayyorlaydi va mustaqil testlarga yuboradi. '
+                'Testdan o‘tgan kod joylanadi; yakuniy natija shu chatga keladi.'
+                if maintainer_client.enabled() else
+                'Tahlil javobi shu chatga keladi. Kod tekshiruvi yoqilgan bo‘lsa, tuzatish taklifi alohida keladi.')
         except ValueError as exc:
-            await msg.reply_text(str(exc), parse_mode=None)
+            answer = str(exc)
+        try:
+            await msg.reply_text(answer, parse_mode=None, reply_markup=menu())
+        except TelegramError:
+            # The durable task still exists. Never fall through to legacy chat AI
+            # or create another task just because the acknowledgement timed out.
+            pass
         raise ApplicationHandlerStop
 
     @staticmethod
