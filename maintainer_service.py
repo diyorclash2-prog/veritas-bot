@@ -166,10 +166,19 @@ class Controller:
             save(phase='deploying')
         elif phase == 'deploying':
             status = await gh.deployment(row['head'])
-            if status == 'success' and self.store.healthy(row['head'],row['updated'],now):
+            healthy = self.store.healthy(row['head'],row['updated'],now)
+            if status == 'success' and healthy:
                 save(phase='verified')
-            elif status in ('failure','error') or now-row['updated'] > 600:
+            elif status in ('failure','error'):
                 save(phase='rollback_prepare',summary='Yangi bot sog‘lom ishga tushmadi; oldingi kod qaytarilmoqda.')
+            elif now-row['updated'] > 600:
+                if healthy:
+                    # A delayed commit status is not evidence of a failed running bot.
+                    # Keep strict verification, but never roll back a healthy release for it.
+                    save(phase='failed',summary='Botdan yangi ishlash signali olindi, lekin GitHub deploy tasdig‘i kechikdi. '
+                         'Kod orqaga qaytarilmadi. Joylash holatini alohida tekshirish kerak.')
+                else:
+                    save(phase='rollback_prepare',summary='Yangi botning ishlash signali kelmadi; oldingi kod qaytarilmoqda.')
         elif phase == 'rollback_prepare':
             rollback = await gh.rollback_commit(row['base'],row['head'],ident,row['created']+1)
             save(phase='rollback_push',rollback=rollback)
