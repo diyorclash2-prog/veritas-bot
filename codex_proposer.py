@@ -8,6 +8,7 @@ import asyncio
 from http.server import BaseHTTPRequestHandler, HTTPServer
 import hmac
 import json
+import logging
 import os
 from pathlib import Path
 import secrets
@@ -19,6 +20,15 @@ from astra_proposer import Proposer as SourceTools, TOOLS
 from astra_support import ASTRA, AIUnavailable
 
 TOOL_NAMES = frozenset(t['name'] for t in TOOLS)
+TOOL_CHOICE = {'type':'allowed_tools','mode':'required',
+               'tools':[{'type':'function','name':t['name']} for t in TOOLS]}
+TOOL_CORRECTION = (
+    'Your last response was rejected and was NOT executed. '
+    'This environment has only source_index, read_source, find_source and submit_patch '
+    'function tools. There is no exec, shell, custom tool or code interpreter. '
+    'Call one of the four declared functions using its JSON argument schema. '
+    'For multiple searches call find_source separately. To finish, call submit_patch; '
+    'if no safe change is possible use empty edits and explain why in the summary.')
 INSTRUCTIONS = (
     'You are the VERITAS coding agent, powered by Astra. Implement the owner task precisely. '
     'Use source_index, find_source and read_source to inspect real relevant source and tests. '
@@ -33,15 +43,55 @@ INSTRUCTIONS = (
     'missing. Use only supplied tools. Finish within 24 model requests.')
 
 
+class ModelResponseRejected(ValueError):
+    """Fixed diagnostic code only: never include model text or tool arguments."""
+    def __init__(self, code):
+        self.code = code
+        super().__init__(code)
+
+
+def source_only_input(items):
+    """Remove the app-server's native catalog and harness instructions.
+
+    Codex also sends tools inside input as additional_tools. Replacing just
+    top-level tools leaves its exec catalog visible to the model. This gateway
+    owns the instructions; keep only the owner conversation and source history.
+    """
+    if not isinstance(items,list): raise AIUnavailable('invalid_response')
+    result = []
+    for item in items:
+        if not isinstance(item,dict): raise AIUnavailable('invalid_response')
+        kind = item.get('type','message')
+        if kind == 'additional_tools': continue
+        if kind == 'message':
+            if item.get('role') in {'developer','system'}: continue
+            if item.get('role') not in {'user','assistant'}: raise AIUnavailable('invalid_response')
+        elif kind == 'function_call':
+            if item.get('name') not in TOOL_NAMES: raise AIUnavailable('unsupported_tool')
+        elif kind not in {'function_call_output','reasoning'}:
+            raise AIUnavailable('invalid_response')
+        result.append(item)
+    return result
+
+
 def response_events(data):
     """Adapt a completed, validated response to Codex's documented SSE transport."""
+    output = data.get('output')
+    if not isinstance(output,list) or not output:
+        raise ModelResponseRejected('invalid_response')
     events = [{'type':'response.created','response':{**data,'output':[],'status':'in_progress'}}]
-    for i,item in enumerate(data.get('output',[])):
+    calls = 0
+    for i,item in enumerate(output):
+        if not isinstance(item,dict):
+            raise ModelResponseRejected('invalid_response')
         if item.get('type') == 'function_call' and item.get('name') not in TOOL_NAMES:
-            raise ValueError('Unexpected model tool')
+            raise ModelResponseRejected('unsupported_tool')
         if item.get('type') not in {'function_call','message','reasoning'}:
-            raise ValueError('Unexpected response item')
+            raise ModelResponseRejected('unsupported_tool')
+        calls += item.get('type') == 'function_call'
         events.append({'type':'response.output_item.done','output_index':i,'item':item})
+    if calls != 1:
+        raise ModelResponseRejected('invalid_response')
     events.append({'type':'response.completed','response':data})
     return b''.join(('event: '+e['type']+'\ndata: '+json.dumps({**e,'sequence_number':i})+'\n\n').encode()
                     for i,e in enumerate(events))
@@ -64,19 +114,34 @@ class ModelGateway:
                     if not 1 <= length <= 900_000 or self.headers.get('Content-Encoding'):
                         raise ValueError('Invalid model request')
                     raw = json.loads(self.rfile.read(length))
-                    if raw.get('model') != ASTRA or outer.calls >= 24:
-                        raise ValueError('Model or call bound')
+                    if raw.get('model') != ASTRA:
+                        raise ValueError('Invalid model')
+                    if outer.calls >= 24: raise AIUnavailable('coding_call_limit')
                     # The only model-visible capabilities are the host-supplied
                     # source tools; even native tool outputs are rejected below.
-                    payload = {'model':ASTRA,'input':raw.get('input',[]),
+                    payload = {'model':ASTRA,'input':source_only_input(raw.get('input',[])),
                                'instructions':INSTRUCTIONS,'tools':TOOLS,
-                               'tool_choice':'required','parallel_tool_calls':False,
+                               'tool_choice':TOOL_CHOICE,'parallel_tool_calls':False,
                                'reasoning':{'effort':'medium'},'include':['reasoning.encrypted_content'],
                                'max_output_tokens':8000,'store':False,'service_tier':'default'}
-                    outer.calls += 1
-                    data = asyncio.run(outer.api.json('POST','/responses',payload=payload))
-                    if data.get('status') != 'completed': raise AIUnavailable('incomplete')
-                    body = response_events(data)
+                    # Retry a rejected model response once, without passing its
+                    # commands/text to Codex or executing any part of it. Both
+                    # attempts use the same budget ledger and 24-call ceiling.
+                    for attempt in range(2):
+                        if outer.calls >= 24: raise AIUnavailable('coding_call_limit')
+                        outer.calls += 1
+                        data = asyncio.run(outer.api.json('POST','/responses',payload=payload))
+                        if data.get('status') != 'completed': raise AIUnavailable('incomplete')
+                        try:
+                            body = response_events(data)
+                            break
+                        except ModelResponseRejected as exc:
+                            logging.warning('Codex response rejected: %s',exc.code)
+                            if attempt: raise AIUnavailable(exc.code) from None
+                            original = payload['input']
+                            if not isinstance(original,list): raise AIUnavailable('invalid_response') from None
+                            payload = {**payload,'input':original+[
+                                {'role':'developer','content':TOOL_CORRECTION}]}
                     self.send_response(200)
                     self.send_header('Content-Type','text/event-stream')
                     self.send_header('Content-Length',str(len(body)))
@@ -114,6 +179,7 @@ class CodexProposer(SourceTools):
                 'web_search = "disabled"', 'model_context_window = 200000',
                 'model_auto_compact_token_limit = 190000',
                 '[features]', 'shell_tool = false', 'unified_exec = false',
+                'code_mode = false', 'code_mode_only = false', 'code_mode_host = false',
                 'view_image = false', 'image_generation = false', 'multi_agent = false',
                 'apps = false', 'plugins = false', 'hooks = false', 'memories = false',
                 'enable_request_compression = false',
@@ -121,7 +187,7 @@ class CodexProposer(SourceTools):
                 'base_url = "'+gateway.url+'"', 'env_key = "VERITAS_GATEWAY_KEY"',
                 'wire_api = "responses"', 'requires_openai_auth = false',
                 'supports_websockets = false', 'request_max_retries = 0',
-                'stream_max_retries = 0', 'stream_idle_timeout_ms = 120000',
+                'stream_max_retries = 0', 'stream_idle_timeout_ms = 210000',
                 '[analytics]', 'enabled = false',
             ])
             (runtime/'config.toml').write_text(config)

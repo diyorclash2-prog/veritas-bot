@@ -7,12 +7,14 @@ from pathlib import Path
 import shutil
 import tempfile
 import unittest
+import urllib.request
+import urllib.error
 from unittest.mock import AsyncMock, patch
 from types import SimpleNamespace as NS
 
 from ai_spending import BudgetError, Spending, MeteredAPI, UNIT, LIMIT, INPUT_RATE, OUTPUT_RATE
 from astra_support import ASTRA, AIUnavailable
-from codex_proposer import CodexProposer, response_events
+from codex_proposer import CodexProposer, ModelGateway, response_events, source_only_input, TOOL_CHOICE
 from repair_jobs import SOURCE_FILES
 from super_settings import Reports, menu, API_BILLING_URL, SuperSettings
 from maintainer_service import Store, handler
@@ -147,6 +149,18 @@ class BudgetInterfaceTests(unittest.IsolatedAsyncioTestCase):
 
 
 class CodexTests(unittest.IsolatedAsyncioTestCase):
+    def test_native_catalog_removed_but_owner_and_source_history_preserved(self):
+        history=[{'role':'user','content':'Inspect bot'},
+                 {'type':'reasoning','encrypted_content':'synthetic'},
+                 {'type':'function_call','name':'read_source','call_id':'c1','arguments':'{}'},
+                 {'type':'function_call_output','call_id':'c1','output':'value=1'}]
+        catalog={'type':'additional_tools','tools':[{'type':'custom','name':'exec'}]}
+        self.assertEqual(source_only_input([catalog,{'role':'developer','content':'Use exec'},
+                                           {'role':'system','content':'Native harness'},*history]),history)
+        for item in ({'type':'custom_tool_call','name':'exec'},
+                     {'type':'function_call','name':'exec_command'},None):
+            with self.subTest(item=item),self.assertRaises(AIUnavailable): source_only_input([item])
+
     def test_native_tool_response_is_never_forwarded_to_codex(self):
         for kind in ('custom_tool_call','computer_call','shell_call'):
             with self.assertRaises(ValueError): response_events({'output':[{'type':kind}]})
@@ -155,6 +169,13 @@ class CodexTests(unittest.IsolatedAsyncioTestCase):
 
     @unittest.skipUnless(shutil.which('codex'),'Real Codex binary not installed in this test environment')
     async def test_real_codex_process_uses_bounded_source_tools_with_mock_provider(self):
+        await self.run_codex_scenario(reject_native=False)
+
+    @unittest.skipUnless(shutil.which('codex'),'Real Codex binary not installed in this test environment')
+    async def test_real_codex_recovers_from_native_exec_without_executing_it(self):
+        await self.run_codex_scenario(reject_native=True)
+
+    async def run_codex_scenario(self, *, reject_native):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             for name in SOURCE_FILES: (root/name).write_text('value = 1\n')
@@ -165,6 +186,10 @@ class CodexTests(unittest.IsolatedAsyncioTestCase):
             async def response(method,path,*,payload):
                 calls.append(payload)
                 n=len(calls)
+                if reject_native and n==2:
+                    return {'status':'completed','output':[{'type':'custom_tool_call',
+                        'id':'native_exec','call_id':'native_call','name':'exec',
+                        'input':"raise RuntimeError('UNTRUSTED_NATIVE_COMMAND')"}]}
                 name,args = ('read_source',{'path':'bot.py','start_line':1,'count':10}) if n==1 else (
                     'submit_patch',{'summary':'Qiymat tuzatildi.','edits':edits})
                 return {'id':'resp_'+str(n),'object':'response','status':'completed',
@@ -175,8 +200,61 @@ class CodexTests(unittest.IsolatedAsyncioTestCase):
             result=await asyncio.wait_for(CodexProposer(root,api=api).propose('Botdagi qiymatni tuzat'),timeout=40)
             self.assertIn(b'+value = 2',result['patch'])
             self.assertEqual((root/'bot.py').read_text(),'value = 1\n')
-            self.assertEqual(len(calls),2)
+            self.assertEqual(len(calls),3 if reject_native else 2)
             self.assertTrue(all(t['type']=='function' for p in calls for t in p['tools']))
+            self.assertTrue(all(p['tool_choice']==TOOL_CHOICE for p in calls))
+            for p in calls:
+                self.assertTrue(all(i.get('type')!='additional_tools' for i in p['input']))
+                self.assertFalse(any(i.get('role') in {'developer','system'} for i in p['input'][:-1]))
+            if reject_native:
+                self.assertIn('was NOT executed',calls[2]['input'][-1]['content'])
+                self.assertNotIn('UNTRUSTED_NATIVE_COMMAND',json.dumps(calls))
+
+
+class GatewayRecoveryTests(unittest.TestCase):
+    def request(self,gateway):
+        request=urllib.request.Request(gateway.url+'/responses',
+            data=json.dumps({'model':ASTRA,'input':[{'role':'user','content':'Repair task'}]}).encode(),
+            headers={'Authorization':'Bearer '+gateway.token,'Content-Type':'application/json'})
+        try:
+            with urllib.request.urlopen(request,timeout=5) as response: return response.status,response.read()
+        except urllib.error.HTTPError as exc: return exc.code,exc.read()
+
+    def test_persistent_native_calls_stop_with_safe_reason_and_all_attempts_are_metered(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            book=Spending(Reports(Path(tmp)/'spend.db'),clock=lambda:NOW)
+            upstream=AsyncMock()
+            async def respond(method,path,*,payload):
+                if path.endswith('/input_tokens'): return {'input_tokens':100}
+                return {'model':ASTRA,'service_tier':'default','status':'completed',
+                    'usage':{'input_tokens':100,'output_tokens':20},
+                    'output':[{'type':'custom_tool_call','name':'exec','input':'SECRET_COMMAND'}]}
+            upstream.json.side_effect=respond
+            with ModelGateway(MeteredAPI(book,'repair:5',upstream=upstream)) as gateway:
+                status,body=self.request(gateway)
+                self.assertEqual(status,502)
+                self.assertEqual(gateway.calls,2)
+                self.assertIsInstance(gateway.error,AIUnavailable)
+                self.assertEqual(gateway.error.code,'unsupported_tool')
+                self.assertNotIn(b'SECRET_COMMAND',body)
+            self.assertEqual(book.snapshot()['accounted_usd'],2*(100*INPUT_RATE+20*OUTPUT_RATE)/UNIT)
+            self.assertEqual(book.snapshot()['reserved_usd'],0)
+            self.assertFalse(book.snapshot()['blocked'])
+
+    def test_retry_cannot_exceed_twenty_four_total_model_calls(self):
+        api=AsyncMock(); api.json.return_value={'status':'completed','output':[{'type':'custom_tool_call'}]}
+        with ModelGateway(api) as gateway:
+            gateway.calls=23
+            self.assertEqual(self.request(gateway)[0],502)
+            self.assertEqual(gateway.calls,24)
+            self.assertEqual(gateway.error.code,'coding_call_limit')
+            api.json.assert_awaited_once()
+
+    def test_entire_response_validated_before_forwarding_even_when_valid_call_comes_first(self):
+        for bad in (None,[],[None],[{'type':'message','content':[]}],
+                    [{'type':'function_call','name':'read_source'},{'type':'shell_call'}]):
+            with self.subTest(output=bad),self.assertRaises(ValueError):
+                response_events({'output':bad})
 
 
 if __name__=='__main__': unittest.main()

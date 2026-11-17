@@ -30,6 +30,8 @@ class AIUnavailable(RuntimeError):
             'incomplete': 'AI javobni yakunlamadi; murojaat saqlangan.',
             'network': 'AI xizmatiga ulanish uzildi; murojaat saqlangan.',
             'invalid_response': 'AI javobi kutilgan formatda kelmadi.',
+            'unsupported_tool': 'AI ruxsat etilmagan vositani so‘radi. Qayta urinish ham o‘tmadi; hech qanday buyruq bajarilmadi va kod joylanmadi.',
+            'coding_call_limit': 'Ushbu tekshiruv uchun AI so‘rovlar chegarasiga yetildi; kod joylanmadi.',
         }.get(self.code, 'AI xizmati so‘rovni bajara olmadi; murojaat saqlangan.')
 
 
