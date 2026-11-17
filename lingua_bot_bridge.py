@@ -1,4 +1,4 @@
-"""VERITAS LINGUA launcher and once-per-day channel advertisements.
+"""VERITAS LINGUA launcher and once-per-day channel and group advertisements.
 
 No Telegram requests at import. Existing bot tables and handlers are preserved.
 Daily ads start disabled; a Super Owner enables them in the bot's private chat.
@@ -18,7 +18,7 @@ from urllib.parse import urlsplit
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup
-from telegram.error import BadRequest, Forbidden, RetryAfter, TelegramError
+from telegram.error import BadRequest, ChatMigrated, Forbidden, RetryAfter, TelegramError
 from telegram.ext import (ApplicationHandlerStop, ChatMemberHandler, CommandHandler,
                           MessageHandler, filters)
 
@@ -98,10 +98,14 @@ class Store:
                     attempts INTEGER NOT NULL DEFAULT 1, claimed_at INTEGER NOT NULL,
                     retry_at INTEGER NOT NULL DEFAULT 0, message_id INTEGER,
                     PRIMARY KEY(chat_id, day));
+                CREATE TABLE IF NOT EXISTS lingua_ad_migrations (
+                    old_id INTEGER PRIMARY KEY, new_id INTEGER NOT NULL);
                 CREATE TABLE IF NOT EXISTS lingua_ad_cooldown (
                     id INTEGER PRIMARY KEY CHECK(id=1), until_stamp INTEGER NOT NULL DEFAULT 0);
                 INSERT OR IGNORE INTO lingua_ad_cooldown VALUES(1,0);
             ''')
+            if 'chat_type' not in {r['name'] for r in db.execute('PRAGMA table_info(lingua_ad_channels)')}:
+                db.execute("ALTER TABLE lingua_ad_channels ADD COLUMN chat_type TEXT NOT NULL DEFAULT 'channel'")
             db.execute('INSERT OR IGNORE INTO lingua_ad_settings VALUES(1,?,?,?)',
                        (int(config.enabled), config.hour, config.tz))
 
@@ -135,13 +139,15 @@ class Store:
                 schedule(hour, tz)
                 db.execute('UPDATE lingua_ad_settings SET hour=?,tz=? WHERE id=1', (hour, tz))
 
-    def observe(self, chat_id, title='', *, active=True, enable=False):
+    def observe(self, chat_id, title='', *, active=True, enable=False, chat_type=None):
         if isinstance(chat_id, bool) or not isinstance(chat_id, int) or chat_id >= 0:
             return
         with self.db() as db:
             db.execute('''INSERT INTO lingua_ad_channels(chat_id,title,active) VALUES(?,?,?)
                 ON CONFLICT(chat_id) DO UPDATE SET title=excluded.title,active=excluded.active''',
                        (chat_id, str(title or '')[:255], int(active)))
+            if chat_type in {'channel', 'group', 'supergroup'}:
+                db.execute('UPDATE lingua_ad_channels SET chat_type=? WHERE chat_id=?', (chat_type, chat_id))
             if enable:
                 db.execute('UPDATE lingua_ad_channels SET enabled=1 WHERE chat_id=?', (chat_id,))
 
@@ -164,6 +170,38 @@ class Store:
                     continue
                 for row in db.execute(f'SELECT DISTINCT channel_id FROM {table} WHERE channel_id<0'):
                     db.execute('INSERT OR IGNORE INTO lingua_ad_channels(chat_id) VALUES(?)', (row[0],))
+
+    def seed_existing_chats(self):
+        self.seed_existing_channels()
+        with self.db() as db:
+            cols = {r['name'] for r in db.execute('PRAGMA table_info(groups)')}
+            if 'chat_id' in cols:
+                db.execute("""INSERT OR IGNORE INTO lingua_ad_channels(chat_id,chat_type)
+                              SELECT chat_id,'supergroup' FROM groups WHERE chat_id<0""")
+
+    def migrate_chat(self, old_id, new_id):
+        if old_id >= 0 or new_id >= 0 or old_id == new_id:
+            return
+        with self.db() as db:
+            db.execute('BEGIN IMMEDIATE')
+            if db.execute('SELECT 1 FROM lingua_ad_migrations WHERE old_id=?', (old_id,)).fetchone():
+                return
+            old = db.execute('SELECT * FROM lingua_ad_channels WHERE chat_id=?', (old_id,)).fetchone()
+            if not old:
+                return
+            db.execute("""INSERT INTO lingua_ad_channels(chat_id,title,enabled,active,chat_type)
+                          VALUES(?,?,?,?, 'supergroup') ON CONFLICT(chat_id) DO UPDATE
+                          SET enabled=MIN(enabled,excluded.enabled)""",
+                       (new_id, old['title'], old['enabled'], 1))
+            db.execute("""INSERT INTO lingua_ad_deliveries
+                          SELECT ?,day,state,attempts,claimed_at,retry_at,message_id
+                          FROM lingua_ad_deliveries WHERE chat_id=?
+                          ON CONFLICT(chat_id,day) DO UPDATE SET
+                          state=CASE WHEN state='retry' THEN excluded.state ELSE state END,
+                          attempts=MAX(attempts,excluded.attempts),
+                          retry_at=MAX(retry_at,excluded.retry_at)""", (new_id, old_id))
+            db.execute('INSERT INTO lingua_ad_migrations VALUES(?,?)', (old_id, new_id))
+            db.execute('UPDATE lingua_ad_channels SET active=0,enabled=0 WHERE chat_id=?', (old_id,))
 
     def available(self, chat_id, day, stamp):
         with self.db() as db:
@@ -217,17 +255,31 @@ class LinguaBridge:
     def can_post(member):
         return member.status == 'creator' or (member.status == 'administrator' and getattr(member, 'can_post_messages', False) is True)
 
+    @classmethod
+    def can_send(cls, chat, member):
+        if chat.type == 'channel':
+            return cls.can_post(member)
+        if chat.type not in {'group', 'supergroup'}:
+            return False
+        if member.status in {'creator', 'administrator'}:
+            return True
+        if member.status == 'restricted':
+            return (getattr(member, 'is_member', False) is True
+                    and getattr(member, 'can_send_messages', False) is True)
+        return (member.status == 'member'
+                and getattr(getattr(chat, 'permissions', None), 'can_send_messages', False) is True)
+
     def retry_stamp(self, error):
         delay = error.retry_after.total_seconds() if isinstance(error.retry_after, timedelta) else float(error.retry_after)
         return int(self.clock().timestamp()) + max(60, int(delay) + 1)
 
     async def verify_channel(self, bot, reference):
         chat = await bot.get_chat(reference)
-        if chat.type != 'channel':
-            raise ValueError('Faqat kanal qo‘shiladi; guruh yoki shaxsiy chat emas')
+        if chat.type not in {'channel', 'group', 'supergroup'}:
+            raise ValueError('Faqat kanal yoki guruh qo‘shiladi; shaxsiy chat emas')
         member = await bot.get_chat_member(chat.id, bot.id)
-        if not self.can_post(member):
-            raise ValueError('Bot kanalda post yozish huquqiga ega administrator bo‘lishi kerak')
+        if not self.can_send(chat, member):
+            raise ValueError('Bot kanal yoki guruhda xabar yozish huquqiga ega bo‘lishi kerak')
         return chat
 
     async def launcher(self, update, context):
@@ -241,13 +293,28 @@ class LinguaBridge:
 
     async def track_membership(self, update, context):
         event = update.my_chat_member
-        if event and event.chat.type == 'channel':
-            self.store.observe(event.chat.id, event.chat.title, active=self.can_post(event.new_chat_member))
+        if event and event.chat.type in {'channel', 'group', 'supergroup'}:
+            # Membership updates may omit default group permissions; verify them at send time.
+            member = event.new_chat_member
+            active = (self.can_post(member) if event.chat.type == 'channel' else
+                      member.status in {'creator', 'administrator', 'member'} or
+                      (member.status == 'restricted' and getattr(member, 'is_member', False)
+                       and getattr(member, 'can_send_messages', False)))
+            self.store.observe(event.chat.id, event.chat.title, active=active, chat_type=event.chat.type)
 
     async def track_channel_post(self, update, context):
         chat = update.effective_chat
         if update.channel_post and chat and chat.type == 'channel':
             self.store.observe(chat.id, chat.title)
+
+    async def track_group(self, update, context):
+        chat, msg = update.effective_chat, update.effective_message
+        if chat and chat.type in {'group', 'supergroup'}:
+            self.store.observe(chat.id, chat.title, chat_type=chat.type)
+            if getattr(msg, 'migrate_to_chat_id', None):
+                self.store.migrate_chat(chat.id, msg.migrate_to_chat_id)
+            elif getattr(msg, 'migrate_from_chat_id', None):
+                self.store.migrate_chat(msg.migrate_from_chat_id, chat.id)
 
     async def admin(self, update, context):
         msg, user, chat = update.effective_message, update.effective_user, update.effective_chat
@@ -262,7 +329,7 @@ class LinguaBridge:
             if action == 'on' and len(args) == 1:
                 if not self.config.url:
                     raise ValueError('Avval VL_PUBLIC_URL manzilini sozlang')
-                self.store.seed_existing_channels()
+                self.store.seed_existing_chats()
                 self.store.configure(enabled=True)
             elif action == 'off' and len(args) == 1:
                 self.store.configure(enabled=False)
@@ -278,20 +345,20 @@ class LinguaBridge:
             elif action == 'add' and len(args) == 2:
                 ref = args[1]
                 if not re.fullmatch(r'-\d+|@[A-Za-z][A-Za-z0-9_]{4,31}', ref):
-                    raise ValueError('Kanalni @username yoki manfiy kanal ID bilan yozing')
+                    raise ValueError('Kanal/guruhni @username yoki manfiy kanal ID bilan yozing')
                 channel = await self.verify_channel(context.bot, int(ref) if ref.startswith('-') else ref)
-                self.store.observe(channel.id, channel.title, enable=True)
+                self.store.observe(channel.id, channel.title, enable=True, chat_type=channel.type)
             elif action == 'remove' and len(args) == 2 and re.fullmatch(r'-\d+', args[1]):
                 if not self.store.disable_channel(int(args[1])):
-                    raise ValueError('Kanal ro‘yxatda topilmadi')
-            elif action == 'channels' and len(args) == 1:
+                    raise ValueError('Kanal/guruh ro‘yxatda topilmadi')
+            elif action in {'channels', 'chats'} and len(args) == 1:
                 rows = self.store.channels()
-                lines = [f"{'✅' if r['enabled'] and r['active'] else '⏸'} {r['chat_id']} · {r['title'][:55]}" for r in rows]
+                lines = [f"{'✅' if r['enabled'] and r['active'] else '⏸'} {r['chat_id']} · {r['chat_type']} · {r['title'][:45]}" for r in rows]
                 # Telegram's message limit; lists remain readable for large deployments.
                 for start in range(0, len(lines), 20):
                     await msg.reply_text('\n'.join(lines[start:start+20]), parse_mode=None)
                 if not lines:
-                    await msg.reply_text('Hali kanal yo‘q. /lingua_ads add @kanal_username')
+                    await msg.reply_text('Hali kanal yoki guruh yo‘q. /lingua_ads add @kanal_username')
                 raise ApplicationHandlerStop
             elif action != 'status' or len(args) > 1:
                 raise ValueError('Buyruqlar: /lingua_ads status|on|off|preview|channels\n'
@@ -304,16 +371,16 @@ class LinguaBridge:
             await msg.reply_text(
                 f"📣 Lingua reklama: {'YOQILGAN' if settings['enabled'] else 'O‘CHIRILGAN'}\n"
                 f"Har kuni {settings['hour']} · {settings['tz']}\n"
-                f"Faol kanallar: {sum(bool(r['enabled'] and r['active']) for r in channels)} / {len(channels)}\n"
+                f"Faol kanal va guruhlar: {sum(bool(r['enabled'] and r['active']) for r in channels)} / {len(channels)}\n"
                 f"Bugun yuborildi: {counts.get('sent', 0)}\n"
                 f"Kutilayotgan tekshiruv: {counts.get('claimed', 0) + counts.get('uncertain', 0)}\n"
                 f"Xatolar: {counts.get('failed', 0)} · qayta kutish: {counts.get('retry', 0)}\n"
-                'Har kanalga kuniga ko‘pi bilan bir muvaffaqiyatli post.\n'
+                'Har kanal va guruhga kuniga ko‘pi bilan bir muvaffaqiyatli post.\n'
                 '/lingua_ads preview — reklamani shu yerda ko‘rish', parse_mode=None)
         except ValueError as exc:
             await msg.reply_text(str(exc), parse_mode=None)
         except TelegramError:
-            await msg.reply_text('Kanalni tekshirib bo‘lmadi. Botning kanalga kirish va post yozish huquqini tekshiring.')
+            await msg.reply_text('Chatni tekshirib bo‘lmadi. Botning kanal/guruhga kirish va yozish huquqini tekshiring.')
         raise ApplicationHandlerStop
 
     async def tick(self, context):
@@ -326,7 +393,7 @@ class LinguaBridge:
             local = self.local_now(settings)
             if local.strftime('%H:%M') < settings['hour'] or self.store.cooling_down(int(local.timestamp())):
                 return
-            self.store.seed_existing_channels()
+            self.store.seed_existing_chats()
             for row in self.store.channels():
                 settings = self.store.settings()
                 if not settings['enabled']:
@@ -345,13 +412,16 @@ class LinguaBridge:
                 except RetryAfter as exc:
                     self.store.defer(self.retry_stamp(exc))
                     break
+                except ChatMigrated as exc:
+                    self.store.migrate_chat(chat_id, exc.new_chat_id)
+                    continue
                 except (ValueError, Forbidden, BadRequest):
                     self.store.observe(chat_id, row['title'], active=False)
                     continue
                 except TelegramError:
                     LOG.warning('Lingua channel permission check unavailable')
                     continue
-                self.store.observe(chat_id, channel.title)
+                self.store.observe(chat_id, channel.title, chat_type=channel.type)
                 # Permissions checks may span midnight or a schedule change.
                 settings = self.store.settings()
                 local = self.local_now(settings)
@@ -370,6 +440,9 @@ class LinguaBridge:
                     self.store.defer(retry_at)
                     self.store.outcome(chat_id, day, 'retry', retry_at=retry_at)
                     break  # Respect Telegram's limit globally; next tick retries safely.
+                except ChatMigrated as exc:
+                    self.store.migrate_chat(chat_id, exc.new_chat_id)
+                    continue  # Claimed day follows migration; avoid a duplicate after uncertain send.
                 except (Forbidden, BadRequest):
                     self.store.outcome(chat_id, day, 'failed')
                     self.store.observe(chat_id, channel.title, active=False)
@@ -396,6 +469,7 @@ def register_lingua_handlers(application, *, db_path, super_owner_ids):
     application.add_handler(CommandHandler('lingua_ads', bridge.admin), group=-30)
     application.add_handler(ChatMemberHandler(bridge.track_membership, ChatMemberHandler.MY_CHAT_MEMBER), group=-349)
     application.add_handler(MessageHandler(filters.UpdateType.CHANNEL_POST, bridge.track_channel_post), group=-348)
+    application.add_handler(MessageHandler(filters.ChatType.GROUPS, bridge.track_group), group=-347)
     if application.job_queue:
         application.job_queue.run_repeating(bridge.tick, interval=60, first=20, name=JOB_NAME,
                                            job_kwargs={'max_instances': 1, 'coalesce': True})

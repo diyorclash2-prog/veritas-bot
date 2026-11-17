@@ -255,11 +255,97 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
         self.bot.send_message.assert_not_awaited()
         self.assertEqual(self.bridge.store.channels()[0]['active'], 0)
 
-    async def test_group_reference_never_receives_ad(self):
+    async def test_group_reference_now_receives_ad_once(self):
         self.bot.get_chat.side_effect = None
         self.bot.get_chat.return_value = NS(id=-1001, type='supergroup', title='Group')
         await self.bridge.tick(self.context)
+        await self.new_bridge().tick(self.context)
+        self.bot.send_message.assert_awaited_once()
+
+    async def test_private_chat_reference_is_still_rejected(self):
+        self.bot.get_chat.side_effect = None
+        self.bot.get_chat.return_value = NS(id=123, type='private', title='Private')
+        await self.bridge.tick(self.context)
         self.bot.send_message.assert_not_awaited()
+
+    async def test_member_group_permissions_and_removed_membership(self):
+        for status, permission, expected in [('member', True, 1), ('member', False, 0),
+                                              ('left', True, 0), ('kicked', True, 0)]:
+            with self.subTest(status=status, permission=permission):
+                self.bridge.store.observe(-1001)
+                self.bot.get_chat.side_effect = None
+                self.bot.get_chat.return_value = NS(id=-1001, type='group', title='Group',
+                                                    permissions=NS(can_send_messages=permission))
+                self.bot.get_chat_member.return_value = NS(status=status)
+                self.bot.send_message.reset_mock()
+                self.now += timedelta(days=1)
+                await self.bridge.tick(self.context)
+                self.assertEqual(self.bot.send_message.await_count, expected)
+
+    async def test_restricted_group_requires_membership_and_permission(self):
+        group = NS(type='supergroup')
+        for joined in (True, False):
+            for permission in (True, False):
+                member = NS(status='restricted', is_member=joined, can_send_messages=permission)
+                self.assertEqual(self.bridge.can_send(group, member), joined and permission)
+
+    async def test_all_existing_groups_seeded_and_opt_out_preserved(self):
+        with self.bridge.store.db() as db:
+            db.executescript("CREATE TABLE groups(chat_id INTEGER); INSERT INTO groups VALUES(-55),(-66),(123);")
+        self.bridge.store.seed_existing_chats()
+        self.bridge.store.disable_channel(-55)
+        self.bridge.store.seed_existing_chats()
+        rows = {r['chat_id']: r for r in self.bridge.store.channels()}
+        self.assertEqual(set(rows), {-1001, -55, -66})
+        self.assertEqual(rows[-55]['enabled'], 0)
+        self.assertEqual(rows[-66]['chat_type'], 'supergroup')
+
+    async def test_group_observation_does_not_stop_existing_handlers(self):
+        update = fake_update()
+        update.effective_chat = NS(id=-44, type='group', title='Group')
+        await self.bridge.track_group(update, self.context)
+        self.assertIn(-44, {r['chat_id'] for r in self.bridge.store.channels()})
+        update.my_chat_member = NS(chat=update.effective_chat, new_chat_member=NS(status='left'))
+        await self.bridge.track_membership(update, self.context)
+        rows = {r['chat_id']: r for r in self.bridge.store.channels()}
+        self.assertEqual(rows[-44]['active'], 0)
+
+    async def test_group_migration_preserves_delivered_day_and_opt_out(self):
+        self.bridge.store.claim(-1001, '2026-11-16', 1)
+        self.bridge.store.outcome(-1001, '2026-11-16', 'sent')
+        self.bridge.store.disable_channel(-1001)
+        self.bridge.store.migrate_chat(-1001, -1009)
+        self.bridge.store.migrate_chat(-1001, -1009)
+        rows = {r['chat_id']: r for r in self.bridge.store.channels()}
+        self.assertEqual(rows[-1009]['enabled'], 0)
+        self.assertEqual(rows[-1001]['active'], 0)
+        self.bridge.store.observe(-1009, enable=True)
+        self.assertFalse(self.bridge.store.claim(-1009, '2026-11-16', 2))
+
+    async def test_repeated_migration_does_not_disable_enabled_destination(self):
+        self.bridge.store.migrate_chat(-1001, -1009)
+        self.bridge.store.migrate_chat(-1001, -1009)
+        rows = {r['chat_id']: r for r in self.bridge.store.channels()}
+        self.assertEqual(rows[-1009]['enabled'], 1)
+
+    async def test_migration_merges_old_sent_with_new_retry_without_duplicate(self):
+        self.bridge.store.observe(-1009)
+        for chat in (-1001, -1009):
+            self.bridge.store.claim(chat, '2026-11-16', 1)
+        self.bridge.store.outcome(-1001, '2026-11-16', 'sent')
+        self.bridge.store.outcome(-1009, '2026-11-16', 'retry', retry_at=2)
+        self.bridge.store.migrate_chat(-1001, -1009)
+        self.assertFalse(self.bridge.store.claim(-1009, '2026-11-16', 5))
+
+    async def test_legacy_schema_migration_keeps_delivery_history(self):
+        legacy = Path(self.tmp.name) / 'old.sqlite3'
+        with sqlite3.connect(legacy) as db:
+            db.executescript("""CREATE TABLE lingua_ad_channels(chat_id INTEGER PRIMARY KEY,title TEXT,enabled INTEGER,active INTEGER);
+                INSERT INTO lingua_ad_channels VALUES(-88,'Old',0,1);""")
+        store = Store(legacy, Config())
+        self.assertEqual(store.channels()[0]['enabled'], 0)
+        self.assertEqual(store.channels()[0]['chat_type'], 'channel')
+        Store(legacy, Config())
 
     async def test_midnight_during_verification_waits_for_new_days_schedule(self):
         self.now = datetime(2026, 11, 17, 4, 59, 59, tzinfo=timezone.utc)
