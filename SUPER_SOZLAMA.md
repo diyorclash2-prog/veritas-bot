@@ -113,3 +113,5 @@ Botning shaxsiy chatida `/super_settings` yoki **⚙️ Super sozlama** orqali:
 Suhbatda kod yoki server buyruqlari bajarilmaydi. Kod vazifasi alohida tugma orqali yuboriladi; haqiqiy natija **Murojaatlarim**da ko‘rinadi. Suhbat navbati restartdan saqlanadi, noaniq API/Telegram natijasi avtomatik takrorlanmaydi. Maxfiy qiymatlar tozalanadi. Tarix 24 soat bilan cheklangan; bir egaga 20 xabar/soat, jami 100 xabar/kun.
 
 Amaldagi avtomatik tuzatish arxitekturasi: [AUTOMATIC_REPAIR.md](AUTOMATIC_REPAIR.md). Quyidagi eski hosted-proposal yo‘li hozir o‘chirilgan.
+
+GitHub App kaliti ulanmaguncha `VERITAS_REPAIR_ENABLED=1` va `VERITAS_REPAIR_PROVIDER=responses` rejimi ishlatiladi: Astra ruxsat etilgan kodni o‘qib, sintaksisi tekshirilgan `.patch` va yangi test taklifini Super Egaga qaytaradi. Model kodi serverda bajarilmaydi. Bu taklifga mustaqil CI hali qo‘llanmagan va u avtomatik joylanmaydi. `VERITAS_AUTOREPAIR_ENABLED=0` GitHub ulanishi yakunlanmaguncha saqlanadi.

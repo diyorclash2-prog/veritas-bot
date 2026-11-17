@@ -227,7 +227,7 @@ class SuperSettings:
             await update.effective_message.reply_text(
                 '⚙️ Super sozlama\n\nAstra bilan suhbatlashing yoki Buyruq / tuzatish orqali vazifa yuboring. '
                 f'AI modeli: {configured_model()}. '
-                f'Ajratilgan kod tekshiruvi: {"yoqilgan" if self.repair_enabled() else "o‘chirilgan"}. '
+                f'AI kod taklifi: {"yoqilgan" if self.repair_enabled() else "o‘chirilgan"}. '
                 f'Avtomatik tuzatish: {"yoqilgan" if maintainer_client.enabled() else "o‘chirilgan"}.', reply_markup=menu())
         raise ApplicationHandlerStop
 
@@ -262,7 +262,7 @@ class SuperSettings:
             await query.message.reply_text(
                 'Qanday vazifa bajarilsin yoki qaysi joy ishlamayapti? Tugma/buyruq, kutilgan natija va xatoni aniq yozing. '
                 + ('Sinovlardan o‘tgan tuzatish avtomatik joylanadi. ' if maintainer_client.enabled() else
-                   'Hozir vazifa saqlanadi va Astra tahlil qiladi; avtomatik joylash hali ulanmagan. ')+
+                   'Hozir vazifa saqlanadi va Astra tahlil qiladi; AI kod taklifi yoqilgan bo‘lsa, tuzatish fayli qaytadi. Avtomatik joylash hali ulanmagan. ')+
                 'Token, parol va telefon raqamini yubormang. Matn AI tahliliga yuboriladi. '
                 '10 daqiqa ichida yozing; bekor qilish: /super_settings.', reply_markup=menu())
         elif action == 'reports':
@@ -294,7 +294,7 @@ class SuperSettings:
                         f"Reklama vazifasi: {'bor' if snap['lingua_job_registered'] else 'yo‘q'}\n"
                         f"Yaqinda qayd etilgan xatolar: {len(snap['recent_errors'])}\n"
                         f"AI modeli: {snap['ai_model']}\n"
-                        f"Ajratilgan kod tekshiruvi: {'yoqilgan' if snap['sandbox_repair_enabled'] else 'o‘chirilgan'}\n"
+                        f"AI kod taklifi: {'yoqilgan' if snap['sandbox_repair_enabled'] else 'o‘chirilgan'}\n"
                         f"Avtomatik tuzatish: {'yoqilgan' if snap['automatic_repair_connected'] else 'o‘chirilgan'}")
             except sqlite3.Error:
                 text = 'Bazani o‘qishda xato. Maxfiy ma’lumotlar ko‘rsatilmaydi.'
