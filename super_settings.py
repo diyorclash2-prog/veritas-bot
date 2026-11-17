@@ -500,6 +500,14 @@ class SuperSettings:
             if phase in {'verified','rolled_back','failed','no_change'}:
                 db.execute('UPDATE super_remote_outbox SET status=? WHERE id=?',(phase,row['id']))
 
+    def reject_remote(self, ident, message):
+        with self.reports.db() as db:
+            db.execute('BEGIN IMMEDIATE')
+            changed = db.execute("UPDATE super_remote_outbox SET status='failed' WHERE id=? AND status='pending'", (ident,)).rowcount
+            if changed:
+                db.execute('UPDATE super_remote_state SET message=? WHERE id=?', (redact(message)[:2200],ident))
+                db.execute("UPDATE super_incidents SET status='failed',notification='pending' WHERE id=?", (ident,))
+
     async def remote_tick(self, context):
         if not os.getenv('VERITAS_MAINTAINER_URL'): return
         # A failed health probe must not prevent an incident from reaching the repairer.
@@ -515,17 +523,23 @@ class SuperSettings:
                 row = db.execute("SELECT i.*,o.created AS outbox_created FROM super_remote_outbox o JOIN super_incidents i ON i.id=o.id WHERE o.status='pending' ORDER BY i.id LIMIT 1").fetchone()
             if row:
                 if row['owner_id'] not in self.owners or self.clock()-row['outbox_created']>3600:
+                    self.reject_remote(row['id'], 'Murojaat tuzatish xizmatiga yuborilmadi: yuborish muddati tugadi yoki ruxsat bekor qilindi. Kod o‘zgartirilmadi.')
+                elif maintainer_client.enabled():
                     with self.reports.db() as db:
-                        db.execute("UPDATE super_remote_outbox SET status='failed' WHERE id=?",(row['id'],))
-                        db.execute("UPDATE super_incidents SET status='failed',notification='pending' WHERE id=?",(row['id'],))
-                    return
-                if not maintainer_client.enabled(): return
-                with self.reports.db() as db:
-                    saved = db.execute('SELECT payload FROM super_remote_state WHERE id=?',(row['id'],)).fetchone()
-                payload = saved['payload'] if saved and saved['payload'] else row['report']
-                result = await maintainer_client.request('/jobs',{'id':row['id'],'owner':row['owner_id'],'report':payload})
-                if result.get('ok') and result.get('id') == row['id']:
-                    with self.reports.db() as db: db.execute("UPDATE super_remote_outbox SET status='accepted' WHERE id=?",(row['id'],))
+                        saved = db.execute('SELECT payload FROM super_remote_state WHERE id=?',(row['id'],)).fetchone()
+                    payload = saved['payload'] if saved and saved['payload'] else row['report']
+                    try:
+                        result = await maintainer_client.request('/jobs',{'id':row['id'],'owner':row['owner_id'],'report':payload})
+                        if result.get('ok') and result.get('id') == row['id']:
+                            with self.reports.db() as db: db.execute("UPDATE super_remote_outbox SET status='accepted' WHERE id=?",(row['id'],))
+                    except maintainer_client.MaintainerError as exc:
+                        if exc.permanent:
+                            self.reject_remote(row['id'], exc.user_message)
+                            logging.getLogger(__name__).warning('VERITAS_REMOTE_REJECTED id=%s code=%s http=%s',row['id'],exc.code,exc.status)
+                        else:
+                            logging.getLogger(__name__).warning('Maintainer dispatch retry: HTTP %s',exc.status)
+                    except Exception as exc:
+                        logging.getLogger(__name__).warning('Maintainer dispatch retry: %s',type(exc).__name__)
             with self.reports.db() as db:
                 active = db.execute("SELECT i.* FROM super_remote_outbox o JOIN super_incidents i ON i.id=o.id "
                                     "WHERE o.status='accepted' ORDER BY i.id LIMIT 5").fetchall()
