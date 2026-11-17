@@ -8421,6 +8421,8 @@ def _autobook_candidate_for_lang ( lang,max_pages=8 ) :
         url='https://gutendex.com/books?'+q
         try:
             data=_autobook_json ( url)
+        except TimeoutError:
+            raise
         except Exception:
             if page!=1:
                 page=1; _autobook_state_set ( 'page:'+lang,1)
@@ -8458,7 +8460,11 @@ def _autobook_candidate_for_lang ( lang,max_pages=8 ) :
 
 async def autobook_import_one ( ctx,lang=None ) :
     lang=lang if lang in AUTOBOOK_LANGS else AUTOBOOK_LANGS[0]
-    candidate=await asyncio.to_thread ( _autobook_candidate_for_lang,lang)
+    try:
+        candidate=await asyncio.to_thread ( _autobook_candidate_for_lang,lang)
+    except TimeoutError:
+        log.warning ( 'AUTOBOOK catalog timeout lang=%s',lang)
+        return ('failed','AUTOBOOK_CATALOG_TIMEOUT')
     if not candidate:
         return ('empty',None)
     item,lang,ext,mime,url=candidate; sid=str ( item['id'] ) ; title=str ( item.get ( 'title') or 'Nomsiz kitob' ) .strip (  ) [:250]
