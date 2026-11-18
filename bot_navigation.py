@@ -24,6 +24,7 @@ def cancel_input(context, uid, state):
         bridge.chat.close(uid)
         bridge.reports.cancel(uid)
     context.user_data.pop('lingua_setup', None)
+    context.user_data.pop('lingua_waiting', None)
 
 
 def section(kind):
