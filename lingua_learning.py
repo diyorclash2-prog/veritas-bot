@@ -264,6 +264,7 @@ def exercise(row):
 
 class Learning:
     def __init__(self, path, website, cancel, owners=()):
+        self.shared = None
         self.store, self.website, self.cancel = LearningStore(path), website, cancel
         self.owner = min(owners) if owners else None
         self.pending = {}
@@ -331,12 +332,17 @@ class Learning:
         text = ('🌍 VERITAS LINGUA\n\nTil juftligi, daraja va maqsadni tanlang. So‘zlardan javob tuzing. '
                 'AI yangi mashqlar va javob izohlarini tayyorlaydi. Natijalar serverda saqlanadi.\n')
         for p in profiles:
-            text += f"\n{'▶️ ' if p['active'] else ''}{LANGS[p['source']]} → {LANGS[p['target']]} · {p['level']}\n{GOALS[p['goal']]} · {p['xp']} XP · {p['coins']} tanga · Mashq bosqichi {p['tier']+1}/6\n"
+            text += f"\n{'▶️ ' if p['active'] else ''}{LANGS[p['source']]} → {LANGS[p['target']]} · {p['level']}\n{GOALS[p['goal']]} · {p['xp']} XP · Mashq bosqichi {p['tier']+1}/6\n"
         text += '\n3 ta ketma-ket to‘g‘ri javobdan keyin mashqlar qiyinlashadi; 2 ta xatodan keyin yengillashadi.'
-        text += '\nTelegram mashqlari va saytdagi akkaunt hozir alohida hisoblanadi.'
+        if self.shared:
+            text += '\n'+await self.shared.summary(update.effective_user)
+        else:
+            text += f"\n🪙 {sum(p['coins'] for p in profiles)} tanga"
         kb = [[Button('📚 Mashqni boshlash / davom etish', callback_data='lingua:practice')],
               [Button('⚙️ Tillar, daraja va maqsad', callback_data='lingua:setup')]]
-        if self.website:
+        if self.shared:
+            kb.append([Button('🌐 Lingua sayti · mening akkauntim', callback_data='veritas_site')])
+        elif self.website:
             kb.append([Button('🌐 Lingua saytini ochish', url=self.website)])
         kb.append([Button('⬅️ Veritas', callback_data='home')])
         return await self.show(update, text, Markup(kb))
@@ -409,7 +415,10 @@ class Learning:
                         await self.show(update,'📚 Shu bosqichdagi tayyor mashqlar bajarildi. AI xizmati yoki so‘rov limiti '
                                         'sabab yangi to‘plam hozir mavjud emas. Birozdan so‘ng tekshiring yoki boshqa til juftligini tanlang.',self.retry_menu())
             elif action == 'a' and len(parts) == 5 and parts[3].isdigit():
-                text, markup = exercise(self.store.action(uid,parts[2],int(parts[3]),parts[4]))
+                result = self.store.action(uid,parts[2],int(parts[3]),parts[4])
+                text, markup = exercise(result)
+                if self.shared and result['status']=='done':
+                    text += '\n'+await self.shared.summary(update.effective_user)
                 await self.show(update,text,markup)
             else:
                 raise ValueError('Bu tugma eskirgan. /lingua orqali qayta oching.')
@@ -428,6 +437,12 @@ def register_learning(app, path, namespace):
     from lingua_bot_bridge import STATE_KEY
     bridge = app.bot_data.get(STATE_KEY)
     learning = Learning(path, bridge.config.url if bridge else '', lambda ctx,uid: cancel_input(ctx,uid,namespace['STATE']),namespace.get('SUPER_OWNERS',()))
+    import os
+    if all(os.getenv(key) for key in ('VERITAS_ACCOUNT_KEY','VERITAS_BOT_WALLET_KEY','VL_PUBLIC_URL','GAMES_SERVER_URL')):
+        from shared_account import SharedAccount
+        learning.shared = SharedAccount(learning.store)
+        learning.shared.register(app)
+        logging.info('Veritas shared account and wallet handlers registered')
     app.bot_data['veritas_lingua_learning'] = learning
     if bridge:
         bridge.learning = learning

@@ -21,7 +21,7 @@ def load_autobook():
     }
     assert set(definitions) == names
     namespace = {'asyncio': asyncio, 'json': json, 'urllib': urllib,
-                 'AUTOBOOK_LANGS': ['en'], 'AUTOBOOK_ENABLED': True,
+                 'book_catalog': Mock(candidate=Mock(side_effect=TimeoutError)), 'AUTOBOOK_LANGS': ['en'], 'AUTOBOOK_ENABLED': True,
                  'AUTOBOOK_PER_RUN': 1, 'AUTOBOOK_LOCK': asyncio.Lock(),
                  'log': Mock(), 'one': Mock(return_value=None),
                  'execute': Mock(), 'now': Mock(return_value=10000)}
@@ -53,6 +53,7 @@ class AutobookTimeoutTests(unittest.IsolatedAsyncioTestCase):
         with patch.object(urllib.request, 'urlopen', side_effect=TimeoutError) as request:
             stats = await self.ns['autobook_run'](Mock(), limit=1)
         self.assertEqual(stats['failed'], 1)
+        self.ns['book_catalog'].candidate.assert_called_once()
         self.assertEqual(stats['empty'], 0)
         self.assertEqual(request.call_count, 1)
         self.assertFalse(self.ns['AUTOBOOK_LOCK'].locked())

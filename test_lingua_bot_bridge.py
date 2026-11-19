@@ -56,9 +56,9 @@ class ConfigurationTests(unittest.TestCase):
                                      'VL_LINGUA_AD_TZ': 'Asia/Tashkent', 'VL_LINGUA_ADS_ENABLED': '1'}, clear=True):
             self.assertEqual(Config.from_env(), Config('https://example.org', '20:30', 'Asia/Tashkent', True))
 
-    def test_advertisement_is_honest_preview(self):
-        self.assertIn('sinov versiyasi', ad_text())
-        self.assertIn('AI va SMS hali ulanmagan', ad_text())
+    def test_advertisement_uses_current_account(self):
+        self.assertIn('profilingizga kiring', ad_text())
+        self.assertNotIn('shu brauzerda', ad_text())
         self.assertLess(len(ad_text()), 4096)
 
     def test_channel_compatible_url_button(self):
@@ -403,7 +403,7 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.bridge.store.settings()['hour'], '20:30')
         self.assertEqual(self.bridge.store.settings()['tz'], 'Asia/Tashkent')
         reply = await self.admin('preview')
-        self.assertIn('sinov versiyasi', reply.call_args.args[0])
+        self.assertIn('profilingizga kiring', reply.call_args.args[0])
         self.bot.send_message.assert_not_awaited()
 
     async def test_add_remove_and_reenable_channel(self):

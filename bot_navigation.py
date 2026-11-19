@@ -8,7 +8,7 @@ KEYS = {
     '🛡 Veritas': 'home', '🎓 O‘quv • Talaba': 'school',
     '📝 Test': 'tests', '❓ Savol-javob': 'qa', '❓ Savol-javoblar': 'qa',
     '🧩 Rebus': 'rebus', '📣 Avtopost': 'post', '📢 Avtopost': 'post',
-    '❓ V10 Yordam': 'help', '🌍 Til o‘rganish': 'lingua',
+    '❓ V10 Yordam': 'help', '❓ Yordam':'help', '🌍 Til o‘rganish': 'lingua',
     '🌍 VERITAS LINGUA': 'lingua', '🏠 Bosh menyu': 'home',
     '❌ Bekor qilish': 'home', '❌ Отмена': 'home', '❌ Cancel': 'home',
 }
@@ -19,6 +19,7 @@ MENUS = {'home', 'root:choose', 'root:v8', 'root:v9', 'library', 'hadith',
 
 def cancel_input(context, uid, state):
     state.pop(uid, None)
+    context.user_data.pop('command_panel',None)
     bridge = context.application.bot_data.get('veritas_super_settings_v1')
     if bridge:
         bridge.chat.close(uid)

@@ -239,7 +239,9 @@ class BackgroundTests(Fixture,unittest.IsolatedAsyncioTestCase):
             gate.set();await asyncio.gather(*tasks)
         self.assertEqual(len(calls),1)
         self.assertEqual(calls[0]['owner'],999)
-        self.assertNotIn('101',json.dumps(calls[0]))
+        self.assertEqual(set(calls[0]), {'owner','id','payload'})
+        self.assertRegex(calls[0]['id'], r'^[0-9a-f]{32}$')
+        self.assertNotIn('101', json.dumps(calls[0]['payload']))
 
     async def test_navigation_cancels_late_notification_and_network_retains_job(self):
         learning=Learning(self.path,'',lambda *a:None,owners={999})

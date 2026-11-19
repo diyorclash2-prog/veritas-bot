@@ -66,14 +66,11 @@ class Config:
 
 
 def ad_text():
-    # The current destination is a preview. Do not advertise live AI, SMS or prizes.
     return ('🌍 VERITAS LINGUA — til o‘rganishni o‘yinga aylantiring!\n\n'
             '📚 10 ta til uchun mashqlar\n'
             '🧩 So‘zlardan javob tuzish va til o‘yinlari\n'
             '🐰 Vito bilan London sarguzashti\n\n'
-            'Hozir sinov versiyasi: natijalar shu brauzerda saqlanadi. '
-            'Jonli AI va SMS hali ulanmagan.\n\n'
-            '👇 Saytni ochib sinab ko‘ring:')
+            '👤 Telegram orqali profilingizga kiring va avvalgi natijangizdan davom eting.')
 
 
 def keyboard(url):

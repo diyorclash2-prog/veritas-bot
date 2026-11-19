@@ -1,3 +1,15 @@
+19 noyabr 2026 · Veritas bot yangilanishi
+
+292 ta avtomatik sinov o‘tdi. Bu tekshiruv vaqtinchalik SQLite bazasi va Telegram sinov javoblaridan foydalandi.
+ /menu — buyruq tugmalari. /ai — shaxsiy kabinet yoki guruh AI’si. /qoidalar — guruh odobi.
+ Guruh AI bepul. Shaxsiy AI — bir martalik 100 Stars krediti. Avval olingan muddatli obuna tugaguncha amal qiladi.
+ PNG/WebP, TGS va WebM dekodlash, takroriy xabar, ikki guruh xotirasi va parallel xarid alohida tekshirildi.
+ Bot guruh xabarlarini ko‘rishi va a’zolarni bloklashi uchun shu guruhda tegishli administrator huquqi kerak.
+ AI provayderi bilan aloqa uzilganda noaniq media uchun bot jazo yozmaydi.
+ Haqiqiy to‘lov, haqiqiy a’zoni bloklash va jonli botni yangilash bu sinovga kirmaydi.
+
+Avvalgi versiya bo‘yicha tekshiruv
+
 VERITAS BOT — LINGUA INTEGRATSIYA TEKSHIRUVI
 
 Holat: mahalliy ishchi versiya. GitHub main o‘zgarmadi, Railway deploy qilinmadi.
