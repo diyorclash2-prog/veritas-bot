@@ -23,7 +23,7 @@ from telegram.ext import (ApplicationHandlerStop, ChatMemberHandler, CommandHand
                           MessageHandler, filters)
 
 LOG = logging.getLogger('veritas.lingua')
-DEFAULT_URL = 'https://veritas-lingua-telefon-20261113.grittysardine4.chatgpt.site/'
+DEFAULT_URL = 'https://veritas-lingua-ai-production.up.railway.app/'
 STATE_KEY = 'veritas_lingua_bridge_v1'
 JOB_NAME = 'veritas-lingua-daily-channels-v1'
 
@@ -73,8 +73,10 @@ def ad_text():
             '👤 Telegram orqali profilingizga kiring va avvalgi natijangizdan davom eting.')
 
 
-def keyboard(url):
-    # Ordinary URL buttons work in channels as well as private/group chats.
+def keyboard(url, bot=None):
+    username = getattr(bot, 'username', None)
+    if isinstance(username,str) and re.fullmatch(r'[A-Za-z0-9_]{5,32}',username):
+        url=f'https://t.me/{username}?start=lingua_login'
     return InlineKeyboardMarkup([[InlineKeyboardButton('🌍 VERITAS LINGUA’ni ochish', url=url)]])
 
 
@@ -284,7 +286,7 @@ class LinguaBridge:
             return await self.learning.launcher(update, context)
         message = update.effective_message
         if message and self.config.url:
-            await message.reply_text(ad_text(), reply_markup=keyboard(self.config.url),
+            await message.reply_text(ad_text(), reply_markup=keyboard(self.config.url,context.bot),
                                      parse_mode=None, disable_web_page_preview=True)
         elif message:
             await message.reply_text('VERITAS LINGUA manzili hali sozlanmagan.')
@@ -338,7 +340,7 @@ class LinguaBridge:
             elif action == 'preview' and len(args) == 1:
                 if not self.config.url:
                     raise ValueError('VL_PUBLIC_URL manzili sozlanmagan')
-                await msg.reply_text(ad_text(), reply_markup=keyboard(self.config.url),
+                await msg.reply_text(ad_text(), reply_markup=keyboard(self.config.url,context.bot),
                                      parse_mode=None, disable_web_page_preview=True)
                 raise ApplicationHandlerStop
             elif action == 'add' and len(args) == 2:
@@ -432,7 +434,7 @@ class LinguaBridge:
                     continue
                 try:
                     message = await context.bot.send_message(
-                        chat_id=chat_id, text=ad_text(), reply_markup=keyboard(self.config.url),
+                        chat_id=chat_id, text=ad_text(), reply_markup=keyboard(self.config.url,context.bot),
                         parse_mode=None, disable_web_page_preview=True)
                 except RetryAfter as exc:
                     retry_at = self.retry_stamp(exc)

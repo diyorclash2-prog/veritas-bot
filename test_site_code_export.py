@@ -27,7 +27,7 @@ class SiteCodeExportTests(unittest.IsolatedAsyncioTestCase):
         http.return_value.__aenter__.return_value.post = AsyncMock(return_value=NS(
             raise_for_status=lambda: None, status_code=200, json=lambda: {'code':'ABCDEFGHJKLM'}))
         with patch('shared_account.httpx.AsyncClient', http), self.assertRaises(ApplicationHandlerStop):
-            await self.bridge.website(self.update,self.ctx)
+            await self.bridge.browser_code(self.update,self.ctx)
         call = self.bot.send_message.await_args
         self.assertEqual(call.args[1],self.msg.text)
         rows = call.kwargs['reply_markup'].inline_keyboard
@@ -52,3 +52,28 @@ class SiteCodeExportTests(unittest.IsolatedAsyncioTestCase):
         with self.assertRaises(ApplicationHandlerStop):
             await self.bridge.save_login_code(self.update,self.ctx)
         self.bot.send_document.assert_not_awaited()
+
+class SiteEntryTests(unittest.IsolatedAsyncioTestCase):
+    async def test_open_without_code_and_group_users_never_share_a_login(self):
+        bridge=SharedAccount.__new__(SharedAccount)
+        bridge.site='https://site.example'
+        for chat_type in ('private','supergroup'):
+            message=NS(reply_text=AsyncMock())
+            update=NS(effective_chat=NS(type=chat_type),effective_message=message,callback_query=None)
+            ctx=NS(bot=NS(username='TestVeritasBot'))
+            with self.assertRaises(ApplicationHandlerStop):
+                await bridge.website(update,ctx)
+            button=message.reply_text.await_args.kwargs['reply_markup'].inline_keyboard[0][0]
+            if chat_type=='private':
+                self.assertEqual(button.web_app.url,bridge.site)
+            else:
+                self.assertEqual(button.url,'https://t.me/TestVeritasBot?start=lingua_login')
+
+    async def test_group_invitation_only_on_last_part_of_long_answer(self):
+        import bot
+        msg=NS(reply_text=AsyncMock())
+        await bot.send_chat_answer(msg,NS(username='VeritasTestBot'),'A'*8300)
+        calls=msg.reply_text.await_args_list
+        self.assertEqual([len(c.args[0]) for c in calls],[4000,4000,300])
+        self.assertTrue(all(c.kwargs['reply_markup'] is None for c in calls[:-1]))
+        self.assertIn('lingua_login',calls[-1].kwargs['reply_markup'].inline_keyboard[0][0].url)

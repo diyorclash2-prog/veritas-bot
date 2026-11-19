@@ -175,7 +175,7 @@ async def react(ns,msg,user,description):
             answer=await asyncio.to_thread(ns['_openai_response_sync'],prompt)
     except Exception:
         answer=None
-    await msg.reply_text((answer or description)[:1500])
+    await ns['send_chat_answer'](msg, msg.get_bot(), (answer or description)[:1500], private=msg.chat.type=='private')
 
 
 def register(app, ns):

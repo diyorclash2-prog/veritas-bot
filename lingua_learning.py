@@ -14,7 +14,7 @@ import secrets
 import sqlite3
 from contextlib import contextmanager
 
-from telegram import InlineKeyboardButton as Button, InlineKeyboardMarkup as Markup
+from telegram import InlineKeyboardButton as Button, InlineKeyboardMarkup as Markup, WebAppInfo
 from telegram.ext import ApplicationHandlerStop, CallbackQueryHandler
 from lingua_ai import normalized, question as validate_question, profile as validate_profile
 
@@ -341,7 +341,7 @@ class Learning:
         kb = [[Button('📚 Mashqni boshlash / davom etish', callback_data='lingua:practice')],
               [Button('⚙️ Tillar, daraja va maqsad', callback_data='lingua:setup')]]
         if self.shared:
-            kb.append([Button('🌐 Lingua sayti · mening akkauntim', callback_data='veritas_site')])
+            kb.append([Button('🌐 Veritas saytiga kirish', web_app=WebAppInfo(self.shared.site))])
         elif self.website:
             kb.append([Button('🌐 Lingua saytini ochish', url=self.website)])
         kb.append([Button('⬅️ Veritas', callback_data='home')])

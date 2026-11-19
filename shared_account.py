@@ -15,6 +15,16 @@ from telegram.ext import ApplicationHandlerStop, CallbackQueryHandler, CommandHa
 LOG = logging.getLogger(__name__)
 
 
+def site_invite(bot, *, private=False, site=None):
+    url = site or os.getenv('VL_PUBLIC_URL') or 'https://veritas-lingua-ai-production.up.railway.app'
+    if private:
+        button = InlineKeyboardButton('🌐 Veritas saytiga kirish', web_app=WebAppInfo(url))
+    else:
+        username = getattr(bot, 'username', None) or 'Veritas71_Bot'
+        button = InlineKeyboardButton('🌐 Veritas saytiga kirish', url=f'https://t.me/{username}?start=lingua_login')
+    return InlineKeyboardMarkup([[button]])
+
+
 class SharedAccount:
     def __init__(self, store):
         self.store = store
@@ -67,7 +77,16 @@ class SharedAccount:
             [InlineKeyboardButton('O‘ynash',web_app=WebAppInfo(self.games))]]))
         raise ApplicationHandlerStop
 
-    async def website(self, update, context, phone=''):
+    async def website(self, update, context):
+        if update.callback_query:
+            await update.callback_query.answer()
+        private = update.effective_chat.type == 'private'
+        await update.effective_message.reply_text(
+            'Veritas saytiga xush kelibsiz!',
+            reply_markup=site_invite(context.bot, private=private, site=self.site))
+        raise ApplicationHandlerStop
+
+    async def browser_code(self, update, context, phone=''):
         user = update.effective_user
         if update.callback_query:
             await update.callback_query.answer()
@@ -149,13 +168,14 @@ class SharedAccount:
         if msg.contact.user_id != update.effective_user.id or msg.forward_origin:
             await msg.reply_text('Tugma orqali o‘z raqamingizni yuboring.')
             raise ApplicationHandlerStop
-        await self.website(update,context,msg.contact.phone_number)
+        await self.browser_code(update,context,msg.contact.phone_number)
 
     def register(self, app):
         private = filters.ChatType.PRIVATE
         app.add_handler(CommandHandler('start',self.website,filters=private & filters.Regex(r'^/start(?:@\w+)?\s+lingua_login$')),group=-401)
         app.add_handler(CommandHandler('start',self.launch_games,filters=private & filters.Regex(r'^/start(?:@\w+)?\s+veritas_games$')),group=-401)
-        app.add_handler(CommandHandler('sayt',self.website,filters=private),group=-401)
+        app.add_handler(CommandHandler('start',self.browser_code,filters=private & filters.Regex(r'^/start(?:@\w+)?\s+lingua_code$')),group=-401)
+        app.add_handler(CommandHandler('sayt',self.website),group=-401)
         app.add_handler(CommandHandler(['tanga','balans'],self.wallet,filters=private),group=-401)
         app.add_handler(MessageHandler(private & filters.CONTACT,self.contact),group=-401)
         app.add_handler(CallbackQueryHandler(self.save_login_code,pattern=r'^veritas_login_save$'),group=-401)

@@ -3697,8 +3697,7 @@ async def private_ai_media_reply ( update,ctx ) :
         mime= ( getattr ( image_doc,"mime_type",None) or "image/jpeg")
         prompt= ( msg.caption or "" ) .strip ( ) or "Bu rasmni ko‘rib, undagi ma’lumotni tushuntirib bering."
         answer=await asyncio.to_thread ( _openai_image_response_sync,raw,mime,prompt)
-        for i in range ( 0,len ( answer ) ,4000 ) :
-            await msg.reply_text ( answer[i:i+4000])
+        await send_chat_answer(msg,ctx.bot,answer,private=True)
     except Exception as e:
         log.exception ( "Private AI image error: %s",e)
         await msg.reply_text ( "⚠️ Rasmni tahlil qilishda xatolik bo‘ldi.")
@@ -4302,6 +4301,16 @@ def ai_cabinet_name_context ( uid ) :
         "Boshqa foydalanuvchining nomi bilan adashtirmang."
     )
 
+from shared_account import site_invite
+
+
+async def send_chat_answer(msg, bot, answer, *, private=False):
+    for offset in range(0, len(answer), 4000):
+        last = offset + 4000 >= len(answer)
+        await msg.reply_text(answer[offset:offset+4000],
+                             reply_markup=site_invite(bot, private=private) if last else None)
+
+
 async def group_ai_reply ( update,ctx ) :
     msg=update.effective_message; chat=update.effective_chat; u=update.effective_user
     if not msg or not u or chat.type not in ("group","supergroup") : return False
@@ -4326,7 +4335,7 @@ async def group_ai_reply ( update,ctx ) :
         prompt=VERITAS_CHEEKY_STYLE + (f"Oldingi Veritas xabari:\n{previous[:2500]}\n\n" if previous else "") + f"Foydalanuvchi savoli:\n{question[:4000]}" + ai_actor_context ( u ) + ai_cabinet_name_context ( u.id)
         answer=await asyncio.to_thread ( _openai_response_sync,prompt)
         if not answer: answer="Hozir javob hosil bo‘lmadi. Qayta urinib ko‘ring."
-        for i in range ( 0,len ( answer ) ,4000 ) : await msg.reply_text ( answer[i:i+4000])
+        await send_chat_answer(msg, ctx.bot, answer)
         await greenlezard_maybe_send ( ctx,chat.id,question,answer,
                                      is_group=True,reply_to_message_id=msg.message_id,
                                      thread_id=getattr ( msg,"message_thread_id",None ) )
@@ -4359,6 +4368,7 @@ async def private_ai_reply ( update,ctx ) :
     ensure_user ( u )
     if not ai_user_active ( u.id ) :
         kb=InlineKeyboardMarkup ( [[InlineKeyboardButton ( "💎 100 ⭐ · muddatsiz",callback_data="aipactivate100" ) ],[InlineKeyboardButton ( "⭐ Hisobni to‘ldirish",callback_data="wallet" ) ]] )
+        kb=InlineKeyboardMarkup([*kb.inline_keyboard,*site_invite(ctx.bot,private=True).inline_keyboard])
         return await msg.reply_text ( "🔒 Shaxsiy Veritas AI faqat AI Premium a’zolar uchun.\n\n💎 100 ⭐ · muddatsiz",reply_markup=kb )
     if not ai_rate_ok ( "private",u.id,4 ) : return await msg.reply_text ( "⏳ 4 soniyadan keyin yana yozing." )
     if not OPENAI_API_KEY: return await msg.reply_text ( "⚠️ Veritas AI kaliti sozlanmagan." )
@@ -4370,7 +4380,7 @@ async def private_ai_reply ( update,ctx ) :
         prompt=VERITAS_CHEEKY_STYLE + (f"Oldingi Veritas javobi:\n{previous}\n\n" if previous else "" ) +f"Foydalanuvchi:\n{text[:4000]}"+ai_actor_context ( u )
         answer=await asyncio.to_thread ( _openai_response_sync,prompt )
         if not answer: answer="Hozir javob hosil bo‘lmadi. Qayta urinib ko‘ring."
-        for i in range ( 0,len ( answer ),4000 ): await msg.reply_text ( answer[i:i+4000] )
+        await send_chat_answer(msg, ctx.bot, answer, private=True)
         await greenlezard_maybe_send ( ctx,chat.id,text,answer,is_group=False)
     except Exception:
         log.exception ( "Private Veritas AI error" )
@@ -5955,7 +5965,7 @@ async def mazgila_maybe_reply ( update,ctx ) :
                 f'{name}, gap jiddiy boshlandi-yu, oxiri yana sizga o‘xshab ketdi 😄',
                 f'{name}, Veritas buni o‘qib “davomi ham bormi?” deb qoldi 😏'])
         if ans:
-            await msg.reply_text ( ans[:900])
+            await msg.reply_text ( ans[:900],reply_markup=site_invite(ctx.bot))
             return True
     except Exception:
         log.exception ( 'mazgila AI reply failed')
@@ -7172,7 +7182,7 @@ async def v11_social_reply ( ctx,chat_id,history,thread_id=None ) :
         settings=v11_setting ( chat_id)
         if answer and answer.strip (  ) !='SKIP' and settings['natural_on'] and ai_group_active ( chat_id) and not v11_live ( chat_id ) :
             kwargs={'message_thread_id':thread_id} if thread_id else {}
-            await ctx.bot.send_message ( chat_id,answer[:1200],**kwargs)
+            await ctx.bot.send_message ( chat_id,answer[:1200],reply_markup=site_invite(ctx.bot),**kwargs)
             await greenlezard_maybe_send ( ctx,chat_id,history[-500:],answer,
                                          is_group=True,thread_id=thread_id)
             v11_memory_add ( chat_id,ctx.bot.id,'assistant',answer)
@@ -8060,7 +8070,7 @@ async def veritas_wake_handler ( update,ctx ) :
         V12_CONSUMED[ ( chat.id,msg.message_id ) ]=now ( )
     except Exception:
         pass
-    await msg.reply_text ( "🪶 Labbay, shu yerdaman. Veritas uyg‘oq.")
+    await msg.reply_text ( "🪶 Labbay, shu yerdaman. Veritas uyg‘oq.",reply_markup=site_invite(ctx.bot))
     raise _V11HandlerStop
 
 
